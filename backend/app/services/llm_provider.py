@@ -1,0 +1,671 @@
+"""
+LLM provider abstraction.
+
+Set LLM_PROVIDER=mock|openai|anthropic in your .env (or environment).
+Mock is the default when no provider is configured or the required package
+is missing.
+"""
+import json
+import logging
+import os
+import re
+from abc import ABC, abstractmethod
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+# Try to load .env if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
+# ── Abstract interface ────────────────────────────────────────────────────────
+
+class BaseLLMProvider(ABC):
+    @abstractmethod
+    def summarize(self, text: str, max_words: int = 80) -> str: ...
+
+    @abstractmethod
+    def classify_urgency(self, text: str) -> str: ...
+
+    @abstractmethod
+    def extract_issues(self, text: str) -> list[str]: ...
+
+    @abstractmethod
+    def detect_opponent_activity(self, text: str, opponent_name: str) -> dict: ...
+
+    @abstractmethod
+    def generate_talking_points(
+        self,
+        issue: str,
+        tone: str,
+        context: str = "",
+        campaign_profile: Optional[dict] = None,
+        sources: Optional[list[dict]] = None,
+        opponent_activities: Optional[list[dict]] = None,
+    ) -> dict: ...
+
+    @abstractmethod
+    def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]: ...
+
+
+# ── Shared prompt helpers ─────────────────────────────────────────────────────
+
+_ETHICS_BLOCK = """
+ETHICS CONSTRAINTS (non-negotiable):
+- Ground all claims in the provided sources only. Do not invent statistics or facts not in those sources.
+- Do not defame individuals beyond what the sources directly support.
+- Do not generate content that could constitute voter suppression, harassment, intimidation, impersonation, or psychological manipulation.
+- If evidence for a claim is weak or disputed, say so explicitly in risk_warning.
+- Always cite the specific source titles you used in evidence_notes.
+""".strip()
+
+_TONE_GUIDE = {
+    "calm": "measured, factual, forward-looking — avoid partisan attacks",
+    "aggressive": "direct contrast with opponent's record, call out failures by name, cite evidence",
+    "policy-focused": "detailed, substantive, solution-oriented — lead with the plan",
+    "debate": "crisp contrast, anticipate counterarguments, close with a clear choice",
+    "social": "under 240 characters for social_post, punchy, no jargon",
+}
+
+_TP_JSON_SCHEMA = """{
+  "short_answer": "2-3 sentences, usable at a door",
+  "long_answer": "3-4 paragraphs, usable in an interview or town hall",
+  "debate_answer": "2-3 sentences of sharp contrast without defamation",
+  "social_post": "under 240 characters, platform-neutral",
+  "risk_warning": "blunt warnings about weak evidence or legally risky claims, or null",
+  "evidence_notes": "cite specific source titles and any figures used",
+  "source_titles_used": ["array", "of", "source", "titles"],
+  "source_urls_used": ["array", "of", "source", "urls", "or", "empty"]
+}"""
+
+
+def _build_tp_prompt(
+    issue: str,
+    tone: str,
+    context: str,
+    campaign_profile: Optional[dict],
+    sources: Optional[list[dict]],
+    opponent_activities: Optional[list[dict]],
+) -> str:
+    lines = []
+
+    if campaign_profile:
+        name = campaign_profile.get("candidate_name", "the candidate")
+        office = campaign_profile.get("office") or campaign_profile.get("race") or "local office"
+        district = campaign_profile.get("district") or campaign_profile.get("location") or ""
+        party = campaign_profile.get("party") or ""
+        msg = campaign_profile.get("campaign_message") or ""
+        prios = campaign_profile.get("key_priorities") or []
+        if isinstance(prios, str):
+            try:
+                prios = json.loads(prios)
+            except Exception:
+                prios = []
+        lines.append(f"CANDIDATE: {name}{', ' + party if party else ''}, running for {office}{' in ' + district if district else ''}")
+        if msg:
+            lines.append(f"CORE MESSAGE: {msg}")
+        if prios:
+            lines.append(f"KEY PRIORITIES: {', '.join(prios)}")
+        lines.append("")
+
+    lines.append(f"ISSUE: {issue}")
+    if context:
+        lines.append(f"Issue context: {context}")
+    lines.append("")
+
+    if sources:
+        lines.append("RELEVANT SOURCES:")
+        for i, s in enumerate(sources, 1):
+            title = s.get("title", "Untitled")
+            summary = s.get("summary") or s.get("raw_text", "")[:200]
+            urgency = s.get("urgency", "")
+            url = s.get("source_url") or ""
+            note = s.get("credibility_note") or ""
+            line = f"{i}. \"{title}\""
+            if summary:
+                line += f" — {summary}"
+            if urgency:
+                line += f" [urgency: {urgency}]"
+            if note:
+                line += f" ⚠ {note}"
+            if url:
+                line += f" ({url})"
+            lines.append(line)
+        lines.append("")
+
+    if opponent_activities:
+        lines.append("OPPONENT ACTIVITY:")
+        for act in opponent_activities:
+            if act.get("attack"):
+                lines.append(f"  ATTACK: \"{act['attack']}\"")
+                if act.get("contradiction_note"):
+                    lines.append(f"  Fact-check: {act['contradiction_note']}")
+            if act.get("claim"):
+                lines.append(f"  CLAIM: \"{act['claim']}\"")
+                if act.get("contradiction_note"):
+                    lines.append(f"  Context: {act['contradiction_note']}")
+        lines.append("")
+
+    tone_desc = _TONE_GUIDE.get(tone, "measured and factual")
+    lines.append(f"REQUESTED TONE: {tone} — {tone_desc}")
+    lines.append("")
+    lines.append(_ETHICS_BLOCK)
+    lines.append("")
+    lines.append(f"Respond ONLY with a valid JSON object matching this schema:\n{_TP_JSON_SCHEMA}")
+
+    return "\n".join(lines)
+
+
+def _parse_json_response(raw: str) -> dict:
+    """Extract and parse JSON from an LLM response that may have markdown fences."""
+    # Strip markdown code fences
+    text = re.sub(r"```(?:json)?\s*", "", raw).strip().strip("`").strip()
+    # Find the first { ... } block
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    # Last resort: try parsing the whole thing
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _default_tp_result(issue: str) -> dict:
+    return {
+        "short_answer": f"We need evidence-based, community-centered solutions on {issue}.",
+        "long_answer": f"This is an important issue for our community. My approach is to gather facts, consult residents, and pursue solutions grounded in evidence.",
+        "debate_answer": f"On {issue}, I focus on facts and solutions. I'd encourage voters to compare each candidate's specific platform.",
+        "social_post": f"Every issue in our district deserves a real answer. I'm committed to evidence-based leadership.",
+        "risk_warning": None,
+        "evidence_notes": "Gather local data sources and resident testimony to strengthen messaging on this topic.",
+        "source_titles_used": [],
+        "source_urls_used": [],
+    }
+
+
+# ── Mock provider ─────────────────────────────────────────────────────────────
+
+_STATIC_TALKING_POINTS: dict[str, dict] = {
+    "Housing & Affordability": {
+        "short_answer": (
+            "Rents in our district are up 34% since 2021. Families and seniors are being forced out. "
+            "Roy Harmon has blocked every affordable housing bill that came before the council. "
+            "I will fight for rental stabilization, first-time homebuyer grants, and inclusionary zoning."
+        ),
+        "long_answer": (
+            "The housing crisis in District 7 is not an accident — it's the result of deliberate inaction. "
+            "Median rent has risen 34% since 2021, from $1,240 to $1,662 per month, while wages have grown only 9%. "
+            "Councilman Harmon voted against the Affordable Housing Protection Act in both 2023 and 2024.\n\n"
+            "My plan: (1) Rental stabilization — cap annual rent increases at CPI plus 3% for buildings over 10 units. "
+            "(2) Inclusionary zoning — require 15% affordable units in any new development over 20 units receiving city permits. "
+            "(3) First-time homebuyer fund — $2M annual allocation for down-payment assistance for District 7 residents earning under 120% AMI. "
+            "An independent analysis puts the cost at $8.2M over five years, partially offset by federal housing grants."
+        ),
+        "debate_answer": (
+            "My opponent says the market will solve our housing crisis. It has had four years. Rents are up 34%. "
+            "He voted against housing protection bills — twice. I have a fully-costed, independently verified plan. Roy Harmon does not."
+        ),
+        "social_post": (
+            "Rents in District 7 are up 34% since 2021. Harmon blocked 2 affordable housing bills and calls it 'the market working.' "
+            "I call it a failure of leadership. I have a plan. #LakeviewDistrict7"
+        ),
+        "risk_warning": (
+            "Always cite the Lakeview Housing Authority report (2026) when using the 34% figure. "
+            "Do not promise specific rent reduction percentages. The $8.2M cost estimate should always be cited as 'independent analysis.'"
+        ),
+        "evidence_notes": (
+            "Sources: Lakeview Housing Authority Rent Report 2026; City Council voting records 2023-2024; "
+            "Independent cost analysis by Midwest Policy Group (April 2026)."
+        ),
+        "source_titles_used": [
+            "Rents in District 7 up 34% since 2021, new data shows",
+            "Harmon on housing: 'The market will fix it'",
+            "Harmon op-ed: 'Chen's affordable housing plan would cost taxpayers $40 million'",
+        ],
+        "source_urls_used": [
+            "https://lakeviewtribune.example.com/rent-data-2026",
+            "https://wlkv.example.com/harmon-interview-april",
+            "https://lakeviewtribune.example.com/harmon-oped-housing",
+        ],
+    },
+    "Public Safety": {
+        "short_answer": (
+            "Public safety means the whole district — not just the numbers that look good in a press release. "
+            "Downtown crime is down, but vehicle break-ins in south District 7 are up 12%. "
+            "I support our police and will add a mental health co-responder program."
+        ),
+        "long_answer": (
+            "Roy Harmon is claiming District 7 is 'safer than ever.' The city's own data tells a more complicated story. "
+            "Downtown incidents fell 8% — that's real. But in south District 7, vehicle break-ins rose 12% in the same period.\n\n"
+            "Harmon's campaign mailer says I want to 'defund the police.' That is false. "
+            "My platform calls for a mental health co-responder program — trained crisis counselors who ride alongside officers "
+            "for non-violent calls. This is already working in Denver and Austin. "
+            "It reduces officer burnout and costs less than a full police response."
+        ),
+        "debate_answer": (
+            "My opponent sent a mailer saying I want to defund the police. That is a lie, and he knows it. "
+            "My platform proposes a mental health co-responder program that police unions in other cities have praised. "
+            "South District 7 is not safer than ever. The city's own data says so."
+        ),
+        "social_post": (
+            "Harmon says I want to 'defund the police.' That's false — my platform is public. "
+            "I support officers AND a mental health co-responder program. Read the plan. #District7"
+        ),
+        "risk_warning": (
+            "Harmon's 'defund the police' attack is the highest-urgency narrative to counter. "
+            "Respond quickly. Do not say 'I never said that' without immediately stating what you DID say."
+        ),
+        "evidence_notes": (
+            "Sources: Lakeview PD Annual Crime Report 2025; Harmon campaign mailer (April 2026); "
+            "Chen campaign platform (published); Denver STAR program results 2023."
+        ),
+        "source_titles_used": [
+            "City announces downtown crime fell 8% in 2025 annual report",
+            "Harmon campaign mailer claims Chen 'wants to defund the police'",
+        ],
+        "source_urls_used": [
+            "https://lakeview.gov/press/crime-stats-2025",
+        ],
+    },
+    "Education & Schools": {
+        "short_answer": (
+            "East Lakeview Elementary is at 130% capacity with 38 kids per classroom and no art or music programs. "
+            "Roy Harmon was invited to two parent coalition forums and skipped both. "
+            "I will show up, and I will fight for a new school facility bond."
+        ),
+        "long_answer": (
+            "Our kids are sitting in 38-student classrooms at a school built for 800 that now holds over 1,000. "
+            "Art, music, and enrichment programs have been cut. Teachers are burning out.\n\n"
+            "The Lakeview School Board has been asking City Council for support for two years. "
+            "The District 7 representative — Roy Harmon — has not attended either of the parent coalition meetings. "
+            "His office cited 'scheduling conflicts.' Both times.\n\n"
+            "I will: (1) Appear at every school board meeting involving District 7. (2) Champion the new facility bond. "
+            "(3) Pursue state and federal grants to restore enrichment programs in the interim."
+        ),
+        "debate_answer": (
+            "Roy Harmon was invited twice to meet with the parents of East Lakeview Elementary. He didn't go — either time. "
+            "Meanwhile, 1,000 kids are crammed into a school built for 800. "
+            "Our kids need a council member who actually shows up."
+        ),
+        "social_post": (
+            "East Lakeview Elementary: 130% capacity. 38 kids per classroom. No art. No music. "
+            "Harmon was invited to TWO parent forums. Didn't show. #District7"
+        ),
+        "risk_warning": (
+            "Do not imply Harmon is legally responsible for the school's capacity — school funding is complex. "
+            "Frame the attendance failure as an accountability issue, not a legal one."
+        ),
+        "evidence_notes": (
+            "Sources: Lakeview Gazette school overcrowding report (April 2026); "
+            "School board meeting minutes (March & April 2026); District 7 Parent Coalition newsletter."
+        ),
+        "source_titles_used": [
+            "East Lakeview Elementary at 130% capacity, parents demand action",
+            "Harmon skips second consecutive school overcrowding forum",
+        ],
+        "source_urls_used": [
+            "https://lakeviewgazette.example.com/school-overcrowding-2026",
+        ],
+    },
+    "Infrastructure": {
+        "short_answer": (
+            "Pothole complaints are up 42% and $2.1M in road repairs were deferred from last year's budget. "
+            "Seniors and families in Precincts 7A and 7D are most affected. "
+            "I'll fight to restore deferred maintenance funding and establish a 90-day repair guarantee."
+        ),
+        "long_answer": (
+            "Infrastructure is not glamorous, but it matters every single day. "
+            "In District 7, the city deferred $2.1 million in road repairs from the FY2025 budget — and it shows. "
+            "Pothole complaints are up 42%. A resident in 7D reported her bus stop has been broken for six months.\n\n"
+            "My platform: restore the $2.1M in deferred maintenance, establish a 90-day maximum repair response time, "
+            "and audit the city's infrastructure prioritization formula to ensure lower-income precincts are not deprioritized."
+        ),
+        "debate_answer": (
+            "Two terms. Eight years. And we have 42% more pothole complaints, $2.1 million in deferred repairs, "
+            "and a bus stop in Precinct 7D broken for six months. "
+            "I will restore the deferred maintenance funding and establish a 90-day repair guarantee."
+        ),
+        "social_post": (
+            "42% more pothole complaints. $2.1M in deferred repairs. A bus stop broken for 6 months. "
+            "Two terms and this is what we have to show. I'll fix this. #District7"
+        ),
+        "risk_warning": (
+            "Avoid implying Harmon personally approved the deferral. Budget decisions involve the full council. "
+            "The 90-day repair guarantee should be framed as a goal, not a legal commitment."
+        ),
+        "evidence_notes": (
+            "Sources: Lakeview Tribune infrastructure report (April 2026); "
+            "City FY2025 Budget Deferral List (public record); 311 complaint data."
+        ),
+        "source_titles_used": [
+            "Pothole complaints in District 7 surge 42% as repairs are deferred",
+        ],
+        "source_urls_used": [
+            "https://lakeviewtribune.example.com/potholes-2026",
+        ],
+    },
+    "Downtown Development": {
+        "short_answer": (
+            "District 7 needs development that benefits current residents — not just developers who write checks to campaigns. "
+            "Harmon's PAC received $15,000 from the Elm & 3rd developer, then he voted to advance the project over community objections."
+        ),
+        "long_answer": (
+            "Economic development is important — but it has to work for the people who already live here. "
+            "The Elm & 3rd mixed-use development has divided the district. "
+            "Campaign finance records show Meridian Development Group gave $15,000 to the Harmon for District 7 PAC "
+            "in October 2025, just three months before Harmon voted to advance the project over community objections.\n\n"
+            "I support development — with community benefit agreements, affordable unit requirements, and transparent process."
+        ),
+        "debate_answer": (
+            "Roy Harmon took $15,000 from the developer behind Elm & 3rd. Three months later, he voted for the project over community objections. "
+            "I support development. I do not support pay-to-play development."
+        ),
+        "social_post": (
+            "Campaign finance records: Developer behind Elm & 3rd gave Harmon's PAC $15,000. "
+            "Three months later: Harmon voted for the project over community objections. #District7"
+        ),
+        "risk_warning": (
+            "Always cite the public campaign finance record when mentioning the $15,000 donation. "
+            "Do not call it a 'bribe' — call it a 'conflict of interest.' Avoid implying illegal conduct without legal evidence."
+        ),
+        "evidence_notes": (
+            "Sources: Lakeview Business Journal (April 2026); "
+            "City campaign finance disclosures (public record); City Council vote log (January 2026)."
+        ),
+        "source_titles_used": [
+            "Developer behind Elm & 3rd gave $15,000 to Harmon PAC before council vote",
+        ],
+        "source_urls_used": [
+            "https://lbj.example.com/harmon-developer-donation",
+        ],
+    },
+}
+
+_URGENCY_KEYWORDS = {
+    "high": ["attack", "defund", "fabricat", "false", "misinform", "cost", "crisis", "urgent", "danger", "misrepresent", "inflat"],
+    "medium": ["concern", "increas", "problem", "controversy", "compet", "oppos", "challeng", "contrad"],
+}
+
+_ISSUE_KEYWORDS = {
+    "Housing & Affordability": ["rent", "housing", "afford", "tenant", "landlord", "evict", "homebuyer", "mortgage", "zoning"],
+    "Public Safety": ["crime", "police", "safety", "break-in", "theft", "patrol", "enforcement", "defund", "officer"],
+    "Education & Schools": ["school", "education", "classroom", "student", "teacher", "overcrowd", "art", "music", "parent"],
+    "Infrastructure": ["pothole", "road", "sidewalk", "infrastructure", "repair", "transit", "bus", "street", "flood"],
+    "Downtown Development": ["development", "developer", "downtown", "project", "zoning", "construction", "gentrification"],
+}
+
+
+class MockLLMProvider(BaseLLMProvider):
+    def summarize(self, text: str, max_words: int = 80) -> str:
+        words = text.split()
+        if len(words) <= max_words:
+            return text.strip()
+        return " ".join(words[:max_words]) + "..."
+
+    def extract_issues(self, text: str) -> list[str]:
+        text_lower = text.lower()
+        matched = []
+        for issue, keywords in _ISSUE_KEYWORDS.items():
+            if any(kw in text_lower for kw in keywords):
+                matched.append(issue)
+        return matched or ["General Campaign"]
+
+    def classify_urgency(self, text: str) -> str:
+        text_lower = text.lower()
+        for kw in _URGENCY_KEYWORDS["high"]:
+            if kw in text_lower:
+                return "high"
+        for kw in _URGENCY_KEYWORDS["medium"]:
+            if kw in text_lower:
+                return "medium"
+        return "low"
+
+    def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
+        result: dict = {"claim": None, "attack": None, "promise": None, "contradiction_note": None, "repeated_theme": None}
+        text_lower = text.lower()
+        if opponent_name.lower() not in text_lower:
+            return result
+        if any(w in text_lower for w in ["claims", "says", "argues", "stated", "announced"]):
+            result["claim"] = self.summarize(text, max_words=30)
+        if any(w in text_lower for w in ["attack", "false", "lie", "defund", "accused"]):
+            result["attack"] = self.summarize(text, max_words=30)
+        if any(w in text_lower for w in ["promises", "pledged", "vowed", "will ensure"]):
+            result["promise"] = self.summarize(text, max_words=20)
+        return result
+
+    def generate_talking_points(
+        self,
+        issue: str,
+        tone: str,
+        context: str = "",
+        campaign_profile: Optional[dict] = None,
+        sources: Optional[list[dict]] = None,
+        opponent_activities: Optional[list[dict]] = None,
+    ) -> dict:
+        pts = _STATIC_TALKING_POINTS.get(issue)
+        if pts:
+            result = dict(pts)
+        else:
+            result = _default_tp_result(issue)
+
+        # Personalize with campaign name if available
+        candidate = (campaign_profile or {}).get("candidate_name", "")
+        if candidate and candidate != "Maria Chen":
+            for key in ("short_answer", "long_answer", "debate_answer", "social_post"):
+                result[key] = result[key].replace("Maria Chen", candidate).replace("I will", f"{candidate} will")
+
+        # Apply source context: add real source titles/urls if passed
+        if sources:
+            result["source_titles_used"] = [s["title"] for s in sources if s.get("title")]
+            result["source_urls_used"] = [s["source_url"] for s in sources if s.get("source_url")]
+
+        # Tone adjustments
+        if tone == "aggressive":
+            result["short_answer"] = "My opponent has failed this district. " + result["short_answer"]
+        elif tone == "social":
+            result["short_answer"] = result["social_post"]
+        elif tone == "debate":
+            result["short_answer"] = result["debate_answer"]
+
+        return result
+
+    def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
+        if credibility_note and credibility_note.strip().upper().startswith("RISK"):
+            return credibility_note
+        text_lower = text.lower()
+        if any(w in text_lower for w in ["defund", "million", "40 million", "fabricat", "false"]):
+            return "This source contains claims that may be disputed or misrepresented. Verify before responding publicly."
+        return None
+
+
+# ── OpenAI provider ───────────────────────────────────────────────────────────
+
+class OpenAIProvider(BaseLLMProvider):
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+        try:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=api_key)
+            self._model = model
+        except ImportError as e:
+            raise RuntimeError("openai package not installed. Run: pip install openai") from e
+
+    def _chat(self, user_prompt: str, system_prompt: str = "", json_mode: bool = False) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+        kwargs: dict = {"model": self._model, "messages": messages}
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self._client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
+
+    def summarize(self, text: str, max_words: int = 80) -> str:
+        prompt = f"Summarize the following in at most {max_words} words. Return only the summary, no preamble.\n\n{text[:3000]}"
+        try:
+            return self._chat(prompt).strip()
+        except Exception as e:
+            log.warning("OpenAI summarize failed: %s", e)
+            return MockLLMProvider().summarize(text, max_words)
+
+    def classify_urgency(self, text: str) -> str:
+        prompt = (
+            "Classify the urgency of the following political campaign intelligence as 'high', 'medium', or 'low'. "
+            "High: active attacks, fabricated claims, immediate threats to the campaign. "
+            "Medium: ongoing concerns, competitor activity, rising issues. "
+            "Low: background context, routine news.\n"
+            "Return only the single word: high, medium, or low.\n\n" + text[:2000]
+        )
+        try:
+            result = self._chat(prompt).strip().lower()
+            if result in ("high", "medium", "low"):
+                return result
+        except Exception as e:
+            log.warning("OpenAI classify_urgency failed: %s", e)
+        return MockLLMProvider().classify_urgency(text)
+
+    def extract_issues(self, text: str) -> list[str]:
+        return MockLLMProvider().extract_issues(text)
+
+    def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
+        return MockLLMProvider().detect_opponent_activity(text, opponent_name)
+
+    def generate_talking_points(
+        self,
+        issue: str,
+        tone: str,
+        context: str = "",
+        campaign_profile: Optional[dict] = None,
+        sources: Optional[list[dict]] = None,
+        opponent_activities: Optional[list[dict]] = None,
+    ) -> dict:
+        system = (
+            "You are an expert political communication strategist. "
+            "Generate campaign talking points that are evidence-grounded and ethically sound. "
+            "Respond only with valid JSON."
+        )
+        user = _build_tp_prompt(issue, tone, context, campaign_profile, sources, opponent_activities)
+        try:
+            raw = self._chat(user, system_prompt=system, json_mode=True)
+            result = _parse_json_response(raw)
+            if result.get("short_answer"):
+                return result
+        except Exception as e:
+            log.warning("OpenAI generate_talking_points failed: %s", e)
+        return MockLLMProvider().generate_talking_points(issue, tone, context, campaign_profile, sources, opponent_activities)
+
+    def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
+        return MockLLMProvider().generate_risk_warning(text, credibility_note)
+
+
+# ── Anthropic provider ────────────────────────────────────────────────────────
+
+class AnthropicProvider(BaseLLMProvider):
+    def __init__(self, api_key: str, model: str = "claude-haiku-4-5-20251001"):
+        try:
+            import anthropic as _anthropic
+            self._client = _anthropic.Anthropic(api_key=api_key)
+            self._model = model
+        except ImportError as e:
+            raise RuntimeError("anthropic package not installed. Run: pip install anthropic") from e
+
+    def _message(self, prompt: str, system: str = "", max_tokens: int = 2048) -> str:
+        kwargs: dict = {"model": self._model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
+        if system:
+            kwargs["system"] = system
+        response = self._client.messages.create(**kwargs)
+        return response.content[0].text if response.content else ""
+
+    def summarize(self, text: str, max_words: int = 80) -> str:
+        prompt = f"Summarize the following in at most {max_words} words. Return only the summary.\n\n{text[:3000]}"
+        try:
+            return self._message(prompt, max_tokens=300).strip()
+        except Exception as e:
+            log.warning("Anthropic summarize failed: %s", e)
+            return MockLLMProvider().summarize(text, max_words)
+
+    def classify_urgency(self, text: str) -> str:
+        prompt = (
+            "Classify the urgency of the following political campaign intelligence. "
+            "Respond with exactly one word: high, medium, or low.\n\n" + text[:2000]
+        )
+        try:
+            result = self._message(prompt, max_tokens=10).strip().lower()
+            if result in ("high", "medium", "low"):
+                return result
+        except Exception as e:
+            log.warning("Anthropic classify_urgency failed: %s", e)
+        return MockLLMProvider().classify_urgency(text)
+
+    def extract_issues(self, text: str) -> list[str]:
+        return MockLLMProvider().extract_issues(text)
+
+    def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
+        return MockLLMProvider().detect_opponent_activity(text, opponent_name)
+
+    def generate_talking_points(
+        self,
+        issue: str,
+        tone: str,
+        context: str = "",
+        campaign_profile: Optional[dict] = None,
+        sources: Optional[list[dict]] = None,
+        opponent_activities: Optional[list[dict]] = None,
+    ) -> dict:
+        system = (
+            "You are an expert political communication strategist. "
+            "Generate campaign talking points that are evidence-grounded and ethically sound. "
+            "Respond only with valid JSON — no explanation, no markdown fences."
+        )
+        user = _build_tp_prompt(issue, tone, context, campaign_profile, sources, opponent_activities)
+        try:
+            raw = self._message(user, system=system, max_tokens=2000)
+            result = _parse_json_response(raw)
+            if result.get("short_answer"):
+                return result
+        except Exception as e:
+            log.warning("Anthropic generate_talking_points failed: %s", e)
+        return MockLLMProvider().generate_talking_points(issue, tone, context, campaign_profile, sources, opponent_activities)
+
+    def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
+        return MockLLMProvider().generate_risk_warning(text, credibility_note)
+
+
+# ── Provider factory ──────────────────────────────────────────────────────────
+
+def get_provider() -> BaseLLMProvider:
+    provider_name = os.environ.get("LLM_PROVIDER", "mock").lower().strip()
+
+    if provider_name == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            log.warning("LLM_PROVIDER=openai but OPENAI_API_KEY not set — falling back to mock")
+            return MockLLMProvider()
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        try:
+            return OpenAIProvider(api_key=api_key, model=model)
+        except RuntimeError as e:
+            log.warning("OpenAI provider unavailable: %s — falling back to mock", e)
+            return MockLLMProvider()
+
+    if provider_name == "anthropic":
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            log.warning("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set — falling back to mock")
+            return MockLLMProvider()
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        try:
+            return AnthropicProvider(api_key=api_key, model=model)
+        except RuntimeError as e:
+            log.warning("Anthropic provider unavailable: %s — falling back to mock", e)
+            return MockLLMProvider()
+
+    return MockLLMProvider()
