@@ -42,10 +42,52 @@ _ATTACK_ATTRIBUTION_VERBS = {
 _OPPONENT_OWNED_TYPES = {"opponent_statement"}
 
 _OPPONENT_OWNED_SOURCE_HINTS = {
-    "opponent campaign", "campaign press release", "press release", "official campaign",
+    "opponent campaign", "official campaign",
 }
 
 _CANDIDATE_OWNED_TYPES = {"campaign_note"}
+
+# Words in a URL *domain* that, combined with a person's name, signal ownership.
+_OWNERSHIP_DOMAIN_SIGNALS = {
+    "campaign", "forcongress", "forsenate", "forassembly", "forcouncil",
+    "formayor", "forgovernor", "elect", "official", "vote",
+}
+_GOV_DOMAIN_RE = re.compile(r'\.gov(\.|\b|/|$)')
+
+# Attack verbs: used to detect whether opponent-owned content explicitly
+# targets the candidate (vs. just mentioning them or praising the opponent).
+_EXPLICIT_ATTACK_VERBS = {
+    "attacked", "slammed", "blasted", "accused", "blamed", "criticized",
+    "criticised", "failed", "failure", "lied", "lying", "dishonest",
+    "reckless", "dangerous", "corrupt", "wrong", "misleading", "unfit",
+    "defund", "smeared", "distorted", "misrepresented",
+}
+
+
+# ── Domain-based ownership helpers ───────────────────────────────────────────
+
+def _extract_domain(url: str) -> str:
+    """Return only the hostname from a URL (no path/port/query)."""
+    m = re.search(r'https?://([^/:?#]+)', (url or "").lower())
+    return m.group(1) if m else ""
+
+
+def _name_in_domain(domain: str, name: str) -> bool:
+    parts = [p.lower() for p in name.split() if len(p) > 3]
+    return bool(parts) and any(p in domain for p in parts)
+
+
+def _domain_implies_opponent_ownership(url: str, opponent_names: list[str]) -> bool:
+    """True when the URL domain contains an opponent's name + an ownership signal."""
+    domain = _extract_domain(url)
+    if not domain:
+        return False
+    for name in opponent_names:
+        if not _name_in_domain(domain, name):
+            continue
+        if _GOV_DOMAIN_RE.search(domain) or any(s in domain for s in _OWNERSHIP_DOMAIN_SIGNALS):
+            return True
+    return False
 
 
 @dataclass
@@ -200,19 +242,31 @@ def _source_owner_class(source: SourceItem | None) -> str:
     return source.source_owner_type or "unclear"
 
 
-def _source_is_opponent_owned(source: SourceItem | None) -> bool:
+def _source_is_opponent_owned(source: SourceItem | None, opponent_names: list[str] | None = None) -> bool:
+    """True when the source is clearly produced/owned by the opponent.
+
+    Checks (in order of confidence):
+    1. source_owner_type already set to opponent_statement
+    2. source_type is opponent_statement
+    3. Source name contains a known opponent-owned hint phrase
+    4. URL domain implies opponent ownership (name + .gov or campaign signal)
+
+    *Not* triggered by the opponent's name appearing inside a news article.
+    """
     if not source:
         return False
     owner_type = _source_owner_class(source)
     source_name = (source.source_name or "").lower()
-    url = (source.source_url or "").lower()
-    return (
+    if (
         owner_type == "opponent_statement"
         or source.source_type in _OPPONENT_OWNED_TYPES
         or any(hint in source_name for hint in _OPPONENT_OWNED_SOURCE_HINTS)
-        or "opponent" in source_name
-        or "/opponent" in url
-    )
+    ):
+        return True
+    # Domain-based detection (e.g. bresnahan.house.gov)
+    if opponent_names and source.source_url:
+        return _domain_implies_opponent_ownership(source.source_url, opponent_names)
+    return False
 
 
 def _candidate_owned_source(source: SourceItem | None, campaign: CampaignConfig | None, candidate_capture_ids: set[int]) -> bool:
@@ -293,12 +347,52 @@ def _candidate_narrative_type(candidate_narrative: CandidateNarrative, source: S
     return "candidate_self_definition", "for_candidate"
 
 
+def _has_explicit_attack_on_candidate(text: str, candidate_name: str | None, opponent_name: str | None) -> bool:
+    """True when text from an opponent-owned source explicitly attacks the candidate.
+
+    Requires both:
+    - the candidate's name present in the text, AND
+    - an attack verb/adjective either attributed to the opponent toward the
+      candidate (via _explicitly_attributes_attack) or appearing alongside
+      the candidate's name in the text.
+
+    A press release that merely mentions the candidate's district, praises the
+    opponent's own record, or uses the candidate's name in passing does NOT
+    qualify as an explicit attack.
+    """
+    if not candidate_name or not _contains_name(text, candidate_name):
+        return False
+    lower = text.lower()
+    # Prefer the structured attribution check (opponent said X about candidate)
+    if _explicitly_attributes_attack(text, opponent_name or "", candidate_name):
+        return True
+    # Fallback: attack verb appears near the candidate name in the same
+    # sentence-length window (≤120 chars either side).
+    candidate_pattern = _name_regex(candidate_name)
+    attack_pattern = "|".join(re.escape(v) for v in sorted(_EXPLICIT_ATTACK_VERBS, key=len, reverse=True))
+    return bool(re.search(
+        rf"({attack_pattern}).{{0,120}}{candidate_pattern}"
+        rf"|{candidate_pattern}.{{0,120}}({attack_pattern})",
+        lower,
+    ))
+
+
 def _opponent_attribution(
     source: SourceItem | None,
     text: str,
     opponent_name: str | None,
     candidate_name: str | None,
 ) -> tuple[bool, str, str, str, str]:
+    """Classify whether content is an attack by the opponent on the candidate.
+
+    Returns (is_attack, attribution_type, owner_confidence, target_confidence, owner_type).
+
+    Key fix: opponent-owned sources (press releases, official sites) are NOT
+    automatically treated as attacks.  Only when explicit attack language
+    targeting the candidate is present do we return is_attack=True.  A press
+    release praising the opponent's own record gets is_attack=False with
+    attribution_type="opponent_self_promotion".
+    """
     if not opponent_name:
         return False, "unclear", "low", "low", "unknown"
     owner_class = _source_owner_class(source)
@@ -311,9 +405,17 @@ def _opponent_attribution(
         "community/manual": "community_manual",
     }
     source_owner_type = owner_type_map.get(owner_class, "unknown")
-    if _source_is_opponent_owned(source):
-        target = "high" if candidate_name and _contains_name(text, candidate_name) else "medium"
-        return True, "opponent_owned_source", "high", target, "opponent"
+
+    # Pass opponent_name as a list for domain-ownership check
+    if _source_is_opponent_owned(source, [opponent_name]):
+        if _has_explicit_attack_on_candidate(text, candidate_name, opponent_name):
+            target = "high" if candidate_name and _contains_name(text, candidate_name) else "medium"
+            return True, "opponent_owned_source", "high", target, "opponent"
+        # Opponent-owned but self-promotional (praising themselves, policy
+        # announcement, etc.) — not an attack even if candidate is mentioned.
+        target = "medium" if candidate_name and _contains_name(text, candidate_name) else "low"
+        return False, "opponent_self_promotion", "medium", target, "opponent"
+
     if _manual_capture_explicit_opponent(source):
         target = "high" if candidate_name and _contains_name(text, candidate_name) else "medium"
         return True, "opponent_owned_source", "high", target, source_owner_type if source_owner_type != "unknown" else "opponent"
@@ -425,6 +527,14 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
             attribution_type = "inferred_owned_source"
             owner_type = "party_committee" if owner_class == "party_committee_statement" else "outside_group"
             direction = "against_candidate"
+        elif owner_class == "opponent_statement":
+            # Opponent-owned source that passed through _opponent_attribution
+            # without triggering is_attack — i.e. it's self-promotional content
+            # (policy announcement, record-touting) rather than an explicit attack.
+            narrative_type = "policy_frame"
+            attribution_type = "opponent_self_promotion"
+            owner_type = "opponent"
+            direction = "neutral"
         elif source.actionability_label == "respond":
             narrative_type = "possible_attack"
             attribution_type = "unclear"

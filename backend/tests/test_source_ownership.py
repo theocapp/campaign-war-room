@@ -72,7 +72,7 @@ def test_party_committee_attack_stays_outside_opponent_owned_narratives(db):
     db.add(source)
     db.commit()
 
-    narrative = refresh_narratives(db)[0]
+    narrative = refresh_narratives(db, force=True)[0]
 
     assert narrative.owner_type == "party_committee"
     assert narrative.direction == "against_candidate"
@@ -106,7 +106,7 @@ def test_outside_group_attack_is_not_labeled_as_opponent_owned(db):
     db.add(source)
     db.commit()
 
-    narrative = refresh_narratives(db)[0]
+    narrative = refresh_narratives(db, force=True)[0]
 
     assert narrative.owner_type == "outside_group"
     assert narrative.direction == "against_candidate"
