@@ -205,6 +205,84 @@ def _clean_html(html: str) -> tuple[str, str]:
     return title, text
 
 
+# ── Publication date extraction ───────────────────────────────────────────────
+
+# Ordered by reliability; first match wins.
+_HTML_META_DATE_PROPS = (
+    ("property", "article:published_time"),
+    ("property", "og:published_time"),
+    ("name",     "pubdate"),
+    ("name",     "DC.date"),
+    ("name",     "date"),
+    ("itemprop", "datePublished"),
+)
+
+
+def _parse_date_string(value: str) -> Optional[datetime]:
+    """Parse an arbitrary date string to a naive UTC datetime. Returns None on failure."""
+    try:
+        from dateutil import parser as dp
+        dt = dp.parse(value.strip())
+        if dt.tzinfo is not None:
+            # Convert to UTC then strip tzinfo so all stored datetimes are naive UTC.
+            dt = (dt - dt.utcoffset()).replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+
+def _parse_html_published_date(html: str) -> Optional[datetime]:
+    """Extract publication date from HTML metadata. Returns naive UTC datetime or None."""
+    # 1. <meta property/name/itemprop> tags
+    for meta_m in re.finditer(r'<meta\s[^>]*>', html, re.IGNORECASE):
+        tag = meta_m.group(0)
+        for attr, target in _HTML_META_DATE_PROPS:
+            if re.search(rf'\b{attr}\s*=\s*["\']?\s*{re.escape(target)}\s*["\']?', tag, re.IGNORECASE):
+                content_m = re.search(r'\bcontent\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                if content_m:
+                    dt = _parse_date_string(content_m.group(1))
+                    if dt:
+                        return dt
+
+    # 2. JSON-LD datePublished
+    for script_m in re.finditer(
+        r'<script\b[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html, re.DOTALL | re.IGNORECASE,
+    ):
+        m = re.search(r'"datePublished"\s*:\s*"([^"]+)"', script_m.group(1))
+        if m:
+            dt = _parse_date_string(m.group(1))
+            if dt:
+                return dt
+
+    # 3. <time datetime="YYYY-..."> elements (full dates only, not bare years or clock times)
+    for time_m in re.finditer(r'<time\b[^>]+>', html, re.IGNORECASE):
+        tag = time_m.group(0)
+        dt_m = re.search(r'\bdatetime\s*=\s*["\'](\d{4}-\d{2}-\d{2}[^"\']*)["\']', tag, re.IGNORECASE)
+        if dt_m:
+            dt = _parse_date_string(dt_m.group(1))
+            if dt:
+                return dt
+
+    return None
+
+
+def _rss_published_at(published_parsed) -> Optional[datetime]:
+    """Convert a feedparser published_parsed struct_time (UTC) to a naive UTC datetime.
+
+    feedparser always normalises timestamps to UTC, so the six fields of
+    published_parsed are already UTC values.  Using datetime(*fields[:6])
+    reads them directly and avoids the local-timezone skew that
+    time.mktime() would introduce on non-UTC servers.
+    """
+    if not published_parsed:
+        return None
+    try:
+        return datetime(*published_parsed[:6])
+    except (TypeError, ValueError):
+        return None
+
+
 # ── Core analyze-and-save pipeline ───────────────────────────────────────────
 
 def _compute_priority_score(db: Session, item: SourceItem) -> int:
@@ -280,7 +358,7 @@ def ingest_text(
         source_name=source_name,
         source_type=source_type,
         source_url=source_url,
-        published_at=published_at or datetime.utcnow(),
+        published_at=published_at,
     )
     return _create_and_analyze(db, item)
 
@@ -299,10 +377,12 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
         content_type = resp.headers.get("content-type", "")
         if "html" in content_type:
             title, body_text, quality_score, quality_label, quality_reasons = _clean_html_with_quality(resp.text)
+            published_date = _parse_html_published_date(resp.text)
         else:
             title = url.split("/")[-1].replace("-", " ").replace("_", " ")
             body_text = resp.text[:4000]
             quality_score, quality_label, quality_reasons = _assess_extraction_quality(body_text, title)
+            published_date = None
 
         if not title:
             # Fall back to URL slug
@@ -315,7 +395,7 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
             source_url=url,
             source_name=url.split("/")[2] if "://" in url else url[:50],
             source_type=source_type,
-            published_at=datetime.utcnow(),
+            published_at=published_date,
             extraction_quality_score=quality_score,
             extraction_quality_label=quality_label,
             extraction_quality_reasons=json.dumps(quality_reasons),
@@ -357,13 +437,7 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
 
         raw_text = (entry.get("summary") or entry.get("description") or "")[:4000]
 
-        published: Optional[datetime] = None
-        if getattr(entry, "published_parsed", None):
-            import time
-            try:
-                published = datetime.fromtimestamp(time.mktime(entry.published_parsed))
-            except (OSError, OverflowError):
-                published = None
+        published = _rss_published_at(getattr(entry, "published_parsed", None))
 
         item = SourceItem(
             title=title,
@@ -371,7 +445,7 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
             source_url=url or None,
             source_name=label or feed.feed.get("title", feed_url),
             source_type="news",
-            published_at=published or datetime.utcnow(),
+            published_at=published,
         )
         created = _create_and_analyze(db, item)
         added_items.append(created)
