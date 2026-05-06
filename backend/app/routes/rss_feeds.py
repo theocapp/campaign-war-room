@@ -7,6 +7,7 @@ from app.db import get_db
 from app.models import RssFeed
 from app.schemas import RssFeedOut, RssFeedCreate, RssFeedUpdate, RssFeedIngestResult, SourceItemOut
 from app.services import ingestion
+from app.services.snapshots import source_out
 
 router = APIRouter()
 
@@ -92,5 +93,5 @@ def ingest_feed(feed_id: int, db: Session = Depends(get_db)):
         added_count=result.added,
         skipped_count=result.skipped,
         error_count=0,
-        added_items=[SourceItemOut.model_validate(s) for s in result.items],
+        added_items=[source_out(s) for s in result.items],
     )

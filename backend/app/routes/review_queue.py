@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
 from app.models import SourceItem, OpponentActivity
 from app.schemas import ReviewQueueItemOut, ReviewAction, PriorityUpdate, BulkReviewAction
+from app.services.story_clustering import unique_by_cluster
+from app.services.snapshots import source_out
 
 router = APIRouter()
 
@@ -19,7 +22,7 @@ def _enrich(db: Session, item: SourceItem) -> ReviewQueueItemOut:
         )
         .count()
     )
-    out = ReviewQueueItemOut.model_validate(item)
+    out = ReviewQueueItemOut.model_validate(source_out(item))
     out.related_issue_names = issue_names
     out.related_issue_ids = issue_ids
     out.opponent_attack_count = attack_count
@@ -31,24 +34,38 @@ def get_review_queue(db: Session = Depends(get_db)):
     items = (
         db.query(SourceItem)
         .options(joinedload(SourceItem.issue_mentions))
+        .filter(SourceItem.archived_as_irrelevant == False)  # noqa: E712
         .filter(SourceItem.reviewed == False)  # noqa: E712
         .filter(SourceItem.dismissed == False)  # noqa: E712
+        .filter(
+            or_(
+                SourceItem.race_relevance_score >= 40,
+                SourceItem.actionability_label.in_(["review", "respond"]),
+            )
+        )
         .order_by(SourceItem.priority_score.desc(), SourceItem.created_at.desc())
         .limit(50)
         .all()
     )
-    return [_enrich(db, item) for item in items]
+    return [_enrich(db, item) for item in unique_by_cluster(items)]
 
 
 @router.get("/review-queue/count")
 def get_queue_count(db: Session = Depends(get_db)):
     count = (
         db.query(SourceItem)
+        .filter(SourceItem.archived_as_irrelevant == False)  # noqa: E712
         .filter(SourceItem.reviewed == False)  # noqa: E712
         .filter(SourceItem.dismissed == False)  # noqa: E712
-        .count()
+        .filter(
+            or_(
+                SourceItem.race_relevance_score >= 40,
+                SourceItem.actionability_label.in_(["review", "respond"]),
+            )
+        )
+        .all()
     )
-    return {"count": count}
+    return {"count": len(unique_by_cluster(count))}
 
 
 # Bulk endpoints MUST be registered before /{source_id}/... to avoid route conflict

@@ -32,6 +32,9 @@ def _source(db, title="Test Source", raw_text="housing", urgency="low", source_u
         title=title, raw_text=raw_text, source_name="test",
         source_type="news", urgency=urgency, published_at=datetime.utcnow(),
         source_url=source_url,
+        race_relevance_score=60, race_relevance_label="high",
+        actionability_score=60, actionability_label="review",
+        content_category="campaign", archived_as_irrelevant=False,
     )
     db.add(s)
     db.commit()
@@ -296,7 +299,10 @@ class TestDashboardActions:
             canvassing_notes=[],
         )
         assert any(a.priority == "urgent" for a in actions)
-        assert any("Respond to attack" in a.action for a in actions)
+        assert any("Opponent-aligned attack confirmed" in a.action for a in actions)
+        assert all("Respond to attack" not in a.action for a in actions)
+        assert all("Draft issue statement" not in a.action for a in actions)
+        assert all("Schedule canvassing focus" not in a.action for a in actions)
 
     def test_high_action_for_rising_high_urgency_issue(self, db):
         from app.routes.dashboard import _build_suggested_actions
@@ -323,7 +329,7 @@ class TestDashboardActions:
             recent_attacks=[],
             canvassing_notes=[],
         )
-        assert any("Campaign Setup" in a.action or "Campaign Profile" in a.action for a in actions)
+        assert any("Campaign setup" in a.action or "Campaign profile" in a.action for a in actions)
 
     def test_canvassing_action_from_recent_negative_notes(self, db):
         from app.routes.dashboard import _build_suggested_actions

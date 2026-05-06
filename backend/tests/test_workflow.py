@@ -32,6 +32,9 @@ def _source(db, title="Test Source", urgency="low", reviewed=False, dismissed=Fa
         title=title, raw_text="test content", source_name="test",
         source_type="news", urgency=urgency, published_at=datetime.utcnow(),
         reviewed=reviewed, dismissed=dismissed, priority_score=priority_score,
+        race_relevance_score=60, race_relevance_label="high",
+        actionability_score=60, actionability_label="review",
+        content_category="campaign", archived_as_irrelevant=False,
     )
     db.add(s)
     db.commit()
@@ -366,6 +369,7 @@ class TestIssueSourceLinking:
 
     def test_ingestion_links_issue_via_clustering(self, db):
         from app.services.ingestion import ingest_text
+        _campaign(db, district="Downtown")
         # Create an issue with a known keyword
         housing = Issue(name="Housing & Affordability", urgency="low", mention_count=0,
                         trend="stable", last_seen_at=datetime.utcnow())
@@ -373,7 +377,7 @@ class TestIssueSourceLinking:
         db.commit()
         item = ingest_text(
             db, title="Rent Crisis",
-            raw_text="Housing costs are rising and rent affordability is a serious problem.",
+            raw_text="Housing costs are rising in Downtown and rent affordability is a serious problem.",
             source_name="Test", source_type="news",
         )
         links = db.query(IssueMention).filter_by(source_item_id=item.id).all()

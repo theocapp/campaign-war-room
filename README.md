@@ -11,7 +11,8 @@ An AI-powered political campaign intelligence dashboard for local and mid-level 
 - **Canvassing Insights** — Aggregate field data by precinct and issue; privacy-preserving
 - **Talking Points** — Evidence-grounded messaging with history, risk warnings, and cited sources (door / interview / debate / social)
 - **Sources** — Full source library with text paste, URL fetch, and detail drawer
-- **RSS Feeds** — Configure persistent feeds; ingest one or all; duplicates skipped automatically
+- **Monitors** — Generate campaign-specific searches, manual checks, webpage checks, and RSS monitors from the race profile
+- **RSS Feeds** — Legacy persistent feeds; RSS monitors can still ingest one or all; duplicates skipped automatically
 - **Campaign Setup** — Candidate profile, key priorities, election date, campaign message
 
 ## Ethics constraints (hard-coded)
@@ -82,6 +83,13 @@ cd frontend && npm run dev
 | DELETE | `/api/rss-feeds/{id}` | Delete feed (sources kept) |
 | POST | `/api/rss-feeds/{id}/ingest` | Ingest one feed now |
 | POST | `/api/rss-feeds/ingest-all` | Ingest all active feeds |
+| GET | `/api/monitors` | List campaign monitors |
+| POST | `/api/monitors` | Create a monitor |
+| PUT | `/api/monitors/{id}` | Update a monitor |
+| DELETE | `/api/monitors/{id}` | Delete a monitor |
+| POST | `/api/monitors/generate` | Generate or apply campaign-specific monitor suggestions |
+| POST | `/api/monitors/{id}/mark-checked` | Mark manual/search/webpage monitor checked |
+| POST | `/api/monitors/{id}/ingest` | Ingest RSS monitor, or return setup guidance for non-RSS monitors |
 | GET | `/api/review-queue` | Unreviewed source items (priority sorted) |
 | POST | `/api/review-queue/{id}/review` | Mark a source reviewed |
 | POST | `/api/review-queue/{id}/dismiss` | Dismiss a source |
@@ -120,6 +128,8 @@ cp .env.example .env
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model ID |
 | `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-opus-4-7` | Anthropic model ID |
+| `SEARCH_PROVIDER` | `mock` | `mock` or `tavily` |
+| `TAVILY_API_KEY` | — | Required when `SEARCH_PROVIDER=tavily` |
 
 **Fallback behavior:** If a provider is selected but the API key is missing or the API call fails, the system automatically falls back to `MockLLMProvider` with a warning log. The app never crashes due to LLM failures.
 
@@ -128,6 +138,17 @@ cp .env.example .env
 - **`mock`** — Keyword-matched static responses. Fast, free, always works. Good for development.
 - **`openai`** — GPT-4o with JSON mode. Talking points are grounded in actual ingested sources and your campaign profile.
 - **`anthropic`** — Claude Opus with structured prompts. Same source-grounding and ethics constraints.
+
+### Search provider
+
+Search-query monitors use `backend/app/services/search_provider.py`. The default `SEARCH_PROVIDER=mock` does not perform live web search and returns a clear message in monitor ingestion results. To enable live search, use Tavily:
+
+```bash
+SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=your_tavily_api_key
+```
+
+Tavily is the only supported live search provider for now and offers a free tier. If `SEARCH_PROVIDER=tavily` is set without `TAVILY_API_KEY`, the app falls back to mock and logs a warning.
 
 ### Campaign profile context
 
@@ -148,11 +169,32 @@ The following are hard-coded into every real LLM prompt and cannot be overridden
 
 1. **Campaign Setup** (`/campaign`) — Enter candidate name, office, district, campaign message, key priorities, election date.
 2. **Add opponents** (`/opponents`) — Add each opponent by name. The system then automatically extracts their attacks, claims, and promises from ingested sources.
-3. **Configure RSS feeds** (`/feeds`) — Add one or more RSS feed URLs (local news, city council agenda feeds, opponent's campaign site if available). Click "Ingest All Active" to pull items.
+3. **Generate monitors** (`/monitors`) — Create campaign-specific searches, public-record reminders, opponent checks, and RSS-ready monitors from your candidate, district, priorities, and opponents.
 4. **Review Queue** (`/review`) — New items land here sorted by priority score. Mark items reviewed, dismiss noise, or click "Generate TP" to draft a talking point directly from the source.
 5. **Issue Tracker** (`/issues`) — Review auto-detected issues. Click any issue to see linked source items.
 6. **Talking Points** (`/talking`) — Generate evidence-grounded responses for any issue in the tone you need (door knock, interview, debate, social). History is saved automatically.
 7. **Check the Dashboard** (`/`) daily — the suggested actions panel reflects the current state of attacks, risk sources, and field data.
+
+## Monitors vs RSS Feeds
+
+The app uses **Monitors** as the main source setup layer. RSS is only one monitor type. A campaign usually needs verified public-record checks, opponent website checks, search queries, and local government agendas in addition to broad RSS feeds.
+
+Monitor types:
+- **`rss`** — A real RSS URL that can be ingested now. Creating an RSS monitor with a URL also creates a legacy RSS feed if needed.
+- **`search_query`** — A generated query such as `"Candidate Name" "PA-08"` or `"Scranton" healthcare`. With `SEARCH_PROVIDER=tavily`, these can ingest live search results; with `mock`, they remain visible setup instructions and return a no-live-search message.
+- **`manual`** — A recurring check where no reliable URL is known yet, such as FEC, state election board, or verified campaign social pages.
+- **`webpage`** — A known page to check manually now and potentially scrape later.
+
+Generate monitors from **Monitors → Generate Preview**. Review the suggestions, then **Apply Suggestions**. Use **Replace Existing With Suggestions** when you intentionally want the generated setup to replace current monitor records. The generator does not fabricate official URLs; when a reliable URL is not known it creates a manual or webpage monitor with a relevance hint explaining what to configure.
+
+## Race Relevance Filters
+
+In **Campaign Setup → Campaign Filters**, tune the relevance engine:
+- **Required / relevance terms** add relevance when matched.
+- **Excluded noise terms** reduce relevance unless the candidate, opponent, or district is also mentioned.
+- **Local geography terms** count as local geography matches.
+
+Default excluded noise includes sports and entertainment terms such as `Phillies`, `Eagles`, `Flyers`, `76ers`, `MLB`, `NBA`, `NFL`, `NHL`, `playoffs`, `game`, `manager`, `coach`, `celebrity`, `restaurant`, `recipe`, `weather`, and `lottery`. Tune these when local coverage has recurring irrelevant topics or when your district is described by multiple names.
 
 ## Testing on a real race
 
@@ -176,7 +218,11 @@ In **Campaign Setup**, enter: candidate name, office (e.g. "U.S. Representative"
 
 In **Opponent Tracker**, add each opponent by name. Once sources mentioning them are ingested, the system will automatically extract their attacks, claims, and promises.
 
-### Step 4 — Apply a starter pack
+### Step 4 — Generate campaign monitors
+
+Go to **Monitors**, click **Generate Preview**, then apply suggestions. The app creates candidate, opponent, race, issue, public-record, and local-government monitors from your campaign profile.
+
+### Step 5 — Apply a starter pack, if useful
 
 In **RSS Feeds → Starter Packs**, click "Apply" on the **US House Race Starter Pack** (or relevant pack). This creates:
 - RSS feed entries for any items with real URLs
@@ -184,9 +230,9 @@ In **RSS Feeds → Starter Packs**, click "Apply" on the **US House Race Starter
 
 Placeholder items are labeled `[PLACEHOLDER]` in their setup notes — replace the URL or paste content manually before those become useful.
 
-### Step 5 — Configure real source URLs
+### Step 6 — Configure real source URLs
 
-In **RSS Feeds → Source Reminders**, work through each reminder. Replace placeholder URLs with real ones for your district:
+In **Monitors** and **RSS Feeds → Source Reminders**, work through each reminder. Replace placeholder URLs with real ones for your district:
 - Your candidate's FEC committee page
 - Opponent's campaign website news section
 - Local newspaper RSS feed
@@ -195,7 +241,7 @@ In **RSS Feeds → Source Reminders**, work through each reminder. Replace place
 
 For items that have RSS feeds, edit the reminder URL and add it as an RSS feed in the "Add Feed" form above.
 
-### Step 6 — Import via CSV (optional)
+### Step 7 — Import via CSV (optional)
 
 If you have your race setup in a spreadsheet, export it as CSV and import it via **Campaign Setup → Import Race Setup from CSV**. Supported row types: `campaign`, `opponent`, `rss_feed`, `reminder`. See the format example shown in the UI.
 
@@ -208,13 +254,13 @@ rss_feed,Times-Tribune RSS,https://thetimes-tribune.com/feed,,news,Scranton pape
 reminder,Check FEC Page,https://www.fec.gov/data/committees/,,public_record,Check quarterly filings,,,,,
 ```
 
-### Step 7 — Ingest sources
+### Step 8 — Ingest sources
 
 In **RSS Feeds**, click "Ingest All Active" to pull from all configured RSS feeds. For non-RSS sources:
 - Use **Sources → Paste Text** to add press releases, debate transcripts, endorsement letters
 - Use **Sources → Fetch URL** to ingest a specific web page
 
-### Step 8 — Work the Review Queue
+### Step 9 — Work the Review Queue
 
 In **Review Queue**, triage new intelligence sorted by priority score. For each item:
 - Read the summary and credibility note

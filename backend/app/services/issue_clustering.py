@@ -4,13 +4,16 @@ Issue clustering service.
 Maps source text to normalized issue categories, auto-creates issues that
 don't exist yet, updates mention counts correctly, and computes trend.
 """
+import json
+import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models import Issue, IssueMention, SourceItem
 
 # ── Canonical issue taxonomy ──────────────────────────────────────────────────
 # Each entry: issue_name → {keywords, urgency_bump_keywords}
-# Keywords are sub-strings matched against lowercased source text.
+# Keywords are matched with word boundaries and scored for confidence.
 ISSUE_TAXONOMY: dict[str, dict] = {
     "Housing & Affordability": {
         "keywords": [
@@ -122,25 +125,112 @@ ISSUE_TAXONOMY: dict[str, dict] = {
     },
     "Local Government": {
         "keywords": [
-            "city council", "council member", "mayor", "election", "ballot",
+            "city council", "council member", "mayor", "ballot",
             "city hall", "ordinance", "resolution", "public hearing",
-            "public comment", "term limit", "constituent", "district",
-            "ward", "precinct", "campaign", "candidate", "incumbent",
+            "public comment", "term limit", "ward", "precinct", "incumbent",
+            "board of elections", "election board", "community board",
+            "county commission", "county board", "filing deadline", "ballot access",
         ],
         "urgency_bump": ["scandal", "resign", "recall", "impeach"],
     },
 }
 
+WEAK_KEYWORDS: dict[str, set[str]] = {
+    "Taxes & Budget": {"funding", "spending", "allocation", "budget"},
+    "Environment": {"green", "park", "tree", "waste"},
+    "Economy & Jobs": {"business", "economic", "income", "labor", "worker"},
+    "Infrastructure": {"street", "road", "bus", "construction"},
+    "Public Safety": {"safety", "police"},
+    "Healthcare": {"health", "coverage"},
+    "Local Government": {"ballot", "ward", "precinct", "incumbent"},
+}
+
+
+@dataclass
+class IssueMatch:
+    issue_name: str
+    has_urgency_bump: bool
+    strength: int
+    reasons: list[str]
+
+
+def _keyword_pattern(keyword: str) -> re.Pattern:
+    return re.compile(rf"(?<![a-z0-9]){re.escape(keyword.lower())}(?![a-z0-9])")
+
+
+def _keyword_hits(text: str, keyword: str) -> int:
+    return len(_keyword_pattern(keyword).findall(text))
+
+
+def _score_issue_match(text: str, issue_name: str, cfg: dict) -> IssueMatch | None:
+    matched_keywords: list[str] = []
+    strength = 0
+    weak_hits = 0
+    weak_terms = WEAK_KEYWORDS.get(issue_name, set())
+    title_text, _, body_text = text.partition("\n")
+
+    for keyword in cfg["keywords"]:
+        hits = _keyword_hits(text, keyword)
+        if hits == 0:
+            continue
+        matched_keywords.append(keyword)
+        keyword_strength = 35 if " " in keyword else 30
+        if keyword in weak_terms:
+            weak_hits += hits
+            keyword_strength = 12
+        if _keyword_hits(title_text, keyword):
+            keyword_strength += 10
+        if hits > 1 and keyword not in weak_terms:
+            keyword_strength += 5
+        strength += keyword_strength
+
+    if not matched_keywords:
+        return None
+
+    # Weak civic/economic words alone should not link a source to an issue.
+    strong_keywords = [k for k in matched_keywords if k not in weak_terms]
+    if not strong_keywords and weak_hits < 2:
+        return None
+
+    # Local Government is especially prone to pollution; require a concrete civic term.
+    if issue_name == "Local Government" and not any(k in matched_keywords for k in {
+        "city council", "council member", "city hall", "ordinance", "resolution",
+        "public hearing", "public comment", "term limit", "board of elections",
+        "election board", "community board", "county commission", "county board",
+        "filing deadline", "ballot access",
+    }):
+        return None
+
+    bump = any(_keyword_hits(text, kw) for kw in cfg.get("urgency_bump", []))
+    if bump:
+        strength += 10
+
+    threshold = 30
+    if strength < threshold:
+        return None
+
+    return IssueMatch(
+        issue_name=issue_name,
+        has_urgency_bump=bump,
+        strength=min(100, strength),
+        reasons=[f"Matched issue terms: {', '.join(matched_keywords[:4])}"],
+    )
+
+
+def _match_taxonomy_detailed(text: str) -> list[IssueMatch]:
+    text_lower = text.lower()
+    matches: list[IssueMatch] = []
+    for name, cfg in ISSUE_TAXONOMY.items():
+        match = _score_issue_match(text_lower, name, cfg)
+        if match:
+            matches.append(match)
+    matches.sort(key=lambda m: m.strength, reverse=True)
+    return matches
+
 
 def _match_taxonomy(text: str) -> list[tuple[str, bool]]:
     """Return (issue_name, has_urgency_bump) pairs for all matching taxonomy entries."""
-    text_lower = text.lower()
-    matched = []
-    for name, cfg in ISSUE_TAXONOMY.items():
-        if any(kw in text_lower for kw in cfg["keywords"]):
-            bump = any(kw in text_lower for kw in cfg.get("urgency_bump", []))
-            matched.append((name, bump))
-    return matched
+    return [(m.issue_name, m.has_urgency_bump) for m in _match_taxonomy_detailed(text)]
 
 
 def _get_or_create_issue(db: Session, name: str) -> Issue:
@@ -161,27 +251,31 @@ def _get_or_create_issue(db: Session, name: str) -> Issue:
     return issue
 
 
+def _cluster_key(source: SourceItem) -> str:
+    return source.story_cluster_id or f"source-{source.id}"
+
+
+def _count_issue_clusters(db: Session, issue_id: int, start: datetime | None = None, end: datetime | None = None) -> int:
+    q = (
+        db.query(SourceItem)
+        .join(IssueMention, SourceItem.id == IssueMention.source_item_id)
+        .filter(IssueMention.issue_id == issue_id)
+    )
+    if start:
+        q = q.filter(SourceItem.published_at >= start)
+    if end:
+        q = q.filter(SourceItem.published_at < end)
+    return len({_cluster_key(source) for source in q.all()})
+
+
 def _update_trend(db: Session, issue: Issue) -> None:
     """Compute mention velocity over last 7 days vs. prior 7 days to set trend."""
     now = datetime.utcnow()
     seven_ago = now - timedelta(days=7)
     fourteen_ago = now - timedelta(days=14)
 
-    recent = (
-        db.query(IssueMention)
-        .join(SourceItem, IssueMention.source_item_id == SourceItem.id)
-        .filter(IssueMention.issue_id == issue.id)
-        .filter(SourceItem.published_at >= seven_ago)
-        .count()
-    )
-    prior = (
-        db.query(IssueMention)
-        .join(SourceItem, IssueMention.source_item_id == SourceItem.id)
-        .filter(IssueMention.issue_id == issue.id)
-        .filter(SourceItem.published_at >= fourteen_ago)
-        .filter(SourceItem.published_at < seven_ago)
-        .count()
-    )
+    recent = _count_issue_clusters(db, issue.id, seven_ago)
+    prior = _count_issue_clusters(db, issue.id, fourteen_ago, seven_ago)
 
     if prior == 0:
         issue.trend = "rising" if recent > 0 else "stable"
@@ -216,12 +310,19 @@ def assign_issues_to_source(db: Session, source_item: SourceItem) -> list[Issue]
     link them, and update mention counts + trend + urgency.
     Returns the list of matched Issue objects.
     """
-    text = " ".join(filter(None, [source_item.title, source_item.raw_text, source_item.summary]))
-    matches = _match_taxonomy(text)
+    if source_item.extraction_quality_label == "poor" and source_item.source_type == "news":
+        matching_text = f"{source_item.title or ''}\n{source_item.summary or ''}"
+        max_links = 2
+    else:
+        matching_text = f"{source_item.title or ''}\n{source_item.raw_text or ''}\n{source_item.summary or ''}"
+        max_links = 4
+    matches = _match_taxonomy_detailed(matching_text)
     matched_issues = []
 
-    for issue_name, _has_bump in matches:
-        issue = _get_or_create_issue(db, issue_name)
+    for match in matches[:max_links]:
+        if source_item.extraction_quality_label == "poor" and match.strength < 70:
+            continue
+        issue = _get_or_create_issue(db, match.issue_name)
 
         # Only create a link and bump count if this source isn't already linked
         existing = (
@@ -229,9 +330,28 @@ def assign_issues_to_source(db: Session, source_item: SourceItem) -> list[Issue]
             .filter_by(issue_id=issue.id, source_item_id=source_item.id)
             .first()
         )
-        if not existing:
-            db.add(IssueMention(issue_id=issue.id, source_item_id=source_item.id))
-            issue.mention_count = (issue.mention_count or 0) + 1
+        if existing:
+            existing.link_strength = match.strength
+            existing.link_reasons = json.dumps(match.reasons)
+        else:
+            db.add(IssueMention(
+                issue_id=issue.id,
+                source_item_id=source_item.id,
+                link_strength=match.strength,
+                link_reasons=json.dumps(match.reasons),
+            ))
+            duplicate_cluster_exists = False
+            if source_item.story_cluster_id:
+                linked_sources = (
+                    db.query(SourceItem)
+                    .join(IssueMention, SourceItem.id == IssueMention.source_item_id)
+                    .filter(IssueMention.issue_id == issue.id)
+                    .filter(SourceItem.id != source_item.id)
+                    .all()
+                )
+                duplicate_cluster_exists = any(_cluster_key(s) == _cluster_key(source_item) for s in linked_sources)
+            if not duplicate_cluster_exists:
+                issue.mention_count = (issue.mention_count or 0) + 1
 
         issue.last_seen_at = datetime.utcnow()
         matched_issues.append(issue)
@@ -240,6 +360,7 @@ def assign_issues_to_source(db: Session, source_item: SourceItem) -> list[Issue]
 
     # Update derived fields for each matched issue
     for issue in matched_issues:
+        issue.mention_count = _count_issue_clusters(db, issue.id)
         _update_trend(db, issue)
         _update_urgency(db, issue)
 

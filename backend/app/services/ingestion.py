@@ -1,6 +1,8 @@
 """Ingestion helpers for RSS, URL, text, and CSV sources."""
 import csv
 import io
+import json
+import logging
 import re
 from datetime import datetime
 from typing import Optional
@@ -9,8 +11,12 @@ import feedparser
 import httpx
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 from app.models import CanvassingNote, IssueMention, OpponentActivity, SourceItem
-from app.services import intelligence, issue_clustering, opponent_analysis, scoring
+from app.services import intelligence, issue_clustering, narratives, opponent_analysis, race_relevance, scoring, story_clustering
+from app.services.snapshots import build_source_summary
+from app.services.source_ownership import classify_source_owner
 
 
 # ── HTML cleaning ─────────────────────────────────────────────────────────────
@@ -21,6 +27,26 @@ _BLOCK_TAGS = re.compile(
 )
 _TAG_STRIP = re.compile(r'<[^>]+>')
 _WHITESPACE = re.compile(r'\s+')
+_PARA_SPLIT = re.compile(r'(?:</p>|</div>|</li>|<br\s*/?>|\n)+', re.IGNORECASE)
+_NOISE_BLOCK = re.compile(
+    r'<[^>]+(?:class|id)=["\'][^"\']*(?:nav|menu|footer|header|sidebar|aside|related|trending|popular|most-read|newsletter|signup|promo|advert|share|social|video|gallery|breadcrumb|comments)[^"\']*["\'][^>]*>.*?</[^>]+>',
+    re.DOTALL | re.IGNORECASE,
+)
+_BOILERPLATE_PHRASES = [
+    "return to homepage", "top stories", "latest news", "latest", "most read",
+    "trending", "related articles", "recommended", "watch now", "video",
+    "gallery", "subscribe", "sign up", "newsletter", "share this article",
+    "advertisement", "sponsored content", "read more", "continue reading",
+    "skip to content", "privacy policy", "terms of service", "follow us",
+    "download our app", "open in app", "comments", "around the web",
+    "donate", "get involved", "take action", "volunteer", "join the team",
+    "text victory", "contribute", "paid for by", "official campaign", "shop now",
+    "learn more", "sign up now", "campaign headquarters", "contact us",
+]
+_TEASER_WORDS = re.compile(
+    r'\b(top stories|latest|trending|most read|watch|photos|video|gallery|who is|what to know|newsletter|subscribe)\b',
+    re.IGNORECASE,
+)
 _HTML_ENTITIES = {
     '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
     '&#39;': "'", '&nbsp;': ' ', '&ndash;': '–', '&mdash;': '—',
@@ -28,7 +54,112 @@ _HTML_ENTITIES = {
 }
 
 
-def _clean_html(html: str) -> tuple[str, str]:
+def _decode_entities(text: str) -> str:
+    for entity, replacement in _HTML_ENTITIES.items():
+        text = text.replace(entity, replacement)
+    return re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), text)
+
+
+def _strip_tags(fragment: str) -> str:
+    return _WHITESPACE.sub(' ', _TAG_STRIP.sub(' ', _decode_entities(fragment))).strip()
+
+
+def _paragraph_score(paragraph: str) -> int:
+    words = paragraph.split()
+    if len(words) < 8:
+        return -5
+    score = min(len(words), 80)
+    lower = paragraph.lower()
+    if any(phrase in lower for phrase in _BOILERPLATE_PHRASES):
+        score -= 45
+    if _TEASER_WORDS.search(paragraph) and len(words) < 25:
+        score -= 35
+    if paragraph.count("|") + paragraph.count("›") + paragraph.count("»") > 2:
+        score -= 25
+    if len(re.findall(r"[\U0001F300-\U0001FAFF]", paragraph)) > 0:
+        score -= 20
+    if sum(1 for ch in paragraph if not ch.isalnum() and not ch.isspace()) / max(len(paragraph), 1) > 0.25 and len(words) < 20:
+        score -= 10
+    if re.search(r"\b(said|according|reported|campaign|candidate|election|district|assembly|council|primary)\b", lower):
+        score += 20
+    if re.search(r"[.!?]$", paragraph):
+        score += 8
+    return score
+
+
+def _extract_paragraphs(html: str, title: str = "") -> list[str]:
+    chunks = _PARA_SPLIT.split(html)
+    paragraphs: list[str] = []
+    seen: set[str] = set()
+    title_key = re.sub(r"\s+", " ", title).strip().lower()
+    title_words = set(re.findall(r"\b\w+\b", title_key))
+    for chunk in chunks:
+        text = _strip_tags(chunk)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        words = set(re.findall(r"\b\w+\b", key))
+        if title_words and len(words) <= 14 and len(title_words & words) / max(len(title_words | words), 1) >= 0.8:
+            continue
+        seen.add(key)
+        if _paragraph_score(text) <= 0:
+            continue
+        paragraphs.append(text)
+    return paragraphs
+
+
+def _assess_extraction_quality(text: str, title: str = "", source_html: str | None = None) -> tuple[int, str, list[str]]:
+    lower = text.lower()
+    raw_lower = source_html.lower() if source_html else lower
+    reasons: list[str] = []
+    phrase_hits = [p for p in _BOILERPLATE_PHRASES if p in lower or p in raw_lower]
+    if phrase_hits:
+        reasons.append(f"Boilerplate phrases detected: {', '.join(phrase_hits[:4])}")
+    words = re.findall(r"\b\w+\b", text)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    short_teasers = [s for s in sentences if len(s.split()) <= 10 and _TEASER_WORDS.search(s)]
+    if len(short_teasers) >= 2:
+        reasons.append("Multiple short teaser/sidebar fragments detected")
+    properish = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", text)
+    unique_properish = set(properish)
+    if len(unique_properish) >= 14 and len(words) < 800:
+        reasons.append("Many unrelated proper-name/topic fragments detected")
+    if len(words) < 80:
+        reasons.append("Extracted article text is very short")
+    score_penalty = 0
+    if source_html and phrase_hits:
+        raw_candidates = [chunk for chunk in _PARA_SPLIT.split(source_html) if _strip_tags(chunk)]
+        kept_candidates = [chunk for chunk in _PARA_SPLIT.split(text) if _strip_tags(chunk)]
+        if raw_candidates and len(raw_candidates) > len(kept_candidates):
+            discarded = len(raw_candidates) - len(kept_candidates)
+            discarded_ratio = discarded / max(len(raw_candidates), 1)
+            if discarded_ratio >= 0.5:
+                reasons.append("Many wrapper/sidebar fragments were discarded during extraction")
+                score_penalty = 20
+            elif discarded_ratio >= 0.25:
+                score_penalty = 10
+
+    score = 100
+    score -= min(50, len(phrase_hits) * 12)
+    score -= min(30, len(short_teasers) * 8)
+    score -= score_penalty
+    if len(unique_properish) >= 14 and len(words) < 800:
+        score -= 20
+    if len(words) < 80:
+        score -= 10
+    if title and title.lower() not in lower and len(words) > 250 and phrase_hits:
+        score -= 10
+        reasons.append("Body text appears weakly connected to the page title")
+    score = max(0, min(100, score))
+    label = "good" if score >= 75 else ("mixed" if score >= 45 else "poor")
+    if not reasons and label == "good":
+        reasons.append("Article extraction appears clean")
+    return score, label, reasons
+
+
+def _clean_html_with_quality(html: str) -> tuple[str, str, int, str, list[str]]:
     """
     Return (title, body_text) extracted from raw HTML.
     Strips noise tags, decodes entities, collapses whitespace.
@@ -37,42 +168,53 @@ def _clean_html(html: str) -> tuple[str, str]:
     title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
     raw_title = title_match.group(1).strip() if title_match else ""
 
-    # Try to isolate the main content area first
-    main_match = re.search(
-        r'<(article|main|div[^>]+(?:class|id)=["\'][^"\']*(?:content|article|body|story|post)[^"\']*["\'])[^>]*>(.*?)</\1>',
+    candidate_blocks = []
+    for match in re.finditer(
+        r'<(article|main|section|div)[^>]*(?:class|id)=["\'][^"\']*(?:article|story|post|entry|content|main|body)[^"\']*["\'][^>]*>(.*?)</\1>',
         html, re.DOTALL | re.IGNORECASE,
-    )
-    working_html = main_match.group(2) if main_match else html
+    ):
+        block = match.group(2)
+        cleaned_block = _NOISE_BLOCK.sub(' ', _BLOCK_TAGS.sub(' ', block))
+        paragraphs = _extract_paragraphs(cleaned_block, raw_title)
+        if paragraphs:
+            candidate_blocks.append((sum(_paragraph_score(p) for p in paragraphs), paragraphs))
 
-    # Remove noisy block tags
-    working_html = _BLOCK_TAGS.sub(' ', working_html)
-    # Strip all remaining tags
-    text = _TAG_STRIP.sub(' ', working_html)
-    # Decode entities
-    for entity, replacement in _HTML_ENTITIES.items():
-        text = text.replace(entity, replacement)
-    # Decode numeric entities
-    text = re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), text)
-    # Collapse whitespace
+    if candidate_blocks:
+        paragraphs = max(candidate_blocks, key=lambda pair: pair[0])[1]
+    else:
+        working_html = _NOISE_BLOCK.sub(' ', _BLOCK_TAGS.sub(' ', html))
+        paragraphs = _extract_paragraphs(working_html, raw_title)
+        if not paragraphs:
+            fallback = _strip_tags(working_html)
+            paragraphs = [fallback] if fallback else []
+
+    text = " ".join(paragraphs)
     text = _WHITESPACE.sub(' ', text).strip()
 
     # Clean the title too
     title = _TAG_STRIP.sub('', raw_title)
-    for entity, replacement in _HTML_ENTITIES.items():
-        title = title.replace(entity, replacement)
+    title = _decode_entities(title)
     title = _WHITESPACE.sub(' ', title).strip()
+    score, label, reasons = _assess_extraction_quality(text, title, html)
 
-    return title, text[:4000]
+    return title, text[:4000], score, label, reasons
+
+
+def _clean_html(html: str) -> tuple[str, str]:
+    title, text, _score, _label, _reasons = _clean_html_with_quality(html)
+    return title, text
 
 
 # ── Core analyze-and-save pipeline ───────────────────────────────────────────
 
 def _compute_priority_score(db: Session, item: SourceItem) -> int:
     score = 0
+    score += int((item.race_relevance_score or 0) * 0.6)
+    score += int((item.actionability_score or 0) * 0.35)
     if item.urgency == "high":
-        score += 30
-    elif item.urgency == "medium":
         score += 10
+    elif item.urgency == "medium":
+        score += 5
     if db.query(IssueMention).filter_by(source_item_id=item.id).count():
         score += 10
     if db.query(OpponentActivity).filter(OpponentActivity.source_item_id == item.id).count():
@@ -85,23 +227,39 @@ def _compute_priority_score(db: Session, item: SourceItem) -> int:
             score += 10
         elif age <= 7:
             score += 5
-    return score
+    if item.extraction_quality_label == "poor":
+        score -= 25
+    elif item.extraction_quality_label == "mixed":
+        score -= 10
+    return max(0, score)
 
 
 def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
+    db.add(item)
+    db.flush()
+    ownership = classify_source_owner(db, item)
+    item.source_owner_type = ownership.source_owner_type
+    item.source_owner_confidence = ownership.source_owner_confidence
+    story_clustering.assign_story_cluster(db, item)
     if not item.summary and item.raw_text:
-        item.summary = intelligence.summarize_source(item.raw_text)
+        if item.extraction_quality_label == "poor":
+            item.summary = build_source_summary(item)
+        else:
+            item.summary = intelligence.summarize_source(item.raw_text)
     if not item.urgency or item.urgency == "low":
         item.urgency = intelligence.classify_urgency(f"{item.title} {item.raw_text or ''}")
-    db.add(item)
+    relevance = race_relevance.apply_relevance(db, item)
     db.commit()
     db.refresh(item)
-    issue_clustering.assign_issues_to_source(db, item)
-    opponent_analysis.analyze_source_for_opponents(db, item)
+    if not relevance.archived_as_irrelevant:
+        issue_clustering.assign_issues_to_source(db, item)
+        opponent_analysis.analyze_source_for_opponents(db, item)
+        race_relevance.apply_relevance(db, item)
     item.priority_score = _compute_priority_score(db, item)
     item.evidence_score = scoring.compute_evidence_score(item)
     item.credibility_score = scoring.compute_credibility_score(item)
     db.commit()
+    narratives.refresh_narratives(db)
     return item
 
 
@@ -140,10 +298,11 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
         if "html" in content_type:
-            title, body_text = _clean_html(resp.text)
+            title, body_text, quality_score, quality_label, quality_reasons = _clean_html_with_quality(resp.text)
         else:
             title = url.split("/")[-1].replace("-", " ").replace("_", " ")
             body_text = resp.text[:4000]
+            quality_score, quality_label, quality_reasons = _assess_extraction_quality(body_text, title)
 
         if not title:
             # Fall back to URL slug
@@ -157,9 +316,21 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
             source_name=url.split("/")[2] if "://" in url else url[:50],
             source_type=source_type,
             published_at=datetime.utcnow(),
+            extraction_quality_score=quality_score,
+            extraction_quality_label=quality_label,
+            extraction_quality_reasons=json.dumps(quality_reasons),
         )
+        if item.extraction_quality_label == "poor":
+            item.summary = build_source_summary(item)
         return _create_and_analyze(db, item)
-    except Exception:
+    except httpx.TimeoutException as exc:
+        logger.warning("Timeout fetching URL %s: %s", url, exc)
+        return None
+    except httpx.HTTPStatusError as exc:
+        logger.warning("HTTP %s fetching URL %s", exc.response.status_code, url)
+        return None
+    except Exception as exc:
+        logger.warning("Failed to ingest URL %s: %s: %s", url, type(exc).__name__, exc)
         return None
 
 
@@ -221,7 +392,8 @@ def ingest_canvassing_csv(db: Session, csv_content: str) -> int:
             try:
                 from dateutil import parser as dp
                 date = dp.parse(date_str)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Could not parse canvassing date %r: %s", date_str, exc)
                 date = datetime.utcnow()
         note = CanvassingNote(
             voter_name=(row.get("voter_name") or "").strip() or None,

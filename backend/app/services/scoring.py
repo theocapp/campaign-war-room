@@ -52,6 +52,11 @@ def compute_evidence_score(item: SourceItem) -> int:
     if _DATES.search(text):
         score += 10
     score += _EVIDENCE_TYPE_BONUS.get(item.source_type or '', 0)
+    quality = item.extraction_quality_label or "good"
+    if quality == "poor":
+        score -= 35
+    elif quality == "mixed":
+        score -= 15
     return min(100, max(0, score))
 
 
@@ -67,4 +72,9 @@ def compute_credibility_score(item: SourceItem) -> int:
         score -= 20
     if _WEAK_WORDS.search(note_text):
         score -= 10
+    quality = item.extraction_quality_label or "good"
+    if quality == "poor":
+        score -= 35
+    elif quality == "mixed":
+        score -= 15
     return min(100, max(0, score))

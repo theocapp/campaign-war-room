@@ -8,9 +8,16 @@ from app.db import get_db
 from app.models import (
     CampaignConfig, SourceItem, Issue, IssueMention,
     Opponent, OpponentActivity, CanvassingNote,
-    GeneratedTalkingPoint, RssFeed,
+    GeneratedTalkingPoint, RssFeed, SourceMonitor,
+    ManualCapture,
 )
-from app.schemas import ResetWorkspaceRequest, ResetWorkspaceResult
+from app.schemas import (
+    ReanalyzeSourcesRequest,
+    ReanalyzeSourcesResult,
+    ResetWorkspaceRequest,
+    ResetWorkspaceResult,
+)
+from app.services.reanalysis import ReanalysisOptions, reanalyze_sources
 
 router = APIRouter()
 
@@ -34,11 +41,13 @@ def reset_workspace(body: ResetWorkspaceRequest, db: Session = Depends(get_db)):
     # Delete in dependency order
     db.query(IssueMention).delete()
     db.query(OpponentActivity).delete()
+    db.query(ManualCapture).delete()
     db.query(SourceItem).delete()
     db.query(Issue).delete()
     db.query(Opponent).delete()
     db.query(CanvassingNote).delete()
     db.query(GeneratedTalkingPoint).delete()
+    db.query(SourceMonitor).delete()
 
     preserved_feeds = 0
     cleared_feeds = 0
@@ -56,6 +65,7 @@ def reset_workspace(body: ResetWorkspaceRequest, db: Session = Depends(get_db)):
         district=body.district,
         party=body.party,
         location=body.location,
+        sparse_race_mode=False,
         election_date=body.election_date,
         campaign_message=body.campaign_message,
         key_priorities=json.dumps(body.key_priorities) if body.key_priorities else None,
@@ -74,4 +84,25 @@ def reset_workspace(body: ResetWorkspaceRequest, db: Session = Depends(get_db)):
         cleared_feeds=cleared_feeds,
         preserved_feeds=preserved_feeds,
         candidate_name=body.candidate_name,
+    )
+
+
+@router.post("/admin/reanalyze-sources", response_model=ReanalyzeSourcesResult)
+def reanalyze_sources_endpoint(body: ReanalyzeSourcesRequest, db: Session = Depends(get_db)):
+    if body.confirm != "REANALYZE SOURCES":
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation string must be exactly 'REANALYZE SOURCES'",
+        )
+
+    return reanalyze_sources(
+        db,
+        ReanalysisOptions(
+            limit=body.limit,
+            source_id=body.source_id,
+            include_reviewed=body.include_reviewed,
+            include_dismissed=body.include_dismissed,
+            include_archived=body.include_archived,
+            dry_run=body.dry_run,
+        ),
     )

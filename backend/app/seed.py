@@ -16,6 +16,7 @@ from app.models import (
     Opponent, OpponentActivity, CanvassingNote,
     SourcePack, SourcePackItem,
 )
+from app.services.race_directory import seed_race_directory
 
 
 def _d(days_ago: int) -> datetime:
@@ -23,8 +24,9 @@ def _d(days_ago: int) -> datetime:
 
 
 def seed(db: Session) -> None:
-    # Always ensure source packs are seeded (idempotent)
+    # Always ensure product-layer setup data is seeded (idempotent)
     _seed_source_packs(db)
+    seed_race_directory(db)
     db.commit()
 
     if db.query(CampaignConfig).first():

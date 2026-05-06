@@ -6,7 +6,8 @@ from app.db import init_db
 from app.routes import (
     dashboard, sources, issues, opponents, canvassing,
     talking_points, campaign, setup, rss_feeds, review_queue, source_templates,
-    admin, source_packs, source_reminders, race_import,
+    admin, source_packs, source_reminders, race_import, monitors,
+    manual_captures, narratives, message_library, races,
 )
 
 
@@ -45,6 +46,11 @@ for router in [
     source_packs.router,
     source_reminders.router,
     race_import.router,
+    races.router,
+    monitors.router,
+    manual_captures.router,
+    narratives.router,
+    message_library.router,
 ]:
     app.include_router(router, prefix="/api")
 
