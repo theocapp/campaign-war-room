@@ -132,6 +132,15 @@ def _migrate(conn) -> None:
         if col not in existing_nm:
             conn.execute(text(f"ALTER TABLE narrative_mentions ADD COLUMN {col} {col_type}"))
 
+    # Partial unique index: one source item per narrative (NULLs excluded so
+    # activity-only mentions with source_item_id=NULL are not constrained).
+    # The model-level UniqueConstraint handles fresh DBs; this handles existing ones.
+    conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_nm_narrative_source
+        ON narrative_mentions(narrative_id, source_item_id)
+        WHERE source_item_id IS NOT NULL
+    """))
+
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS candidate_message_libraries (
             id INTEGER PRIMARY KEY,

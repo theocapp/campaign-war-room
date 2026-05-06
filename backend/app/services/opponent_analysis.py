@@ -8,6 +8,27 @@ import re
 from sqlalchemy.orm import Session
 from app.models import Opponent, OpponentActivity, SourceItem
 
+
+def _norm_text(text: str | None, maxlen: int = 500) -> str:
+    """Lowercase + collapse whitespace + truncate for fingerprint comparison."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text.lower().strip())[:maxlen]
+
+
+def _activity_fingerprint(act_data: dict) -> str:
+    """Stable dedup key encoding all three activity fields.
+
+    Using a pipe-separated triple rather than exact DB string comparison
+    avoids the NULL-equality trap: 'col = NULL' in SQL evaluates to NULL
+    (not TRUE), causing false matches when using OR across NULL fields.
+    """
+    return "|".join([
+        _norm_text(act_data.get("attack"), 500),
+        _norm_text(act_data.get("claim"), 500),
+        _norm_text(act_data.get("promise"), 300),
+    ])
+
 # ── Sentence-level classifiers ────────────────────────────────────────────────
 
 _ATTACK_MARKERS = {
@@ -128,23 +149,32 @@ def analyze_source_for_opponents(db: Session, source_item: SourceItem) -> list[O
 
     for opponent in opponents:
         activities = _extract_activities(full_text, opponent.name)
+        if not activities:
+            continue
+
+        # Load all existing activities for this source+opponent in one query,
+        # then compare by normalized fingerprint.  This avoids the NULL-equality
+        # trap where (col == None) compiles to "col IS NULL" and matches any row
+        # whose column happens to be NULL — causing valid distinct activities to
+        # be incorrectly skipped.
+        existing_rows = (
+            db.query(OpponentActivity)
+            .filter(
+                OpponentActivity.opponent_id == opponent.id,
+                OpponentActivity.source_item_id == source_item.id,
+            )
+            .all()
+        )
+        seen_fingerprints: set[str] = {
+            _activity_fingerprint({"attack": r.attack, "claim": r.claim, "promise": r.promise})
+            for r in existing_rows
+        }
 
         for act_data in activities:
-            # Dedup: skip if we already have an activity for this source + opponent + same attack/claim text
-            existing = (
-                db.query(OpponentActivity)
-                .filter(
-                    OpponentActivity.opponent_id == opponent.id,
-                    OpponentActivity.source_item_id == source_item.id,
-                )
-                .filter(
-                    (OpponentActivity.attack == act_data["attack"])
-                    | (OpponentActivity.claim == act_data["claim"])
-                )
-                .first()
-            )
-            if existing:
+            fp = _activity_fingerprint(act_data)
+            if fp in seen_fingerprints:
                 continue
+            seen_fingerprints.add(fp)
 
             activity = OpponentActivity(
                 opponent_id=opponent.id,

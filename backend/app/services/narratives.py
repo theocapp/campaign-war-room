@@ -691,13 +691,18 @@ def refresh_narratives(db: Session, force: bool = False) -> list[Narrative]:
         )
         db.add(narrative)
         db.flush()
-        seen_mentions: set[tuple[int | None, int | None, str]] = set()
-        for item in items:
+        # Dedup by source_item_id: the same URL must not appear more than once
+        # as evidence for a single narrative.  Sort highest-confidence first so
+        # the best match wins when two candidates share the same source.
+        # NULL source_ids (activity-only mentions) are never suppressed.
+        seen_source_ids: set[int] = set()
+        for item in sorted(items, key=lambda i: i.confidence_score, reverse=True):
             source = item.source_item
-            key = (source.id if source else None, item.opponent_activity.id if item.opponent_activity else None, item.text)
-            if key in seen_mentions:
-                continue
-            seen_mentions.add(key)
+            source_id = source.id if source else None
+            if source_id is not None:
+                if source_id in seen_source_ids:
+                    continue
+                seen_source_ids.add(source_id)
             db.add(NarrativeMention(
                 narrative_id=narrative.id,
                 source_item_id=source.id if source else None,

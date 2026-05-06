@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.db import Base
 
@@ -203,6 +203,12 @@ class Narrative(Base):
 
 class NarrativeMention(Base):
     __tablename__ = "narrative_mentions"
+    __table_args__ = (
+        # One source per narrative: prevents the same URL appearing twice as
+        # evidence.  SQLite treats NULL as distinct in UNIQUE, so activity-only
+        # mentions (source_item_id=NULL) are allowed to repeat.
+        UniqueConstraint("narrative_id", "source_item_id", name="uq_nm_narrative_source"),
+    )
     id = Column(Integer, primary_key=True)
     narrative_id = Column(Integer, ForeignKey("narratives.id"), nullable=False)
     source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=True)
