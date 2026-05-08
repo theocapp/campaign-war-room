@@ -153,7 +153,7 @@ def test_select_race_updates_campaign_context_and_creates_opponent(db):
     assert campaign.district == "AL-02"
     assert campaign.location == "AL-02 federal candidate filings from the FEC Candidate Master file. This is not a certified ballot list."
     assert campaign.race_level == "federal"
-    assert campaign.election_type == "other"
+    assert campaign.election_type == "general"
     assert campaign.district_number == "2"
     assert created == 1
     assert updated == 0
