@@ -129,6 +129,7 @@ class RaceSelectResult(BaseModel):
     opponents_created: int
     opponents_updated: int
     message: str
+    init_result: Optional["CampaignInitializeResult"] = None
 
 
 # ── Source Items ──────────────────────────────────────────────────────────────

@@ -155,6 +155,7 @@ export default function CampaignSetup() {
   async function selectDirectoryRace() {
     if (!selectedRace) return
     setSelectingRace(true); setRaceError(null); setRaceSelectMessage(null)
+    setInitResult(null); setInitError(null)
     try {
       const result = await api.selectRace(selectedRace.id, { candidate_id: selectedCandidateId || undefined })
       applyProfile(result.campaign)
@@ -163,6 +164,9 @@ export default function CampaignSetup() {
         result.race.candidates.find(c => c.candidate_name === result.selected_candidate_name)?.id || null
       )
       setRaceSelectMessage(`${result.message} ${result.opponents_created} opponent(s) added, ${result.opponents_updated} updated.`)
+      if (result.init_result) {
+        setInitResult(result.init_result)
+      }
     } catch (e: unknown) {
       setRaceError(e instanceof Error ? e.message : 'Race selection failed')
     } finally { setSelectingRace(false) }
@@ -475,6 +479,11 @@ export default function CampaignSetup() {
             {raceSelectMessage && (
               <div style={{ marginTop: 10, padding: '0.6rem 0.75rem', borderRadius: 'var(--radius-sm)', background: 'var(--ok-bg)', border: '1px solid var(--ok-border)', color: 'var(--ok-light)', fontSize: '0.76rem' }}>
                 ✓ {raceSelectMessage}
+                {initResult && (
+                  <span style={{ marginLeft: 8, opacity: 0.8 }}>
+                    — {initResult.monitors_created} monitor(s) created, {initResult.sources_ingested} source(s) ingested.
+                  </span>
+                )}
               </div>
             )}
             {raceError && (
@@ -899,7 +908,7 @@ export default function CampaignSetup() {
           <div style={{ flex: 1, minWidth: 220 }}>
             <div className="section-title" style={{ marginBottom: 4 }}>3. Initialize Campaign</div>
             <p style={{ margin: 0, fontSize: '0.76rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-              Saves your profile, generates monitors, ingests the latest coverage, and starts narrative tracking — all in one step.
+              For custom races: saves your profile, generates monitors, ingests coverage, and starts narrative tracking. FEC races run this automatically on selection.
             </p>
           </div>
           <button

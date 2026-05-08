@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.schemas import RaceDirectoryOut, RaceSelectRequest, RaceSelectResult
+from app.schemas import CampaignInitializeResult, RaceDirectoryOut, RaceSelectRequest, RaceSelectResult
+from app.services.campaign_setup import initialize_campaign
 from app.services.race_directory import (
     get_directory_race,
     list_directory_races,
@@ -52,6 +53,14 @@ def select_race(
         candidate_id=body.candidate_id,
         candidate_name=body.candidate_name,
     )
+
+    init_result = None
+    try:
+        raw = initialize_campaign(db)
+        init_result = CampaignInitializeResult(**raw)
+    except Exception:
+        pass
+
     return RaceSelectResult(
         race=race,
         campaign=campaign,
@@ -62,4 +71,5 @@ def select_race(
             f"Selected {race.race_name}. Campaign context was prefilled "
             f"for {selected.candidate_name}."
         ),
+        init_result=init_result,
     )

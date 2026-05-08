@@ -78,6 +78,7 @@ export interface RaceSelectResult {
   opponents_created: number
   opponents_updated: number
   message: string
+  init_result?: CampaignInitializeResult
 }
 
 export interface Issue {
