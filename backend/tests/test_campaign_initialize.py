@@ -143,10 +143,12 @@ class TestInitializeCampaignService:
     def test_step3_skipped_when_step2_errors(self, db, monkeypatch):
         from app.services.campaign_setup import initialize_campaign
 
+        def boom(_db):
+            raise RuntimeError("monitor setup failed")
+
         monkeypatch.setenv("SEARCH_PROVIDER", "mock")
         _campaign(db)
-        monkeypatch.setattr("app.services.monitors.auto_setup_monitors",
-                            lambda db: (_ for _ in ()).throw(RuntimeError("monitor setup failed")))
+        monkeypatch.setattr("app.services.monitors.auto_setup_monitors", boom)
 
         result = initialize_campaign(db)
         step3 = result["steps"][2]
