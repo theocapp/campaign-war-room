@@ -6,58 +6,61 @@
 
 /* ── Design tokens ─────────────────────────────────────────────────────────── */
 :root {
-  /* Backgrounds — deep cool-dark with a faint purple tint */
-  --bg:        #0d0d14;
-  --surface-1: #13131f;
-  --surface-2: #1a1a2a;
-  --surface-3: #222238;
-  --surface-4: #2a2a44;
+  /* ── LIGHT THEME (main content area) ──
+     Sidebar is always dark — see Layout.tsx for hardcoded sidebar colors */
+  --bg:        #f1f5f9;   /* page background — light blue-gray */
+  --surface-0: #ffffff;   /* topbar, right panel */
+  --surface-1: #ffffff;   /* card backgrounds */
+  --surface-2: #f8fafc;   /* card hover / table row hover */
+  --surface-3: #f1f5f9;   /* table headers, badge bg, secondary surfaces */
+  --surface-4: #e2e8f0;   /* active/selected states */
 
   /* Borders */
-  --border:        #252540;
-  --border-strong: #35355a;
-  --border-hover:  #4a4a80;
+  --border:        #e2e8f0;
+  --border-strong: #cbd5e1;
+  --border-hover:  #94a3b8;
 
   /* Text */
-  --text-primary:   #eeeef5;
-  --text-secondary: #8888aa;
-  --text-muted:     #52527a;
-  --text-xmuted:    #3a3a58;
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --text-xmuted:    #cbd5e1;
 
-  /* Accent — Claude violet */
-  --accent:        #8b5cf6;
-  --accent-2:      #7c3aed;
-  --accent-light:  #c4b5fd;
-  --accent-border: rgba(139,92,246,0.35);
-  --accent-bg:     rgba(139,92,246,0.10);
-  --accent-dim:    rgba(139,92,246,0.06);
+  /* Accent — indigo-violet */
+  --accent:        #7c3aed;
+  --accent-2:      #6d28d9;
+  --accent-light:  #7c3aed;   /* on light bg use base color, not washed out */
+  --accent-border: rgba(124,58,237,0.20);
+  --accent-bg:     rgba(124,58,237,0.07);
+  --accent-dim:    rgba(124,58,237,0.04);
 
-  /* Opponent / danger — red */
-  --opponent:        #f87171;
-  --opponent-light:  #fca5a5;
-  --opponent-border: rgba(248,113,113,0.35);
-  --opponent-bg:     rgba(248,113,113,0.07);
+  /* Opponent — orange */
+  --opponent:        #ea580c;
+  --opponent-light:  #f97316;
+  --opponent-border: rgba(234,88,12,0.22);
+  --opponent-bg:     rgba(234,88,12,0.06);
 
   /* Candidate */
-  --candidate-border: rgba(139,92,246,0.30);
-  --candidate-bg:     rgba(139,92,246,0.06);
+  --candidate-border: rgba(124,58,237,0.20);
+  --candidate-bg:     rgba(124,58,237,0.05);
 
-  /* Status: urgent */
-  --urgent:        #ef4444;
-  --urgent-border: rgba(239,68,68,0.35);
-  --urgent-bg:     rgba(239,68,68,0.07);
+  /* Status: urgent / HIGH risk (red) */
+  --urgent:        #dc2626;
+  --urgent-light:  #ef4444;
+  --urgent-border: rgba(220,38,38,0.22);
+  --urgent-bg:     rgba(220,38,38,0.07);
 
-  /* Status: warning */
-  --warning:        #f59e0b;
-  --warning-light:  #fbbf24;
-  --warning-border: rgba(245,158,11,0.35);
-  --warning-bg:     rgba(245,158,11,0.07);
+  /* Status: warning / MEDIUM (amber) */
+  --warning:        #d97706;
+  --warning-light:  #f59e0b;
+  --warning-border: rgba(217,119,6,0.22);
+  --warning-bg:     rgba(217,119,6,0.07);
 
-  /* Status: ok */
-  --ok:        #10b981;
-  --ok-light:  #34d399;
-  --ok-border: rgba(52,211,153,0.30);
-  --ok-bg:     rgba(52,211,153,0.07);
+  /* Status: ok / LOW (green) */
+  --ok:        #059669;
+  --ok-light:  #10b981;
+  --ok-border: rgba(5,150,105,0.22);
+  --ok-bg:     rgba(5,150,105,0.07);
 
   /* Radii */
   --radius-sm: 6px;
@@ -65,11 +68,11 @@
   --radius-lg: 14px;
   --radius-xl: 18px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.5);
-  --shadow:    0 2px 8px rgba(0,0,0,0.55);
-  --shadow-lg: 0 4px 20px rgba(0,0,0,0.65);
-  --shadow-xl: 0 8px 40px rgba(0,0,0,0.75);
+  /* Shadows — lighter for light theme */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow:    0 4px 6px rgba(0,0,0,0.07), 0 2px 4px rgba(0,0,0,0.06);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.08), 0 4px 6px rgba(0,0,0,0.05);
+  --shadow-xl: 0 20px 25px rgba(0,0,0,0.10), 0 10px 10px rgba(0,0,0,0.04);
 }
 
 /* ── Reset & base ──────────────────────────────────────────────────────────── */
@@ -98,6 +101,8 @@ a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+
+/* ── Sidebar nav item hover — inherit from JS; this resets for SSR ─── */
 
 /* ── Typography ────────────────────────────────────────────────────────────── */
 .page-title {
@@ -195,14 +200,14 @@ a { color: inherit; text-decoration: none; }
   flex-shrink: 0;
 }
 
-.badge-high    { background: var(--urgent-bg);   color: var(--opponent);      border: 1px solid var(--urgent-border); }
-.badge-medium  { background: var(--warning-bg);  color: var(--warning-light); border: 1px solid var(--warning-border); }
-.badge-low     { background: var(--ok-bg);       color: var(--ok-light);      border: 1px solid var(--ok-border); }
-.badge-urgent  { background: var(--urgent-bg);   color: var(--opponent-light);border: 1px solid var(--urgent-border); }
-.badge-info    { background: var(--accent-bg);   color: var(--accent-light);  border: 1px solid var(--accent-border); }
+.badge-high    { background: var(--urgent-bg);   color: var(--urgent);        border: 1px solid var(--urgent-border); }
+.badge-medium  { background: var(--warning-bg);  color: var(--warning);       border: 1px solid var(--warning-border); }
+.badge-low     { background: var(--ok-bg);       color: var(--ok);            border: 1px solid var(--ok-border); }
+.badge-urgent  { background: var(--urgent-bg);   color: var(--urgent);        border: 1px solid var(--urgent-border); }
+.badge-info    { background: var(--accent-bg);   color: var(--accent);        border: 1px solid var(--accent-border); }
 .badge-ghost   { background: var(--surface-3);   color: var(--text-secondary);border: 1px solid var(--border); }
-.badge-success { background: var(--ok-bg);       color: var(--ok-light);      border: 1px solid var(--ok-border); }
-.badge-purple  { background: var(--accent-bg);   color: var(--accent-light);  border: 1px solid var(--accent-border); }
+.badge-success { background: var(--ok-bg);       color: var(--ok);            border: 1px solid var(--ok-border); }
+.badge-purple  { background: var(--accent-bg);   color: var(--accent);        border: 1px solid var(--accent-border); }
 
 /* ── Pill tabs ──────────────────────────────────────────────────────────────── */
 .pill-tabs {
