@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 from sqlalchemy import create_engine
@@ -166,3 +167,43 @@ def test_update_campaign_succeeds_even_if_monitor_setup_fails(db, monkeypatch):
 
     result = update_campaign(_profile(), db=db)
     assert result.candidate_name == "Maria Alvarez"
+
+
+def test_update_campaign_logs_warning_if_monitor_setup_fails(db, monkeypatch, caplog):
+    from app.routes.campaign import update_campaign
+
+    def boom(db):
+        raise RuntimeError("monitor setup exploded")
+
+    monkeypatch.setattr("app.routes.campaign.auto_setup_monitors", boom)
+    caplog.set_level(logging.WARNING, logger="app.routes.campaign")
+
+    update_campaign(_profile(), db=db)
+
+    assert "auto_setup_monitors failed during campaign update" in caplog.text
+
+
+def test_update_campaign_marks_auto_inferred_election_date(db, monkeypatch):
+    from app.routes.campaign import update_campaign
+    monkeypatch.setenv("SEARCH_PROVIDER", "mock")
+
+    result = update_campaign(_profile(location="Riverton, CA", election_type="general"), db=db)
+
+    assert result.election_date is not None
+    assert result.election_date_inferred is True
+
+
+def test_update_campaign_marks_user_set_election_date_as_not_inferred(db, monkeypatch):
+    from app.routes.campaign import update_campaign
+    from datetime import datetime
+
+    monkeypatch.setenv("SEARCH_PROVIDER", "mock")
+    manual_date = datetime(2026, 10, 15)
+
+    result = update_campaign(
+        _profile(location="Riverton, CA", election_type="general", election_date=manual_date),
+        db=db,
+    )
+
+    assert result.election_date == manual_date
+    assert result.election_date_inferred is False

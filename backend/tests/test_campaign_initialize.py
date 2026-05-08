@@ -140,6 +140,37 @@ class TestInitializeCampaignService:
         assert step4["status"] == "error"
         assert "LLM unavailable" in step4["detail"]
 
+    def test_step3_skipped_when_step2_errors(self, db, monkeypatch):
+        from app.services.campaign_setup import initialize_campaign
+
+        monkeypatch.setenv("SEARCH_PROVIDER", "mock")
+        _campaign(db)
+        monkeypatch.setattr("app.services.monitors.auto_setup_monitors",
+                            lambda db: (_ for _ in ()).throw(RuntimeError("monitor setup failed")))
+
+        result = initialize_campaign(db)
+        step3 = result["steps"][2]
+        assert step3["label"] == "Ingest coverage"
+        assert step3["status"] == "skipped"
+
+    def test_step3_skipped_when_no_search_monitor_ingestion_attempted(self, db, monkeypatch):
+        from app.services.campaign_setup import initialize_campaign
+
+        monkeypatch.setenv("SEARCH_PROVIDER", "mock")
+        _campaign(db)
+        monkeypatch.setattr("app.services.monitors.auto_setup_monitors", lambda db: {
+            "generated": 0,
+            "skipped": 5,
+            "search_monitors_ingested": 0,
+            "sources_ingested": 0,
+            "ingested": 0,
+        })
+
+        result = initialize_campaign(db)
+        step3 = result["steps"][2]
+        assert step3["label"] == "Ingest coverage"
+        assert step3["status"] == "skipped"
+
     def test_with_opponents_generates_opponent_monitors(self, db, monkeypatch):
         from app.services.campaign_setup import initialize_campaign
         monkeypatch.setenv("SEARCH_PROVIDER", "mock")

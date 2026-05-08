@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from unittest.mock import Mock
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -27,6 +27,7 @@ class CampaignProfileOut(OrmBase):
     neighborhood_keywords: Optional[list[str]] = None
     sparse_race_mode: bool = False
     election_date: Optional[datetime]
+    election_date_inferred: bool = False
     campaign_message: Optional[str]
     key_priorities: Optional[list[str]] = None
     relevance_keywords: Optional[list[str]] = None
@@ -764,7 +765,7 @@ class DashboardOut(BaseModel):
 class CampaignInitializeStep(BaseModel):
     step: int
     label: str
-    status: str   # "ok" | "skipped" | "error"
+    status: Literal["ok", "skipped", "error"]
     detail: str
 
 

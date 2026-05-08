@@ -12,6 +12,7 @@ export interface CampaignProfile {
   neighborhood_keywords: string[] | null
   sparse_race_mode: boolean
   election_date: string | null
+  election_date_inferred?: boolean
   campaign_message: string | null
   key_priorities: string[] | null
   relevance_keywords: string[] | null

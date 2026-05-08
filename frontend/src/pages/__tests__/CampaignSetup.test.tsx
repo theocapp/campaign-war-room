@@ -50,6 +50,7 @@ const filledProfile: CampaignProfile = {
   district: 'District 7',
   location: 'Riverton, CA',
   election_date: '2026-11-03T00:00:00',
+  election_date_inferred: true,
 }
 
 const sampleRace: RaceDirectory = {
@@ -203,6 +204,21 @@ describe('CampaignSetup — advanced toggle', () => {
 
     expect(screen.getByText('Import Race Setup from CSV')).toBeInTheDocument()
   })
+
+  it('shows inferred badge only when election_date_inferred is true', async () => {
+    const user = userEvent.setup()
+    mockApi.getCampaign.mockResolvedValueOnce({
+      ...filledProfile,
+      election_date: '2026-11-03T00:00:00',
+      election_date_inferred: false,
+    })
+    render(<CampaignSetup />)
+
+    const toggle = await screen.findByTestId('advanced-toggle')
+    await user.click(toggle)
+
+    expect(screen.queryByText('· inferred')).not.toBeInTheDocument()
+  })
 })
 
 describe('CampaignSetup — initialization happy path', () => {
@@ -248,6 +264,25 @@ describe('CampaignSetup — initialization happy path', () => {
     await user.click(await screen.findByTestId('initialize-btn'))
 
     expect(await screen.findByText('Campaign initialized successfully.')).toBeInTheDocument()
+  })
+
+  it('clears initialization ticker on unmount', async () => {
+    const user = userEvent.setup()
+    let resolveInit!: (value: CampaignInitializeResult) => void
+    const initPromise = new Promise<CampaignInitializeResult>((resolve) => {
+      resolveInit = resolve
+    })
+    mockApi.initializeCampaign.mockReturnValueOnce(initPromise)
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
+
+    const { unmount } = render(<CampaignSetup />)
+    await user.click(await screen.findByTestId('initialize-btn'))
+
+    unmount()
+    resolveInit(initSuccess)
+
+    await waitFor(() => expect(clearIntervalSpy).toHaveBeenCalled())
+    clearIntervalSpy.mockRestore()
   })
 })
 

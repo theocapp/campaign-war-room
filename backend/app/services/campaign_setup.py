@@ -184,6 +184,8 @@ def initialize_campaign(db) -> dict:
 
     steps: list[dict] = []
     monitors_created = monitors_skipped = sources_ingested = narratives_refreshed = 0
+    search_monitors_ingested = 0
+    monitors_step_status = "skipped"
 
     # Step 1 — Validate campaign
     campaign = db.query(CampaignConfig).first()
@@ -209,18 +211,18 @@ def initialize_campaign(db) -> dict:
         monitor_result = auto_setup_monitors(db)
         monitors_created = monitor_result["generated"]
         monitors_skipped = monitor_result["skipped"]
-        if "sources_ingested" in monitor_result:
-            sources_ingested = monitor_result["sources_ingested"]
-        else:
-            sources_ingested = monitor_result.get("ingested", 0)
+        sources_ingested = monitor_result["sources_ingested"]
+        search_monitors_ingested = monitor_result.get("search_monitors_ingested", 0)
+        monitors_step_status = "ok" if monitors_created > 0 else "skipped"
         steps.append({
             "step": 2, "label": "Monitors created",
-            "status": "ok" if monitors_created > 0 else "skipped",
+            "status": monitors_step_status,
             "detail": (
                 f"{monitors_created} monitors created, {monitors_skipped} already existed."
             ),
         })
     except Exception as exc:
+        monitors_step_status = "error"
         steps.append({
             "step": 2, "label": "Monitors created",
             "status": "error", "detail": str(exc),
@@ -228,10 +230,19 @@ def initialize_campaign(db) -> dict:
 
     # Step 3 — Ingest search monitors (auto_setup_monitors already ran ingestion
     #           for brand-new monitors; record as its own step for UI clarity)
+    if monitors_step_status == "error":
+        step3_status = "skipped"
+        step3_detail = "Skipped because monitor setup failed."
+    elif search_monitors_ingested == 0:
+        step3_status = "skipped"
+        step3_detail = "Skipped because no new active search monitors were available to ingest."
+    else:
+        step3_status = "ok"
+        step3_detail = f"{sources_ingested} sources ingested from search monitors."
     steps.append({
         "step": 3, "label": "Ingest coverage",
-        "status": "ok",
-        "detail": f"{sources_ingested} sources ingested from search monitors.",
+        "status": step3_status,
+        "detail": step3_detail,
     })
 
     # Step 4 — Narrative refresh

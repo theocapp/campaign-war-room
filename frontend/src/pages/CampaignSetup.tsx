@@ -82,6 +82,8 @@ export default function CampaignSetup() {
   const [importing, setImporting]       = useState(false)
   const [importResult, setImportResult] = useState<RaceImportResult | null>(null)
   const [importError, setImportError]   = useState<string | null>(null)
+  const initTickerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const isMountedRef = useRef(true)
 
   function applyProfile(p: CampaignProfile) {
     setProfile(p)
@@ -99,7 +101,7 @@ export default function CampaignSetup() {
       campaign_message: p.campaign_message || '',
       sparse_race_mode: p.sparse_race_mode || false,
     })
-    setDateInferred(!!p.election_date)
+    setDateInferred(!!p.election_date_inferred)
     setPriorities(p.key_priorities || [])
     setRelevanceKeywords((p.relevance_keywords || []).join('\n'))
     setExcludedKeywords((p.excluded_keywords || []).join('\n'))
@@ -109,6 +111,16 @@ export default function CampaignSetup() {
 
   useEffect(() => {
     api.getCampaign().then(applyProfile).catch(e => setError(e.message)).finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false
+      if (initTickerRef.current) {
+        clearInterval(initTickerRef.current)
+        initTickerRef.current = null
+      }
+    }
   }, [])
 
   useEffect(() => { loadRaces('') }, [])
@@ -251,18 +263,24 @@ export default function CampaignSetup() {
     }
 
     let stepIndex = 0
-    const ticker = setInterval(() => {
+    initTickerRef.current = setInterval(() => {
       stepIndex = Math.min(stepIndex + 1, INIT_STEP_LABELS.length - 1)
       setInitStep(stepIndex)
     }, 1800)
 
     try {
       const result = await api.initializeCampaign()
+      if (!isMountedRef.current) return
       setInitResult(result)
     } catch (e: unknown) {
+      if (!isMountedRef.current) return
       setInitError(e instanceof Error ? e.message : 'Initialization failed')
     } finally {
-      clearInterval(ticker)
+      if (initTickerRef.current) {
+        clearInterval(initTickerRef.current)
+        initTickerRef.current = null
+      }
+      if (!isMountedRef.current) return
       setInitializing(false)
       setInitStep(0)
     }

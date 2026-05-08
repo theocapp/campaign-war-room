@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -10,10 +11,20 @@ from app.services.monitors import auto_setup_monitors
 from app.services.campaign_setup import infer_election_date, initialize_campaign
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _config_to_profile(config: CampaignConfig) -> CampaignProfileOut:
-    return CampaignProfileOut.model_validate(config)
+    profile = CampaignProfileOut.model_validate(config)
+    if not config.election_date:
+        return profile
+    inferred = infer_election_date(
+        config.election_type,
+        config.election_date.year,
+        _state_from_location(config.location),
+    )
+    inferred_flag = bool(inferred and inferred.date() == config.election_date.date())
+    return profile.model_copy(update={"election_date_inferred": inferred_flag})
 
 
 @router.post("/campaign/initialize", response_model=CampaignInitializeResult)
@@ -89,7 +100,7 @@ def update_campaign(body: CampaignProfileIn, db: Session = Depends(get_db)):
 
     try:
         auto_setup_monitors(db)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("auto_setup_monitors failed during campaign update: %s", exc, exc_info=True)
 
     return _config_to_profile(config)
