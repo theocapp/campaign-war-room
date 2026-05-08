@@ -74,7 +74,9 @@ def test_auto_setup_monitors_returns_generated_count(db, monkeypatch):
 
     assert result["generated"] > 0
     assert result["skipped"] == 0
-    assert result["ingested"] >= 0
+    assert result["search_monitors_ingested"] >= 0
+    assert result["sources_ingested"] >= 0
+    assert result["ingested"] == result["sources_ingested"]
 
 
 def test_auto_setup_monitors_skips_duplicates_on_second_call(db, monkeypatch):
@@ -135,7 +137,9 @@ def test_auto_setup_monitors_ingests_new_search_monitors(db, monkeypatch):
 
     result = auto_setup_monitors(db)
     assert result["generated"] > 0
-    assert result["ingested"] > 0
+    assert result["search_monitors_ingested"] > 0
+    assert result["sources_ingested"] > 0
+    assert result["ingested"] == result["sources_ingested"]
 
 
 def test_auto_setup_monitors_no_campaign_returns_zeros(db):
@@ -143,7 +147,13 @@ def test_auto_setup_monitors_no_campaign_returns_zeros(db):
 
     result = auto_setup_monitors(db)
 
-    assert result == {"generated": 0, "skipped": 0, "ingested": 0}
+    assert result == {
+        "generated": 0,
+        "skipped": 0,
+        "search_monitors_ingested": 0,
+        "sources_ingested": 0,
+        "ingested": 0,
+    }
 
 
 def test_update_campaign_succeeds_even_if_monitor_setup_fails(db, monkeypatch):

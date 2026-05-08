@@ -55,9 +55,9 @@ def _soft_duplicate(db: Session, title: str | None, source_name: str | None) -> 
     return None
 
 
-def _run_search_monitor(db: Session, monitor: SourceMonitor) -> None:
+def _run_search_monitor(db: Session, monitor: SourceMonitor) -> int:
     if not monitor.query:
-        return
+        return 0
     provider = get_search_provider()
     try:
         response = provider.search(monitor.query, limit=10)
@@ -65,7 +65,8 @@ def _run_search_monitor(db: Session, monitor: SourceMonitor) -> None:
         monitor.last_checked_at = datetime.utcnow()
         monitor.updated_at = datetime.utcnow()
         db.commit()
-        return
+        return 0
+    added = 0
     for result in response.results[:10]:
         if not result.url:
             continue
@@ -73,21 +74,29 @@ def _run_search_monitor(db: Session, monitor: SourceMonitor) -> None:
             continue
         if _soft_duplicate(db, result.title, result.source_name):
             continue
-        ingestion.ingest_url(db, result.url, monitor.source_type or "news")
+        if ingestion.ingest_url(db, result.url, monitor.source_type or "news"):
+            added += 1
     monitor.last_checked_at = datetime.utcnow()
     monitor.updated_at = datetime.utcnow()
     db.commit()
+    return added
 
 
 def auto_setup_monitors(db: Session) -> dict:
     """Generate monitors for the current campaign and ingest new search monitors.
 
     Idempotent: duplicate monitors are skipped. Safe to call on every campaign save.
-    Returns counts for generated, skipped, and ingested monitors.
+    Returns counts for generated/skipped monitors and ingested source items.
     """
     campaign = db.query(CampaignConfig).first()
     if not campaign:
-        return {"generated": 0, "skipped": 0, "ingested": 0}
+        return {
+            "generated": 0,
+            "skipped": 0,
+            "search_monitors_ingested": 0,
+            "sources_ingested": 0,
+            "ingested": 0,
+        }
 
     suggestions = generate_monitors_for_campaign(campaign, db.query(Opponent).all())
 
@@ -106,10 +115,17 @@ def auto_setup_monitors(db: Session) -> dict:
     db.commit()
 
     search_monitors = [m for m in created if m.monitor_type == "search_query" and m.active]
+    sources_ingested = 0
     for monitor in search_monitors:
         try:
-            _run_search_monitor(db, monitor)
+            sources_ingested += _run_search_monitor(db, monitor)
         except Exception:
             pass
 
-    return {"generated": len(created), "skipped": skipped, "ingested": len(search_monitors)}
+    return {
+        "generated": len(created),
+        "skipped": skipped,
+        "search_monitors_ingested": len(search_monitors),
+        "sources_ingested": sources_ingested,
+        "ingested": sources_ingested,
+    }

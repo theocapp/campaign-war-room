@@ -209,7 +209,7 @@ def initialize_campaign(db) -> dict:
         monitor_result = auto_setup_monitors(db)
         monitors_created = monitor_result["generated"]
         monitors_skipped = monitor_result["skipped"]
-        sources_ingested = monitor_result["ingested"]
+        sources_ingested = monitor_result.get("sources_ingested", monitor_result.get("ingested", 0))
         steps.append({
             "step": 2, "label": "Monitors created",
             "status": "ok" if monitors_created > 0 else "skipped",

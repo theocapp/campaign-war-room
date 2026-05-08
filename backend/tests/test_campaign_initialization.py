@@ -200,10 +200,8 @@ class TestIngestionAfterInit:
 
         result = initialize_campaign(db)
 
-        # The result counts search monitors; DB should have at least those sources
         source_count = db.query(SourceItem).count()
-        assert source_count >= 0  # non-negative
-        assert result["sources_ingested"] >= 0
+        assert result["sources_ingested"] == source_count
 
     def test_duplicate_urls_not_ingested_twice(self, db, monkeypatch):
         """Re-running initialization must not create duplicate SourceItem rows for the same URL."""
