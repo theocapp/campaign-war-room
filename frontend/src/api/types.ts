@@ -12,6 +12,7 @@ export interface CampaignProfile {
   neighborhood_keywords: string[] | null
   sparse_race_mode: boolean
   election_date: string | null
+  election_date_inferred?: boolean
   campaign_message: string | null
   key_priorities: string[] | null
   relevance_keywords: string[] | null
@@ -51,6 +52,23 @@ export interface RaceDirectory {
   created_at: string | null
   updated_at: string | null
   candidates: RaceCandidate[]
+}
+
+export interface CampaignInitializeStep {
+  step: number
+  label: string
+  status: 'ok' | 'skipped' | 'error'
+  detail: string
+}
+
+export interface CampaignInitializeResult {
+  steps: CampaignInitializeStep[]
+  monitors_created: number
+  monitors_skipped: number
+  sources_ingested: number
+  narratives_refreshed: number
+  message: string
+  initialized_at: string
 }
 
 export interface RaceSelectResult {

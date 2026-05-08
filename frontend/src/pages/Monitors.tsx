@@ -23,6 +23,7 @@ export default function Monitors() {
   const [editing, setEditing]           = useState<number | null>(null)
   const [draft, setDraft]               = useState<Partial<SourceMonitor>>({})
   const [acting, setActing]             = useState<number | 'preview' | 'apply' | 'all' | null>(null)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const load = useCallback(() => {
     setLoading(true)
@@ -105,17 +106,13 @@ export default function Monitors() {
           <h1 className="page-title">Monitors</h1>
           <p className="page-subtitle">Campaign-specific searches, checks, and feeds generated from your race profile.</p>
         </div>
-        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-          <button className="btn btn-ghost btn-sm" onClick={preview} disabled={acting === 'preview'}>
-            {acting === 'preview' ? '…' : 'Preview'}
-          </button>
-          <button className="btn btn-ghost btn-sm" onClick={ingestAllSearch} disabled={acting === 'all'}>
-            {acting === 'all' ? '…' : 'Ingest Search'}
-          </button>
-          <button className="btn btn-primary btn-sm" onClick={() => apply(false)} disabled={acting === 'apply'}>
-            {acting === 'apply' ? '…' : 'Apply Suggestions'}
-          </button>
-        </div>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => setAdvancedOpen(o => !o)}
+          style={{ flexShrink: 0 }}
+        >
+          {advancedOpen ? 'Hide Advanced' : 'Advanced'}
+        </button>
       </div>
 
       {/* Status message */}
@@ -148,9 +145,8 @@ export default function Monitors() {
       {/* AI suggestions */}
       {suggestions && suggestions.suggestions.length > 0 && (
         <div className="card" style={{ marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+          <div style={{ marginBottom: '0.75rem' }}>
             <div className="section-title" style={{ margin: 0 }}>Suggestions ({suggestions.suggestions.length})</div>
-            <button className="btn btn-ghost btn-sm" onClick={() => apply(true)}>Replace existing</button>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8 }}>
             {suggestions.suggestions.slice(0, 12).map((s, i) => (
@@ -183,7 +179,31 @@ export default function Monitors() {
         <div className="empty-state">
           <div className="empty-state-icon">◻</div>
           <div className="empty-state-title">No monitors yet</div>
-          <div className="empty-state-body">Click "Apply Suggestions" to generate monitors from your campaign profile.</div>
+          <div className="empty-state-body">Monitors are generated automatically when you save your campaign profile. Use Advanced to apply or refresh them manually.</div>
+        </div>
+      )}
+
+      {/* Advanced controls */}
+      {advancedOpen && (
+        <div className="card" style={{ marginBottom: '1rem' }}>
+          <div className="section-title" style={{ marginBottom: '0.75rem' }}>Advanced</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="btn btn-ghost btn-sm" onClick={preview} disabled={acting === 'preview'}>
+              {acting === 'preview' ? '…' : 'Preview Suggestions'}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={ingestAllSearch} disabled={acting === 'all'}>
+              {acting === 'all' ? '…' : 'Ingest Search'}
+            </button>
+            <button className="btn btn-primary btn-sm" onClick={() => apply(false)} disabled={acting === 'apply'}>
+              {acting === 'apply' ? '…' : 'Apply Suggestions'}
+            </button>
+            <button className="btn btn-danger btn-sm" onClick={() => apply(true)} disabled={acting === 'apply'}>
+              {acting === 'apply' ? '…' : 'Replace Existing'}
+            </button>
+          </div>
+          <p style={{ margin: '0.5rem 0 0', fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            Monitors are generated and ingested automatically on campaign save. Use these controls to preview suggestions, re-run ingestion, or replace all monitors from scratch.
+          </p>
         </div>
       )}
 

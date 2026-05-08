@@ -1,5 +1,6 @@
 import type {
-  CampaignProfile, DashboardData, DashboardChanges, DashboardNarrativeCard, Issue, IssueDetail,
+  CampaignProfile, CampaignInitializeResult,
+  DashboardData, DashboardChanges, DashboardNarrativeCard, Issue, IssueDetail,
   SourceItem, SourceItemDetail, SourceTemplate,
   Opponent, OpponentActivity, CanvassingInsights, TalkingPointResponse,
   RssFeed, RssFeedIngestResult, SetupStatus, ReviewQueueItem, GeneratedTalkingPoint,
@@ -75,6 +76,7 @@ export const api = {
   // Campaign
   getCampaign: () => get<CampaignProfile>('/campaign'),
   updateCampaign: (body: Partial<CampaignProfile>) => put<CampaignProfile>('/campaign', body),
+  initializeCampaign: () => post<CampaignInitializeResult>('/campaign/initialize', {}),
 
   // Race Directory
   getRaces: (params?: { q?: string; race_level?: string; state?: string; limit?: number }) => {
