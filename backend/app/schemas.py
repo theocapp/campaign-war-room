@@ -759,6 +759,25 @@ class DashboardOut(BaseModel):
     last_updated: datetime
 
 
+# ── Campaign initialization ───────────────────────────────────────────────────
+
+class CampaignInitializeStep(BaseModel):
+    step: int
+    label: str
+    status: str   # "ok" | "skipped" | "error"
+    detail: str
+
+
+class CampaignInitializeResult(BaseModel):
+    steps: list[CampaignInitializeStep]
+    monitors_created: int
+    monitors_skipped: int
+    sources_ingested: int
+    narratives_refreshed: int
+    message: str
+    initialized_at: datetime
+
+
 # ── Setup checklist ───────────────────────────────────────────────────────────
 
 class SetupChecklistItem(BaseModel):

@@ -53,6 +53,23 @@ export interface RaceDirectory {
   candidates: RaceCandidate[]
 }
 
+export interface CampaignInitializeStep {
+  step: number
+  label: string
+  status: 'ok' | 'skipped' | 'error'
+  detail: string
+}
+
+export interface CampaignInitializeResult {
+  steps: CampaignInitializeStep[]
+  monitors_created: number
+  monitors_skipped: number
+  sources_ingested: number
+  narratives_refreshed: number
+  message: string
+  initialized_at: string
+}
+
 export interface RaceSelectResult {
   race: RaceDirectory
   campaign: CampaignProfile

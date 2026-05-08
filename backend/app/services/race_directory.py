@@ -10,6 +10,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import CampaignConfig, Opponent, RaceCandidate, RaceDirectory
+from app.services.campaign_setup import infer_election_date
 
 
 FEC_CANDIDATE_MASTER_URL = "https://www.fec.gov/files/bulk-downloads/2026/cn26.zip"
@@ -174,7 +175,7 @@ def _fec_race_data(race_key: str, row: dict[str, str]) -> dict:
         "state": state,
         "district_label": district_label,
         "district_number": _district_number(office_code, district),
-        "election_type": "other",
+        "election_type": "general",
         "election_date": None,
         "geography_summary": _geography_summary(office_code, state, district_label),
         "data_source": "fec",
@@ -360,7 +361,11 @@ def select_directory_race(
     campaign.race_level = race.race_level
     campaign.election_type = race.election_type
     campaign.district_number = race.district_number
-    campaign.election_date = race.election_date
+    campaign.election_date = race.election_date or infer_election_date(
+        election_type=race.election_type,
+        year=int(FEC_ELECTION_YEAR),
+        state=race.state,
+    )
     campaign.geography_keywords = json.dumps(
         _merge_terms(
             campaign.geography_keywords,
