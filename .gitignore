@@ -25,3 +25,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Ignore AI tool workdirs
+.claude/
+.claire/
