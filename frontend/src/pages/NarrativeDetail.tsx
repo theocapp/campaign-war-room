@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../api/client'
 import type { NarrativeDetail, SourceItem } from '../api/types'
+import { sourceDate } from '../components/SourceCard'
 
 function fmtDate(s: string | null) {
   if (!s) return '—'
@@ -77,8 +78,9 @@ export default function NarrativeDetail() {
         </p>
 
         {/* Badges */}
-        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.75rem' }}>
           <span className="badge badge-ghost" style={{ fontSize: '0.58rem' }}>{narrative.direction.replace(/_/g, ' ')}</span>
+          <span className="badge badge-ghost" style={{ fontSize: '0.58rem' }}>{narrative.stance}</span>
           <span className="badge badge-ghost" style={{ fontSize: '0.58rem' }}>{narrative.owner_confidence} confidence</span>
           <span className="badge badge-ghost" style={{ fontSize: '0.58rem' }}>{narrative.response_status}</span>
           {narrative.action && (
@@ -87,6 +89,30 @@ export default function NarrativeDetail() {
             </span>
           )}
         </div>
+
+        {/* Attribution row */}
+        {(narrative.target_person || narrative.source_author_name) && (
+          <div style={{ display: 'flex', gap: 20, marginBottom: '1rem', flexWrap: 'wrap' }}>
+            {narrative.target_person && (
+              <div>
+                <div className="label" style={{ marginBottom: 2 }}>Target</div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)' }}>{narrative.target_person}</div>
+              </div>
+            )}
+            {narrative.source_author_name && (
+              <div>
+                <div className="label" style={{ marginBottom: 2 }}>Source Author</div>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{narrative.source_author_name}</div>
+              </div>
+            )}
+            {narrative.source_platform && (
+              <div>
+                <div className="label" style={{ marginBottom: 2 }}>Platform</div>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{narrative.source_platform.replace(/_/g, ' ')}</div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Stats grid */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 12, marginBottom: '1rem' }}>
@@ -197,6 +223,12 @@ function SourceMentionCard({ mention }: { mention: any }) {
 
   const href = source.source_url || `/sources?source_id=${source.id}`
   const isExternal = !!source.source_url
+  // Prefer denormalized mention fields; fall back to SourceItem fields for
+  // older records that predate the mention-level columns.
+  const authorName: string | null = mention.source_author_name ?? source.source_author ?? null
+  const targetPerson: string | null = mention.target_person ?? null
+  const platform: string | null = mention.source_platform ?? source.source_type ?? null
+  const stance: string = mention.stance ?? 'neutral'
 
   return (
     <a href={href} target={isExternal ? '_blank' : undefined} rel={isExternal ? 'noopener noreferrer' : undefined} style={{ textDecoration: 'none' }}>
@@ -206,13 +238,34 @@ function SourceMentionCard({ mention }: { mention: any }) {
             <div style={{ fontWeight: 600, fontSize: '0.82rem', marginBottom: 3, lineHeight: 1.3, color: 'var(--text-primary)' }}>
               {source.title || source.source_name || 'Untitled'}
             </div>
-            <div style={{ display: 'flex', gap: 8, fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
-              <span>{source.source_type.replace('_', ' ')}</span>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
+              {platform && <span>{platform.replace(/_/g, ' ')}</span>}
               {source.source_name && <span>{source.source_name}</span>}
               {source.geo_relevance && source.geo_relevance !== 'none' && (
                 <span className="badge badge-ghost" style={{ fontSize: '0.56rem' }}>{source.geo_relevance}</span>
               )}
+              {(() => { const { date, label } = sourceDate(source); return <span style={{ marginLeft: 'auto' }}>{label ? `${label}: ` : ''}{date}</span> })()}
             </div>
+            {/* Source Author / Target row — only shown when present, never inferred from text */}
+            {(authorName || targetPerson) && (
+              <div style={{ display: 'flex', gap: 14, marginTop: 5, flexWrap: 'wrap' }}>
+                {authorName && (
+                  <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
+                    <span style={{ color: 'var(--text-xmuted)' }}>Author: </span>{authorName}
+                  </div>
+                )}
+                {targetPerson && (
+                  <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
+                    <span style={{ color: 'var(--text-xmuted)' }}>Target: </span>{targetPerson}
+                  </div>
+                )}
+                {stance !== 'neutral' && (
+                  <span className={`badge badge-ghost`} style={{ fontSize: '0.56rem', alignSelf: 'center', color: stance === 'attack' ? 'var(--opponent)' : 'var(--ok-light)' }}>
+                    {stance}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           <div style={{ textAlign: 'right', flexShrink: 0 }}>
             <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>{mention.mention_role}</div>

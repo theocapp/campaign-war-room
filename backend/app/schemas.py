@@ -1,8 +1,16 @@
+import html as _html
 import json
 from datetime import datetime
 from typing import Literal, Optional
 from unittest.mock import Mock
 from pydantic import BaseModel, ConfigDict, field_validator
+
+
+def _unescape_text(v: Optional[str]) -> Optional[str]:
+    """Decode HTML entities in a string field; passthrough for None."""
+    if v is None:
+        return v
+    return _html.unescape(v)
 
 
 # ── Shared ────────────────────────────────────────────────────────────────────
@@ -142,8 +150,10 @@ class SourceItemOut(OrmBase):
     source_type: str
     source_owner_type: str = "unclear"
     source_owner_confidence: str = "low"
+    source_author: Optional[str] = None
     summary: Optional[str]
     published_at: Optional[datetime]
+    ingested_at: Optional[datetime] = None
     created_at: datetime
     urgency: str
     credibility_note: Optional[str]
@@ -173,6 +183,11 @@ class SourceItemOut(OrmBase):
     issue_link_strength: Optional[int] = None
     issue_link_reasons: list[str] = []
     snapshot: Optional["SourceSnapshot"] = None
+
+    @field_validator("title", "summary", mode="before")
+    @classmethod
+    def _unescape_text_fields(cls, v):
+        return _unescape_text(v)
 
     @field_validator("relevance_reasons", mode="before")
     @classmethod
@@ -211,6 +226,11 @@ class SourceItemOut(OrmBase):
 class SourceItemDetail(SourceItemOut):
     raw_text: Optional[str]
     related_issues: list["IssueOut"] = []
+
+    @field_validator("raw_text", mode="before")
+    @classmethod
+    def _unescape_raw_text(cls, v):
+        return _unescape_text(v)
 
 
 class RSSFeedIn(BaseModel):
@@ -364,6 +384,13 @@ class NarrativeMentionOut(OrmBase):
     attribution_type: str = "unclear"
     target_confidence: str = "low"
     candidate_narrative_id: Optional[int] = None
+    # Per-mention provenance — never inferred from body text.
+    source_platform: Optional[str] = None
+    source_author_name: Optional[str] = None
+    target_person: Optional[str] = None
+    stance: str = "neutral"
+    published_at: Optional[datetime] = None
+    ingested_at: Optional[datetime] = None
     created_at: datetime
     source_item: Optional[SourceItemOut] = None
 
@@ -389,8 +416,19 @@ class NarrativeOut(OrmBase):
     attribution_type: str = "unclear"
     target_confidence: str = "low"
     candidate_narrative_id: Optional[int] = None
+    # Attribution / targeting — populated from source metadata, never from text.
+    target_person: Optional[str] = None
+    stance: str = "neutral"
+    source_platform: Optional[str] = None
+    source_url: Optional[str] = None
+    source_author_name: Optional[str] = None
     notes: Optional[str] = None
     mentions: list[NarrativeMentionOut] = []
+
+    @field_validator("canonical_text", "short_label", mode="before")
+    @classmethod
+    def _unescape_narrative_text(cls, v):
+        return _unescape_text(v)
 
 
 class NarrativeBriefingOut(BaseModel):
@@ -426,6 +464,12 @@ class NarrativeDetailOut(BaseModel):
     owner_confidence: str
     attribution_type: str
     target_confidence: str
+    # Attribution / targeting — populated from source metadata, never from text.
+    target_person: Optional[str] = None
+    stance: str = "neutral"
+    source_platform: Optional[str] = None
+    source_url: Optional[str] = None
+    source_author_name: Optional[str] = None
     notes: Optional[str] = None
     # Briefing fields
     what_changed: Optional[str] = None
@@ -437,6 +481,11 @@ class NarrativeDetailOut(BaseModel):
     recent_window_summary: Optional[str] = None
     # All mentions with source details
     mentions: list[NarrativeMentionOut] = []
+
+    @field_validator("canonical_text", "short_label", mode="before")
+    @classmethod
+    def _unescape_narrative_text(cls, v):
+        return _unescape_text(v)
 
 
 # ── Candidate Message Library ────────────────────────────────────────────────

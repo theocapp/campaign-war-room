@@ -79,9 +79,13 @@ class SourceItem(Base):
     source_type = Column(String, nullable=False)
     source_owner_type = Column(String, default="unclear")
     source_owner_confidence = Column(String, default="low")
+    # Who actually posted/authored the content (page, account, byline).
+    # Distinct from source_name (outlet) and from who the content is *about*.
+    source_author = Column(String, nullable=True)
     raw_text = Column(Text)
     summary = Column(Text)
     published_at = Column(DateTime)
+    ingested_at = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     # low | medium | high
     urgency = Column(String, default="low")
@@ -193,6 +197,14 @@ class Narrative(Base):
     attribution_type = Column(String, default="unclear")
     target_confidence = Column(String, default="low")
     candidate_narrative_id = Column(Integer, ForeignKey("candidate_narratives.id"), nullable=True)
+    # Who/what this narrative targets (set from campaign metadata, never inferred from text).
+    target_person = Column(String, nullable=True)
+    # attack | support | neutral — human-readable stance derived from direction at creation.
+    stance = Column(String, default="neutral")
+    # Primary source provenance (from the seed NarrativeCandidate's SourceItem).
+    source_platform = Column(String, nullable=True)
+    source_url = Column(String, nullable=True)
+    source_author_name = Column(String, nullable=True)
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -221,6 +233,13 @@ class NarrativeMention(Base):
     attribution_type = Column(String, default="unclear")
     target_confidence = Column(String, default="low")
     candidate_narrative_id = Column(Integer, ForeignKey("candidate_narratives.id"), nullable=True)
+    # Per-mention provenance — denormalized for fast API access without joining SourceItem.
+    source_platform = Column(String, nullable=True)
+    source_author_name = Column(String, nullable=True)
+    target_person = Column(String, nullable=True)
+    stance = Column(String, default="neutral")
+    published_at = Column(DateTime, nullable=True)
+    ingested_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     narrative = relationship("Narrative", back_populates="mentions")

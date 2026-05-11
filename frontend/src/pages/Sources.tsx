@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { ManualCaptureResult, SourceItem, SourceItemDetail } from '../api/types'
-import SourceCard from '../components/SourceCard'
+import SourceCard, { sourceDate } from '../components/SourceCard'
 
 const SOURCE_TYPES = ['all', 'news', 'opponent_statement', 'public_record', 'canvassing', 'campaign_note', 'social']
 const SOURCE_FILTERS = [
@@ -92,7 +92,7 @@ function SourceDrawer({ sourceId, onClose }: { sourceId: number; onClose: () => 
               <span className="badge badge-ghost">{detail.source_owner_type.replace(/_/g, ' ')}</span>
               {detail.source_name && <span style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>{detail.source_name}</span>}
               <span style={{ fontFamily: 'JetBrains Mono', fontSize: '0.65rem', color: 'var(--text-muted)', marginLeft: 'auto' }}>
-                {fmtDate(detail.published_at)}
+                {(() => { const { date, label } = sourceDate(detail); return label ? `${label}: ${date}` : date })()}
               </span>
             </div>
 
@@ -202,8 +202,10 @@ function SourceDrawer({ sourceId, onClose }: { sourceId: number; onClose: () => 
 
             {/* Timestamps */}
             <div style={{ fontSize: '0.66rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', lineHeight: 1.9 }}>
-              <div>Published: {fmtDate(detail.published_at)}</div>
-              <div>Added: {fmtDate(detail.created_at)}</div>
+              {detail.published_at
+                ? <div>Published: {fmtDate(detail.published_at)}</div>
+                : null}
+              <div>Collected: {fmtDate(detail.ingested_at ?? detail.created_at)}</div>
             </div>
           </div>
         )}

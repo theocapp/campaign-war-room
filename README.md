@@ -358,3 +358,53 @@ campaign-war-room/
       pages/            One file per page
       components/       Shared UI components
 ```
+
+## Knowledge Graph Verification
+
+The KG pipeline has an end-to-end verification harness that proves ingestion,
+clustering, merging, decay, and alerts all work correctly against a fresh
+in-memory database — no API keys needed.
+
+### Run it
+
+```bash
+# From the repo root (recommended)
+make verify-kg
+
+# Or directly
+python backend/scripts/verify_kg_pipeline.py
+
+# Or as a module
+cd backend && python -m scripts.verify_kg_pipeline
+```
+
+Exit code is `0` on all-pass, `1` if any assertion fails.
+
+### What it tests
+
+| Phase | What it proves |
+|-------|---------------|
+| A — Ingestion | 10 realistic source texts are extracted with mock LLM; `kg_sources`, `kg_claims`, `kg_entities` are populated; `.gov` sources get credibility ≥ 0.85; social/unclear sources get ≤ 0.5 |
+| B — Dedup | Re-ingesting the same 10 sources leaves all row counts unchanged |
+| C — Clustering | `run_clustering()` produces ≥ 2 narratives from the extracted claims |
+| D — Merge | Two narratives with cosine-similarity 0.99 (angle 8° apart) are merged; a distant narrative (60° apart) is not |
+| E — Decay | A narrative with `last_seen_at` > 14 days old is transitioned to `status="inactive"` |
+| F — Alerts | `generate_alerts()` fires ≥ 1 alert for a high-velocity narrative; `get_active_alerts()` returns it |
+| G — Credibility | A `.gov`-backed narrative (credibility=0.9) produces higher `velocity_score` than an anonymous social source (credibility=0.3) with equal claim volume |
+
+### Expected output
+
+```
+╔══════════════════════════════════════════════════════════╗
+║       KG Pipeline Verification Harness  (mock LLM)      ║
+╚══════════════════════════════════════════════════════════╝
+
+  DB:       in-memory SQLite
+  Provider: MockLLMProvider
+
+  ...
+
+  All 19 assertions passed.
+```
+
+All 19 assertions must pass for the exit code to be 0.

@@ -21,6 +21,8 @@ const NAV_ITEMS = [
   { to: '/',                label: 'Dashboard',          end: true,  badge: false },
   { to: '/review',          label: 'Review Queue',       end: false, badge: true  },
   { to: '/narratives',      label: 'Narratives',         end: false, badge: false },
+  { to: '/kg/narratives',   label: 'KG Narratives',      end: false, badge: false },
+  { to: '/kg/alerts',       label: 'KG Alerts',          end: false, badge: false },
   { to: '/issues',          label: 'Issues',             end: false, badge: false },
   { to: '/opponents',       label: 'Opponent Tracker',   end: false, badge: false },
   { to: '/message-library', label: 'Candidate Messaging',end: false, badge: false },

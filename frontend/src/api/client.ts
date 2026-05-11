@@ -12,6 +12,7 @@ import type {
   ManualCapture, ManualCaptureResult,
   CandidateMessageLibrary, CandidateNarrative,
   NarrativeDetail, NarrativeComparisonOut,
+  KGNarrativeSummary, KGNarrativeDetail, KGAlert, KGEntity,
 } from './types'
 
 const BASE = '/api'
@@ -231,6 +232,13 @@ export const api = {
   getNarrativeBriefs: (limit = 50) => get<DashboardNarrativeCard[]>(`/narratives/briefs?limit=${limit}`),
   getNarrativeDetail: (id: number) => get<NarrativeDetail>(`/narratives/${id}`),
   getNarrativeComparison: () => get<NarrativeComparisonOut>('/narratives/compare'),
+
+  // Knowledge Graph
+  getKGNarratives: (limit = 20) => get<KGNarrativeSummary[]>(`/kg/narratives/emerging?limit=${limit}`),
+  getKGNarrativeDetail: (id: number) => get<KGNarrativeDetail>(`/kg/narratives/${id}`),
+  getKGAlerts: (limit = 50) => get<KGAlert[]>(`/kg/alerts?limit=${limit}`),
+  resolveKGAlert: (id: number) => post<KGAlert>(`/kg/alerts/${id}/resolve`, {}),
+  getKGEntity: (id: number) => get<KGEntity>(`/kg/entities/${id}`),
 
   // Talking Points
   generateTalkingPoints: (body: {

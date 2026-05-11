@@ -114,8 +114,10 @@ export interface SourceItem {
   source_type: string
   source_owner_type: string
   source_owner_confidence: string
+  source_author: string | null
   summary: string | null
   published_at: string | null
+  ingested_at: string | null
   created_at: string
   urgency: 'low' | 'medium' | 'high'
   credibility_note: string | null
@@ -349,6 +351,10 @@ export interface DashboardNarrativeCard {
   escaped_owned_recently?: boolean | null
   momentum_shift?: 'stronger' | 'weaker' | 'unchanged' | string | null
   recent_window_summary?: string | null
+  target_person?: string | null
+  stance?: string
+  source_platform?: string | null
+  source_author_name?: string | null
 }
 
 export interface NarrativeComparisonItem {
@@ -391,6 +397,16 @@ export interface NarrativeMention {
   attribution_type: string
   target_confidence: string
   candidate_narrative_id: number | null
+  /** Platform the source was published on (e.g. "social", "news"). Never inferred from text. */
+  source_platform: string | null
+  /** Who authored or posted this source. Never inferred from entity mentions. */
+  source_author_name: string | null
+  /** Who this mention targets by name. Set from campaign metadata. */
+  target_person: string | null
+  /** attack | support | neutral */
+  stance: string
+  published_at: string | null
+  ingested_at: string | null
   created_at: string
   source_item: SourceItem | null
 }
@@ -415,6 +431,16 @@ export interface NarrativeDetail {
   owner_confidence: string
   attribution_type: string
   target_confidence: string
+  /** Who this narrative targets by name. Set from campaign metadata, never inferred from text. */
+  target_person: string | null
+  /** attack | support | neutral */
+  stance: string
+  /** Platform of the primary/seed source (e.g. "social", "news"). */
+  source_platform: string | null
+  /** URL of the primary/seed source. */
+  source_url: string | null
+  /** Author/page name of the primary/seed source. Never inferred from entity mentions. */
+  source_author_name: string | null
   notes: string | null
   what_changed: string | null
   why_it_matters: string | null
@@ -717,4 +743,69 @@ export interface IngestSearchMonitorsResult {
   skipped_count: number
   failed_count: number
   results: MonitorIngestResult[]
+}
+
+// ── Knowledge Graph types ─────────────────────────────────────────────────────
+
+export interface KGSource {
+  id: number
+  url: string
+  title: string | null
+  source_type: string | null
+  source_name: string | null
+  domain: string | null
+  credibility_score: number
+  verified_official: boolean
+  published_at: string | null
+}
+
+export interface KGClaim {
+  id: number
+  text: string
+  stance: string
+  confidence: number
+  source: KGSource | null
+}
+
+export interface KGEntity {
+  id: number
+  entity_type: string
+  name: string
+  canonical_name: string | null
+  description: string | null
+}
+
+export interface KGNarrativeSummary {
+  id: number
+  label: string
+  description: string | null
+  velocity_score: number
+  status: string
+  first_seen_at: string | null
+  last_seen_at: string | null
+  claim_count: number
+  source_count: number
+}
+
+export interface KGNarrativeDetail {
+  id: number
+  label: string
+  description: string | null
+  velocity_score: number
+  status: string
+  first_seen_at: string | null
+  last_seen_at: string | null
+  claims: KGClaim[]
+  top_entities: KGEntity[]
+}
+
+export interface KGAlert {
+  id: number
+  narrative_id: number
+  narrative_label: string
+  alert_type: string
+  severity_score: number
+  message: string
+  created_at: string
+  resolved_at: string | null
 }

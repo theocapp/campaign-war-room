@@ -1,0 +1,162 @@
+{
+  "name": "PA-08 Cognetti vs Bresnahan (2026)",
+  "description": "Source pack for Pennsylvania's 8th Congressional District — Scranton / Wilkes-Barre / NEPA. Covers local news, statewide politics, candidate coverage, government records, and national race trackers. All sources verified reachable with live RSS entries.",
+  "race_level": "federal",
+  "geography": "us_house",
+  "items": [
+    {
+      "name": "WBRE/WYOU 28/22 News — NEPA Live Feed",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://www.pahomepage.com/feed/",
+      "setup_note": "Nexstar duopoly covering the Scranton/Wilkes-Barre TV market (DMA 53). Primary NEPA broadcast source."
+    },
+    {
+      "name": "Times Leader — Wilkes-Barre RSS",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://www.timesleader.com/feed",
+      "setup_note": "Daily newspaper for Luzerne County. Covers local government, courts, and politics."
+    },
+    {
+      "name": "Google News — Scranton Pennsylvania Politics",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=Scranton+Pennsylvania+politics+2026&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Google News aggregator for Scranton political coverage across all local and regional outlets."
+    },
+    {
+      "name": "Google News — Wilkes-Barre Scranton Election",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=Wilkes-Barre+Scranton+election&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Aggregates electoral coverage across the Scranton/WB metro from all sources."
+    },
+    {
+      "name": "Google News — NEPA Lackawanna Luzerne Government",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=NEPA+Lackawanna+Luzerne+government&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Local government news from the two core PA-08 counties."
+    },
+    {
+      "name": "Google News — Northeast Pennsylvania Congress",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=northeast+Pennsylvania+congress+2026&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "NEPA congressional coverage from regional and national outlets."
+    },
+    {
+      "name": "Pennsylvania Capital-Star — RSS",
+      "category": "statewide_politics",
+      "source_type": "news",
+      "url": "https://penncapital-star.com/feed",
+      "setup_note": "Statewide politics and policy. Strong on campaign finance, healthcare, and competitive House races."
+    },
+    {
+      "name": "StateImpact Pennsylvania — RSS",
+      "category": "statewide_politics",
+      "source_type": "news",
+      "url": "https://stateimpact.npr.org/pennsylvania/feed/",
+      "setup_note": "Energy and environment coverage — natural gas and fracking are key issues in PA-08."
+    },
+    {
+      "name": "WITF — Pennsylvania Public Radio RSS",
+      "category": "statewide_politics",
+      "source_type": "news",
+      "url": "https://www.witf.org/feed/",
+      "setup_note": "Pennsylvania's NPR affiliate. Strong statehouse, policy, and election coverage."
+    },
+    {
+      "name": "PennLive — Pennsylvania News RSS",
+      "category": "statewide_politics",
+      "source_type": "news",
+      "url": "https://www.pennlive.com/arc/outboundfeeds/rss/?outputType=xml",
+      "setup_note": "Advance Media Pennsylvania. Broad statewide political and government coverage."
+    },
+    {
+      "name": "ABC27 — Pennsylvania News RSS",
+      "category": "statewide_politics",
+      "source_type": "news",
+      "url": "https://www.abc27.com/feed/",
+      "setup_note": "Harrisburg ABC affiliate covering Pennsylvania government, elections, and legislation."
+    },
+    {
+      "name": "Google News — Pennsylvania Congressional Race 2026",
+      "category": "statewide_politics",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=Pennsylvania+congressional+race+2026&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Statewide competitive House race coverage from PA and national media."
+    },
+    {
+      "name": "Google News — Cognetti Congress Pennsylvania",
+      "category": "campaign",
+      "source_type": "campaign_material",
+      "url": "https://news.google.com/rss/search?q=Cognetti+congress+Pennsylvania&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Aggregates all press coverage of Cognetti's campaign, statements, and endorsements."
+    },
+    {
+      "name": "Google News — Bresnahan Congress Pennsylvania",
+      "category": "campaign",
+      "source_type": "opponent_statement",
+      "url": "https://news.google.com/rss/search?q=Bresnahan+congress+Pennsylvania&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Aggregates press coverage of Bresnahan's campaign, statements, and attacks."
+    },
+    {
+      "name": "FEC — PA-08 2026 Finance",
+      "category": "government",
+      "source_type": "public_record",
+      "url": "https://www.fec.gov/data/elections/house/PA/08/2026/",
+      "setup_note": "Federal campaign finance filing data. Re-ingest quarterly after FEC deadlines."
+    },
+    {
+      "name": "OpenSecrets — PA-08 Candidates 2026",
+      "category": "government",
+      "source_type": "public_record",
+      "url": "https://www.opensecrets.org/races/candidates?id=PA08&cycle=2026",
+      "setup_note": "Donor profiles, PAC activity, and outside spending for both candidates."
+    },
+    {
+      "name": "Roll Call — House Competitive Races RSS",
+      "category": "race_tracker",
+      "source_type": "news",
+      "url": "https://rollcall.com/category/house/feed/",
+      "setup_note": "Race ratings, DCCC/NRCC spending, and toss-up district coverage."
+    },
+    {
+      "name": "The Hill — House News RSS",
+      "category": "race_tracker",
+      "source_type": "news",
+      "url": "https://thehill.com/homenews/house/feed/",
+      "setup_note": "The Hill congressional reporting on competitive House races and campaign strategy."
+    },
+    {
+      "name": "Politico — Congress RSS",
+      "category": "race_tracker",
+      "source_type": "news",
+      "url": "https://rss.politico.com/congress.xml",
+      "setup_note": "Politico congressional coverage including race ratings, fundraising, and PAC spending."
+    },
+    {
+      "name": "DCCC — News and Press RSS",
+      "category": "race_tracker",
+      "source_type": "news",
+      "url": "https://dccc.org/feed/",
+      "setup_note": "DCCC press releases, opponent research drops, and targeted-district announcements."
+    },
+    {
+      "name": "Google News — PA-08 Cognetti Bresnahan",
+      "category": "race_tracker",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=PA-08+Cognetti+Bresnahan&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "Race-specific aggregator — captures polling, ratings changes, and ad buys as they publish."
+    },
+    {
+      "name": "Google News — Pennsylvania House Competitive 2026",
+      "category": "race_tracker",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=Pennsylvania+House+race+competitive+2026&hl=en-US&gl=US&ceid=US:en",
+      "setup_note": "National political media on PA competitive House seats including PA-08."
+    }
+  ]
+}

@@ -7,7 +7,7 @@ from app.routes import (
     dashboard, sources, issues, opponents, canvassing,
     talking_points, campaign, setup, rss_feeds, review_queue, source_templates,
     admin, source_packs, source_reminders, race_import, monitors,
-    manual_captures, narratives, message_library, races,
+    manual_captures, narratives, message_library, races, kg,
 )
 
 
@@ -51,6 +51,7 @@ for router in [
     manual_captures.router,
     narratives.router,
     message_library.router,
+    kg.router,
 ]:
     app.include_router(router, prefix="/api")
 

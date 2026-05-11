@@ -247,6 +247,16 @@ class TestHTMLCleaning:
         assert "&amp;" not in body
         assert "&" in body
 
+    def test_decodes_hex_entities(self):
+        from app.services.ingestion import _normalize_text
+        result = _normalize_text('Rob &#x201c;test&#x201d;')
+        assert result == 'Rob “test”', repr(result)
+
+    def test_normalize_text_idempotent(self):
+        from app.services.ingestion import _normalize_text
+        clean = "Rob “test” already clean"
+        assert _normalize_text(clean) == clean
+
 
 # ── LLM provider / intelligence tests ────────────────────────────────────────
 

@@ -168,6 +168,22 @@ export default function Narratives() {
                         {n.owner_type}
                       </span>
                       <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
+                      {n.stance && n.stance !== 'neutral' && (
+                        <>
+                          <span style={{ fontSize: '0.62rem', fontFamily: 'JetBrains Mono', color: n.stance === 'attack' ? 'var(--opponent)' : 'var(--ok-light)' }}>
+                            {n.stance}
+                          </span>
+                          <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
+                        </>
+                      )}
+                      {n.target_person && (
+                        <>
+                          <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
+                            ↳ {n.target_person}
+                          </span>
+                          <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
+                        </>
+                      )}
                       <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
                         {n.attribution_type.replace(/_/g, ' ')}
                       </span>

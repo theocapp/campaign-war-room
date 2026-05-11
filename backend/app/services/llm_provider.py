@@ -51,6 +51,15 @@ class BaseLLMProvider(ABC):
     @abstractmethod
     def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]: ...
 
+    @abstractmethod
+    def extract_knowledge_graph(self, text: str) -> str:
+        """
+        Call the LLM with the KG extraction prompt and return the raw response
+        string.  JSON parsing and validation are handled by KGExtractor in
+        knowledge_graph/extractor.py — this method only owns the LLM I/O.
+        """
+        ...
+
 
 # ── Shared prompt helpers ─────────────────────────────────────────────────────
 
@@ -485,6 +494,11 @@ class MockLLMProvider(BaseLLMProvider):
             return "This source contains claims that may be disputed or misrepresented. Verify before responding publicly."
         return None
 
+    def extract_knowledge_graph(self, text: str) -> str:
+        from app.knowledge_graph.extractor import high_recall_extract
+        payload = high_recall_extract(text)
+        return payload.model_dump_json()
+
 
 # ── OpenAI provider ───────────────────────────────────────────────────────────
 
@@ -565,6 +579,19 @@ class OpenAIProvider(BaseLLMProvider):
     def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
         return MockLLMProvider().generate_risk_warning(text, credibility_note)
 
+    def extract_knowledge_graph(self, text: str) -> str:
+        from app.knowledge_graph.extractor import SYSTEM_PROMPT, build_user_prompt
+        try:
+            return self._chat(
+                build_user_prompt(text),
+                system_prompt=SYSTEM_PROMPT,
+                json_mode=True,
+            )
+        except Exception as e:
+            log.warning("OpenAI extract_knowledge_graph failed: %s", e)
+            from app.knowledge_graph.extractor import mock_extract
+            return mock_extract(text).model_dump_json()
+
 
 # ── Anthropic provider ────────────────────────────────────────────────────────
 
@@ -637,6 +664,19 @@ class AnthropicProvider(BaseLLMProvider):
 
     def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
         return MockLLMProvider().generate_risk_warning(text, credibility_note)
+
+    def extract_knowledge_graph(self, text: str) -> str:
+        from app.knowledge_graph.extractor import SYSTEM_PROMPT, build_user_prompt
+        try:
+            return self._message(
+                build_user_prompt(text),
+                system=SYSTEM_PROMPT,
+                max_tokens=3000,
+            )
+        except Exception as e:
+            log.warning("Anthropic extract_knowledge_graph failed: %s", e)
+            from app.knowledge_graph.extractor import mock_extract
+            return mock_extract(text).model_dump_json()
 
 
 # ── Provider factory ──────────────────────────────────────────────────────────

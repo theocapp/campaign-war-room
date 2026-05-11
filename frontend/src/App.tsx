@@ -18,6 +18,9 @@ import MessageLibrary from './pages/MessageLibrary'
 import Narratives from './pages/Narratives'
 import NarrativeDetail from './pages/NarrativeDetail'
 import MessageBattle from './pages/MessageBattle'
+import KGNarratives from './pages/KGNarratives'
+import KGNarrativeDetail from './pages/KGNarrativeDetail'
+import KGAlerts from './pages/KGAlerts'
 
 function ToastRegistrar() {
   const { addToast } = useToast()
@@ -44,6 +47,9 @@ function AppRoutes() {
           <Route path="/feeds" element={<RssFeeds />} />
           <Route path="/campaign" element={<CampaignSetup />} />
           <Route path="/narratives/:id" element={<NarrativeDetail />} />
+          <Route path="/kg/narratives" element={<KGNarratives />} />
+          <Route path="/kg/narratives/:id" element={<KGNarrativeDetail />} />
+          <Route path="/kg/alerts" element={<KGAlerts />} />
         </Routes>
       </ErrorBoundary>
     </Layout>

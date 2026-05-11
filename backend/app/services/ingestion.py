@@ -1,9 +1,12 @@
 """Ingestion helpers for RSS, URL, text, and CSV sources."""
 import csv
+import html as _html
 import io
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -47,17 +50,16 @@ _TEASER_WORDS = re.compile(
     r'\b(top stories|latest|trending|most read|watch|photos|video|gallery|who is|what to know|newsletter|subscribe)\b',
     re.IGNORECASE,
 )
-_HTML_ENTITIES = {
-    '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
-    '&#39;': "'", '&nbsp;': ' ', '&ndash;': '–', '&mdash;': '—',
-    '&lsquo;': "'", '&rsquo;': "'", '&ldquo;': '"', '&rdquo;': '"',
-}
-
-
 def _decode_entities(text: str) -> str:
-    for entity, replacement in _HTML_ENTITIES.items():
-        text = text.replace(entity, replacement)
-    return re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), text)
+    """Decode all HTML entities including named, decimal (&#123;), and hex (&#x201c;)."""
+    return _html.unescape(text)
+
+
+def _normalize_text(text: str) -> str:
+    """Decode HTML entities and collapse whitespace. Safe on already-clean Unicode text."""
+    if not text:
+        return text
+    return _WHITESPACE.sub(' ', _html.unescape(text)).strip()
 
 
 def _strip_tags(fragment: str) -> str:
@@ -283,6 +285,119 @@ def _rss_published_at(published_parsed) -> Optional[datetime]:
         return None
 
 
+# ── Knowledge graph pipeline ─────────────────────────────────────────────────
+
+def _kg_enabled() -> bool:
+    return os.environ.get("ENABLE_KG_PIPELINE", "").lower() in ("1", "true", "yes")
+
+
+def _run_kg_pipeline(db: Session, item: SourceItem) -> None:
+    """
+    Run KG extraction and ingestion for a single SourceItem.
+
+    Guarded by the ENABLE_KG_PIPELINE env var and skips items marked
+    archived_as_irrelevant.  All exceptions are caught and logged so this can
+    never crash the existing ingestion pipeline.
+
+    Transaction contract: this function issues its own db.commit() after a
+    successful ingest so that KG writes are durable.  On failure, nothing is
+    committed and the existing data (already committed by _create_and_analyze)
+    is unaffected.
+    """
+    if not _kg_enabled():
+        return
+    if item.archived_as_irrelevant:
+        return
+
+    text = (item.raw_text or item.title or "").strip()
+    if not text:
+        return
+
+    try:
+        # Lazy imports keep module startup fast when the feature is disabled
+        # and prevent circular-import issues if this module is imported early.
+        from app.knowledge_graph.extractor import KGExtractor
+        from app.knowledge_graph.ingestion import KGIngestionService, get_or_create_kg_source
+        from app.services.llm_provider import get_provider
+
+        t0 = time.perf_counter()
+
+        logger.info(
+            "KG pipeline: starting  source_item_id=%d  relevance=%s  text_len=%d",
+            item.id,
+            getattr(item, "race_relevance_score", "?"),
+            len(text),
+        )
+
+        # Mirror the SourceItem into kg_sources (idempotent on content_hash)
+        kg_source = get_or_create_kg_source(
+            db,
+            url=item.source_url or "",
+            title=item.title,
+            text=item.raw_text,
+            published_at=item.published_at,
+            source_item_id=item.id,
+            source_type=getattr(item, "source_type", None),
+            source_name=getattr(item, "source_name", None),
+            source_owner_type=getattr(item, "source_owner_type", None),
+        )
+
+        # Extract → validate
+        provider = get_provider()
+        extractor = KGExtractor(provider)
+        result = extractor.extract(text)
+
+        logger.info(
+            "KG pipeline: extraction done  source_item_id=%d  "
+            "raw_claims=%d  accepted_claims=%d  dropped_claims=%d  "
+            "entities=%d  issues=%d",
+            item.id,
+            len(result.claims) + result.dropped_claims,
+            len(result.claims),
+            result.dropped_claims,
+            len(result.entities),
+            len(result.issues),
+        )
+        if len(result.claims) == 0:
+            logger.warning(
+                "KG pipeline: ZERO claims extracted for source_item_id=%d  "
+                "title=%r  source=%r — check extractor logs above",
+                item.id,
+                (item.title or "")[:80],
+                getattr(item, "source_name", "?"),
+            )
+
+        # Persist into kg_* tables
+        svc = KGIngestionService()
+        report = svc.ingest(result, source_id=kg_source.id, db=db)
+        db.commit()
+
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "KG pipeline: complete  source_item_id=%d  "
+            "claims_new=%d  claims_skipped=%d  entities_new=%d  "
+            "edges_new=%d  elapsed=%.2fs",
+            item.id,
+            report.claims_created,
+            report.claims_skipped,
+            report.entities_created,
+            report.edges_created,
+            elapsed,
+        )
+        if report.errors:
+            logger.warning(
+                "KG pipeline: source_item_id=%d  partial errors=%s",
+                item.id, report.errors,
+            )
+
+    except Exception as exc:
+        logger.error(
+            "KG pipeline failed for source_item_id=%d: %s: %s",
+            item.id, type(exc).__name__, exc,
+            exc_info=True,
+        )
+
+
 # ── Core analyze-and-save pipeline ───────────────────────────────────────────
 
 def _compute_priority_score(db: Session, item: SourceItem) -> int:
@@ -338,6 +453,7 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     item.credibility_score = scoring.compute_credibility_score(item)
     db.commit()
     narratives.refresh_narratives(db)
+    _run_kg_pipeline(db, item)
     return item
 
 
@@ -351,14 +467,16 @@ def ingest_text(
     source_type: str,
     source_url: Optional[str] = None,
     published_at: Optional[datetime] = None,
+    source_author: Optional[str] = None,
 ) -> SourceItem:
     item = SourceItem(
-        title=title,
-        raw_text=raw_text,
+        title=_normalize_text(title),
+        raw_text=_normalize_text(raw_text),
         source_name=source_name,
         source_type=source_type,
         source_url=source_url,
         published_at=published_at,
+        source_author=_normalize_text(source_author) if source_author else None,
     )
     return _create_and_analyze(db, item)
 
@@ -375,9 +493,19 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
         })
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
+        source_author: Optional[str] = None
         if "html" in content_type:
             title, body_text, quality_score, quality_label, quality_reasons = _clean_html_with_quality(resp.text)
             published_date = _parse_html_published_date(resp.text)
+            # Extract author from <meta name="author"> or <meta property="article:author">
+            author_match = re.search(
+                r'<meta\s[^>]*?(?:name|property)=["\'](?:author|article:author)["\'][^>]*?content=["\']([^"\']{1,200})["\']'
+                r'|<meta\s[^>]*?content=["\']([^"\']{1,200})["\'][^>]*?(?:name|property)=["\'](?:author|article:author)["\']',
+                resp.text, re.IGNORECASE,
+            )
+            if author_match:
+                raw_author = author_match.group(1) or author_match.group(2) or ""
+                source_author = _normalize_text(raw_author) or None
         else:
             title = url.split("/")[-1].replace("-", " ").replace("_", " ")
             body_text = resp.text[:4000]
@@ -396,6 +524,7 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
             source_name=url.split("/")[2] if "://" in url else url[:50],
             source_type=source_type,
             published_at=published_date,
+            source_author=source_author,
             extraction_quality_score=quality_score,
             extraction_quality_label=quality_label,
             extraction_quality_reasons=json.dumps(quality_reasons),
@@ -428,16 +557,24 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
 
     for entry in feed.entries[:20]:
         url = entry.get("link") or ""
-        title = (entry.get("title") or "Untitled")[:200]
+        title = _normalize_text(entry.get("title") or "Untitled")[:200]
 
         # Deduplicate by source_url
         if url and db.query(SourceItem).filter_by(source_url=url).first():
             skipped += 1
             continue
 
-        raw_text = (entry.get("summary") or entry.get("description") or "")[:4000]
+        raw_text = _normalize_text(entry.get("summary") or entry.get("description") or "")[:4000]
 
         published = _rss_published_at(getattr(entry, "published_parsed", None))
+
+        # feedparser surfaces the byline as entry.author or entry.author_detail.name
+        rss_author = (
+            entry.get("author")
+            or (entry.get("author_detail") or {}).get("name")
+            or ""
+        )
+        source_author = _normalize_text(rss_author)[:200] or None
 
         item = SourceItem(
             title=title,
@@ -446,6 +583,7 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
             source_name=label or feed.feed.get("title", feed_url),
             source_type="news",
             published_at=published,
+            source_author=source_author,
         )
         created = _create_and_analyze(db, item)
         added_items.append(created)

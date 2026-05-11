@@ -14,6 +14,12 @@ function fmtDate(s: string | null) {
   return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
 }
 
+/** Returns the best display date and a label. Label is null when a real publish date is available. */
+export function sourceDate(source: { published_at: string | null; ingested_at: string | null; created_at: string }): { date: string; label: string | null } {
+  if (source.published_at) return { date: fmtDate(source.published_at), label: null }
+  return { date: fmtDate(source.ingested_at ?? source.created_at), label: 'Collected' }
+}
+
 function urgencyDot(u: string) {
   if (u === 'high') return 'var(--opponent)'
   if (u === 'medium') return 'var(--warning)'
@@ -75,9 +81,14 @@ export default function SourceCard({ source, compact = false }: Props) {
             cluster
           </span>
         )}
-        <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', marginLeft: 'auto' }}>
-          {fmtDate(source.published_at)}
-        </span>
+        {(() => {
+          const { date, label } = sourceDate(source)
+          return (
+            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', marginLeft: 'auto' }}>
+              {label && <span style={{ color: 'var(--text-xmuted)', marginRight: 3 }}>{label}:</span>}{date}
+            </span>
+          )
+        })()}
       </div>
 
       {!compact && source.summary && (

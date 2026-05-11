@@ -104,6 +104,19 @@ class NarrativeCandidate:
     attribution_type: str
     target_confidence: str
     candidate_narrative_id: int | None = None
+    # Who the narrative targets and the stance — set from campaign metadata,
+    # never inferred from entity mentions in body text.
+    target_person: str | None = None
+    stance: str = "neutral"
+
+
+def _stance_from_direction(direction: str) -> str:
+    """Convert internal direction to human-readable stance."""
+    if direction == "against_candidate":
+        return "attack"
+    if direction == "for_candidate":
+        return "support"
+    return "neutral"
 
 
 def _norm(text: str) -> str:
@@ -166,7 +179,7 @@ def _short_label(text: str) -> str:
 def _source_time(source: SourceItem | None) -> datetime:
     if not source:
         return datetime.utcnow()
-    return source.published_at or source.created_at or datetime.utcnow()
+    return source.published_at or source.ingested_at or source.created_at or datetime.utcnow()
 
 
 def _cluster_key(source: SourceItem | None) -> str:
@@ -377,6 +390,18 @@ def _has_explicit_attack_on_candidate(text: str, candidate_name: str | None, opp
     ))
 
 
+def _text_attacks_candidate(text: str, candidate_name: str | None) -> bool:
+    """True when *text* uses attack language directed at the candidate by name.
+
+    Re-uses the proximity check in _has_explicit_attack_on_candidate without
+    requiring knowledge of the attacker (opponent_name=None).  This lets us
+    detect "Rob Bresnahan made the most corrupt politicians list" as an attack
+    on Rob even when the post was authored by an unknown third party and the
+    named opponent is never mentioned.
+    """
+    return bool(candidate_name and _has_explicit_attack_on_candidate(text, candidate_name, None))
+
+
 def _opponent_attribution(
     source: SourceItem | None,
     text: str,
@@ -463,12 +488,15 @@ def _candidate_from_opponent_activity(activity: OpponentActivity, campaign: Camp
             owner_confidence=owner_confidence,
             attribution_type=attribution,
             target_confidence=target_confidence,
+            target_person=candidate_name,
+            stance="attack",
         )
+    _direction = "against_candidate" if activity.attack else "neutral"
     return NarrativeCandidate(
         text=text[:500],
         narrative_type="opponent_attack" if activity.attack else "policy_frame",
-        owner_type=owner_type if activity.attack else owner_type,
-        direction="against_candidate" if activity.attack else "neutral",
+        owner_type=owner_type,
+        direction=_direction,
         source_item=source,
         opponent_activity=activity,
         mention_role="seed",
@@ -476,6 +504,8 @@ def _candidate_from_opponent_activity(activity: OpponentActivity, campaign: Camp
         owner_confidence=owner_confidence if activity.attack else "medium",
         attribution_type=attribution if activity.attack else "inferred",
         target_confidence=target_confidence if activity.attack else "low",
+        target_person=candidate_name if activity.attack else None,
+        stance=_stance_from_direction(_direction),
     )
 
 
@@ -493,15 +523,30 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
         return None
     lowered = text.lower()
     has_narrative_verb = any(marker in lowered for marker in _NARRATIVE_VERBS)
-    if source.actionability_label == "respond" or source.opponent_mentioned:
-        full_text = " ".join(filter(None, [source.title, source.raw_text, source.summary]))
+
+    # Hoist full_text and candidate_name so they are available for the
+    # candidate_attacked check below before entering the attack-detection block.
+    full_text = " ".join(filter(None, [source.title, source.raw_text, source.summary]))
+    candidate_name = campaign.candidate_name if campaign else None
+
+    # Detect attack language targeting the candidate even when the named
+    # opponent is absent from the text (e.g. a third-party Facebook post
+    # "Rob Bresnahan made the most corrupt politicians list").  We require
+    # the source NOT to be candidate-owned so the candidate doesn't flag
+    # their own positive framing as an attack on themselves.
+    candidate_attacked = (
+        source.source_owner_type != "candidate_statement"
+        and _text_attacks_candidate(full_text, candidate_name)
+    )
+
+    if source.actionability_label == "respond" or source.opponent_mentioned or candidate_attacked:
         attributed = None
         for opponent in opponents:
             is_attack, attribution, owner_confidence, target_confidence, owner_type = _opponent_attribution(
                 source,
                 full_text,
                 opponent.name,
-                campaign.candidate_name if campaign else None,
+                candidate_name,
             )
             if is_attack:
                 attributed = (attribution, owner_confidence, target_confidence, owner_type)
@@ -520,6 +565,8 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
                 owner_confidence=owner_confidence,
                 attribution_type=attribution,
                 target_confidence=target_confidence,
+                target_person=candidate_name,
+                stance="attack",
             )
         owner_class = _source_owner_class(source)
         if owner_class in {"party_committee_statement", "outside_group_statement"}:
@@ -529,8 +576,7 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
             direction = "against_candidate"
         elif owner_class == "opponent_statement":
             # Opponent-owned source that passed through _opponent_attribution
-            # without triggering is_attack — i.e. it's self-promotional content
-            # (policy announcement, record-touting) rather than an explicit attack.
+            # without triggering is_attack — self-promotional content.
             narrative_type = "policy_frame"
             attribution_type = "opponent_self_promotion"
             owner_type = "opponent"
@@ -539,6 +585,20 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
             narrative_type = "possible_attack"
             attribution_type = "unclear"
             owner_type = owner_class if owner_class != "unclear" else "unknown"
+            direction = "against_candidate"
+        elif candidate_attacked:
+            # Attack language targets the candidate but no named opponent drove
+            # it.  Happens with third-party social posts, opposition research
+            # outlets, or anonymous attack mailers that omit the opponent's name.
+            narrative_type = "possible_attack"
+            attribution_type = "inferred_attack_on_candidate"
+            _owner_map = {
+                "media": "media",
+                "party_committee_statement": "party_committee",
+                "outside_group_statement": "outside_group",
+                "opponent_statement": "opponent",
+            }
+            owner_type = _owner_map.get(owner_class, "unknown")
             direction = "against_candidate"
         else:
             narrative_type = "media_frame"
@@ -553,12 +613,24 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
             source_item=source,
             opponent_activity=None,
             mention_role="repeat",
-            confidence_score=50,
+            confidence_score=55 if candidate_attacked else 50,
             owner_confidence="low",
             attribution_type=attribution_type,
             target_confidence="medium" if source.candidate_mentioned else "low",
+            target_person=candidate_name if direction == "against_candidate" else None,
+            stance=_stance_from_direction(direction),
         )
-    if source.source_type in {"campaign_note", "social", "manual", "webpage"} and source.candidate_mentioned and has_narrative_verb:
+
+    # Candidate self-definition: only when the source is CANDIDATE-OWNED.
+    # A third-party social post that mentions the candidate's name is NOT a
+    # candidate self-definition even if it contains narrative verbs — the
+    # candidate may be the subject of the post, not its author.
+    if (
+        source.source_type in {"campaign_note", "social", "manual", "webpage"}
+        and source.candidate_mentioned
+        and has_narrative_verb
+        and source.source_owner_type == "candidate_statement"
+    ):
         return NarrativeCandidate(
             text=text[:500],
             narrative_type="candidate_self_definition",
@@ -571,6 +643,8 @@ def _candidate_from_source(source: SourceItem, campaign: CampaignConfig | None, 
             owner_confidence="medium",
             attribution_type="inferred",
             target_confidence="medium",
+            target_person=candidate_name,
+            stance="support",
         )
     return None
 
@@ -599,6 +673,7 @@ def _candidate_from_message_library(
         return None
     candidate_narrative, confidence, matched_text = best
     narrative_type, direction = _candidate_narrative_type(candidate_narrative, source)
+    _owned = _candidate_owned_source(source, campaign, candidate_capture_ids)
     return NarrativeCandidate(
         text=candidate_narrative.canonical_text[:500],
         narrative_type=narrative_type,
@@ -606,12 +681,14 @@ def _candidate_from_message_library(
         direction=direction,
         source_item=source,
         opponent_activity=None,
-        mention_role="seed" if _candidate_owned_source(source, campaign, candidate_capture_ids) else "amplification",
+        mention_role="seed" if _owned else "amplification",
         confidence_score=confidence,
-        owner_confidence="high" if _candidate_owned_source(source, campaign, candidate_capture_ids) else "medium",
-        attribution_type="candidate_owned_source" if _candidate_owned_source(source, campaign, candidate_capture_ids) else "explicit_reported_attack",
+        owner_confidence="high" if _owned else "medium",
+        attribution_type="candidate_owned_source" if _owned else "explicit_reported_attack",
         target_confidence="high",
         candidate_narrative_id=candidate_narrative.id,
+        target_person=campaign.candidate_name,
+        stance=_stance_from_direction(direction),
     )
 
 
@@ -775,6 +852,7 @@ def refresh_narratives(db: Session, force: bool = False) -> list[Narrative]:
     for items in groups:
         score = _score_group(items)
         seed = max(items, key=lambda item: item.confidence_score)
+        _seed_source = seed.source_item
         narrative = Narrative(
             canonical_text=seed.text,
             short_label=_short_label(seed.text),
@@ -795,6 +873,11 @@ def refresh_narratives(db: Session, force: bool = False) -> list[Narrative]:
             attribution_type=score["attribution_type"],
             target_confidence=score["target_confidence"],
             candidate_narrative_id=seed.candidate_narrative_id,
+            target_person=seed.target_person,
+            stance=seed.stance,
+            source_platform=_seed_source.source_type if _seed_source else None,
+            source_url=_seed_source.source_url if _seed_source else None,
+            source_author_name=_seed_source.source_author if _seed_source else None,
             notes=score["notes"],
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
@@ -825,6 +908,12 @@ def refresh_narratives(db: Session, force: bool = False) -> list[Narrative]:
                 attribution_type=item.attribution_type,
                 target_confidence=item.target_confidence,
                 candidate_narrative_id=item.candidate_narrative_id,
+                source_platform=source.source_type if source else None,
+                source_author_name=source.source_author if source else None,
+                target_person=item.target_person,
+                stance=item.stance,
+                published_at=source.published_at if source else None,
+                ingested_at=source.ingested_at if source else None,
             ))
         narratives.append(narrative)
 

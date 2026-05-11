@@ -203,7 +203,9 @@ function NarrativePanel({ narrative, onClose }: {
                       <span style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                         {src.source_name || 'Unknown'}
                       </span>
-                      <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>{timeAgo(src.published_at)}</span>
+                      <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>
+                        {src.published_at ? timeAgo(src.published_at) : `Collected ${timeAgo(src.ingested_at ?? src.created_at)}`}
+                      </span>
                     </div>
                     {src.snapshot?.key_claim_or_quote && (
                       <p style={{ margin: '0 0 4px', fontSize: '0.74rem', color: 'var(--text-secondary)', lineHeight: 1.45, fontStyle: 'italic' }}>

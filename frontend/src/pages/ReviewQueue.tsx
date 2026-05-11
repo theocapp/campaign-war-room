@@ -2,11 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import type { ReviewQueueItem } from '../api/types'
-
-function fmtDate(s: string | null) {
-  if (!s) return '—'
-  return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
+import { sourceDate } from '../components/SourceCard'
 
 const TYPE_META: Record<string, { label: string; color: string }> = {
   news:               { label: 'News',          color: 'var(--accent-light)' },
@@ -225,7 +221,7 @@ export default function ReviewQueue() {
 
                 {/* Row 3: meta */}
                 <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', marginBottom: 8 }}>
-                  {item.source_name || '—'} · {fmtDate(item.published_at)}
+                  {item.source_name || '—'} · {(() => { const { date, label } = sourceDate(item); return label ? `${label}: ${date}` : date })()}
                   {item.source_url && (
                     <> · <a href={item.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-light)' }}>link ↗</a></>
                   )}
