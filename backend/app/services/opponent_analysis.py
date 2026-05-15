@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
 from app.models import CampaignConfig, Opponent, OpponentActivity, SourceItem
+from app.services.text_utils import strip_html_to_text
 
 if TYPE_CHECKING:
     from app.services.llm_provider import BaseLLMProvider
@@ -174,20 +175,24 @@ def _extract_activities(
             if actor == "candidate":
                 continue
 
+        # Decode entities and strip any residual tags so quotes don't carry
+        # `&#x2019;` or `<a href>` markup into storage / UI.
+        clean = strip_html_to_text(sentence)
+
         activity: dict = {
             "claim": None,
             "attack": None,
             "promise": None,
             "contradiction_note": None,
-            "repeated_theme": _detect_theme(sentence),
+            "repeated_theme": _detect_theme(clean),
         }
 
         if classified["is_attack"]:
-            activity["attack"] = sentence[:500]
+            activity["attack"] = clean[:500]
         if classified["is_claim"]:
-            activity["claim"] = sentence[:500]
+            activity["claim"] = clean[:500]
         if classified["is_promise"]:
-            activity["promise"] = sentence[:300]
+            activity["promise"] = clean[:300]
 
         results.append(activity)
 

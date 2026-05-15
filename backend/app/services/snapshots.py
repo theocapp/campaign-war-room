@@ -13,10 +13,14 @@ from sqlalchemy.orm import Session
 from app.models import CampaignConfig, Issue, OpponentActivity, SourceItem
 from app.schemas import IssueSnapshot, SourceItemOut, SourceSnapshot
 from app.services.story_clustering import unique_by_cluster
+from app.services.text_utils import strip_html_to_text
 
 
 def _clean_sentence(text: str | None, fallback: str) -> str:
-    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    # Strip HTML tags + decode entities before any further processing — RSS
+    # summary fields and older raw_text values can still contain markup that
+    # would otherwise leak into user-facing summaries (e.g. anchor tags).
+    cleaned = strip_html_to_text(text)
     if not cleaned:
         return fallback
     parts = re.split(r"(?<=[.!?])\s+", cleaned)
