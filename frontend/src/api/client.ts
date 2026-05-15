@@ -212,5 +212,5 @@ export const api = {
   suggestNarrativeFrames: (daysBack = 14) =>
     post<{ suggested: number; frames: NarrativeFrameSuggestion[] }>(`/narrative-frames/suggest?days_back=${daysBack}`, {}),
   rematchNarrativeFrames: (daysBack = 30) =>
-    post<{ matched_mentions: number }>(`/narrative-frames/rematch?days_back=${daysBack}`, {}),
+    post<{ status: string; days_back: number }>(`/narrative-frames/rematch?days_back=${daysBack}`, {}),
 }

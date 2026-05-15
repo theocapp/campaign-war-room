@@ -16,6 +16,8 @@ so the two paths can never run concurrently.
 import asyncio
 import logging
 import os
+import threading
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -143,6 +145,47 @@ async def _scheduled_ingest_job() -> None:
         briefing_summary.invalidate()
     except Exception:
         log.warning("Failed to invalidate briefing summary cache")
+
+
+def _run_rematch(days_back: int = 30) -> None:
+    """Sync: run rematch_all in-thread.  Called by enqueue_rematch."""
+    from app.db import SessionLocal
+    from app.services import narrative_frames as nf_svc
+
+    log.info("rematch: starting (days_back=%d)", days_back)
+    try:
+        with SessionLocal() as db:
+            count = nf_svc.rematch_all(db, days_back=days_back)
+        log.info("rematch: done — %d mentions created/updated", count)
+    except Exception:
+        log.exception("rematch: failed")
+
+
+def enqueue_rematch(days_back: int = 30) -> None:
+    """Enqueue a rematch_all run. Returns immediately; work runs in background.
+
+    If the APScheduler is running, adds a date-triggered (run-now) job.
+    If the scheduler is disabled, falls back to a daemon thread.
+    """
+    global _scheduler
+    if _scheduler is not None and _scheduler.running:
+        job_id = f"rematch_manual_{int(datetime.utcnow().timestamp())}"
+        _scheduler.add_job(
+            _run_rematch,
+            args=[days_back],
+            trigger="date",
+            id=job_id,
+            replace_existing=False,
+            max_instances=1,
+        )
+        log.info("enqueue_rematch: job %s queued (days_back=%d)", job_id, days_back)
+    else:
+        # Scheduler not running — run in a daemon thread so the HTTP response
+        # still returns immediately.
+        threading.Thread(
+            target=_run_rematch, args=[days_back], daemon=True, name="rematch_manual"
+        ).start()
+        log.info("enqueue_rematch: scheduler not running, started thread (days_back=%d)", days_back)
 
 
 def start_scheduler() -> None:

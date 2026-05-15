@@ -305,8 +305,8 @@ export default function Narratives() {
     setRematching(true)
     setStatusMsg(null)
     try {
-      const result = await api.rematchNarrativeFrames(30)
-      setStatusMsg(`Matched ${result.matched_mentions} article mentions to frames.`)
+      await api.rematchNarrativeFrames(30)
+      setStatusMsg('Rematch queued — results will appear shortly.')
       load()
     } catch (e: any) {
       setStatusMsg('Rematch failed: ' + e.message)
