@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -119,3 +120,95 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         _migrate(conn)
+    _phase0_backfill()
+
+
+def _phase0_backfill() -> None:
+    """One-shot, idempotent cleanup of data written before the Phase 0 fixes.
+
+    Two passes — both no-ops on a clean DB:
+      1. Decode HTML entities + strip tags from OpponentActivity quote fields
+         that still contain markup (left over before bug 2 fix).
+      2. Merge duplicate Opponent rows (normalized-name collisions left over
+         before bug 3 fix). Activities from the duplicate are re-pointed onto
+         the canonical row with fingerprint-based dedup, then the duplicate
+         is deleted.
+    """
+    from sqlalchemy import or_
+    from app.models import Opponent, OpponentActivity
+    from app.services.text_utils import strip_html_to_text
+    from app.services.opponent_analysis import _activity_fingerprint
+    from app.services.race_directory import _normalize_candidate_name
+
+    with SessionLocal() as db:
+        # Pass 1 — clean up encoded entities / residual tags in quote text.
+        dirty = (
+            db.query(OpponentActivity)
+            .filter(or_(
+                OpponentActivity.attack.like("%&#%"),
+                OpponentActivity.attack.like("%<%"),
+                OpponentActivity.claim.like("%&#%"),
+                OpponentActivity.claim.like("%<%"),
+                OpponentActivity.promise.like("%&#%"),
+                OpponentActivity.promise.like("%<%"),
+            ))
+            .all()
+        )
+        for row in dirty:
+            if row.attack:
+                row.attack = strip_html_to_text(row.attack)[:500]
+            if row.claim:
+                row.claim = strip_html_to_text(row.claim)[:500]
+            if row.promise:
+                row.promise = strip_html_to_text(row.promise)[:300]
+        if dirty:
+            db.commit()
+
+        # Pass 2 — merge duplicate opponents.
+        opponents = db.query(Opponent).all()
+        by_norm: dict[str, list[Opponent]] = {}
+        for opp in opponents:
+            key = _normalize_candidate_name(opp.name)
+            if not key:
+                continue
+            by_norm.setdefault(key, []).append(opp)
+
+        for group in by_norm.values():
+            if len(group) < 2:
+                continue
+            # Canonical = the one whose name is human-readable
+            # ("Rob Bresnahan" beats "BRESNAHAN, ROB"). If both / neither
+            # have commas, prefer the one with a FEC ID stamped, then
+            # whichever was created first.
+            def _rank(o: Opponent) -> tuple[int, int, int]:
+                has_comma = "," in (o.name or "")
+                has_fec = bool(o.fec_candidate_id)
+                created_ord = int((o.created_at or datetime.utcnow()).timestamp())
+                return (1 if has_comma else 0, 0 if has_fec else 1, created_ord)
+
+            group.sort(key=_rank)
+            canonical = group[0]
+            for dup in group[1:]:
+                # Pull FEC ID from the duplicate if canonical doesn't have one.
+                if dup.fec_candidate_id and not canonical.fec_candidate_id:
+                    canonical.fec_candidate_id = dup.fec_candidate_id
+                # Re-point activities, deduping against canonical's existing rows.
+                canon_fps = {
+                    _activity_fingerprint({"attack": r.attack, "claim": r.claim, "promise": r.promise})
+                    for r in db.query(OpponentActivity).filter(OpponentActivity.opponent_id == canonical.id)
+                }
+                dup_acts = (
+                    db.query(OpponentActivity)
+                    .filter(OpponentActivity.opponent_id == dup.id)
+                    .all()
+                )
+                for act in dup_acts:
+                    fp = _activity_fingerprint({"attack": act.attack, "claim": act.claim, "promise": act.promise})
+                    if fp in canon_fps:
+                        db.delete(act)
+                    else:
+                        act.opponent_id = canonical.id
+                        canon_fps.add(fp)
+                db.flush()
+                db.delete(dup)
+            db.commit()
