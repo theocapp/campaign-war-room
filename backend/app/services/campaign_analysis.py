@@ -1,9 +1,10 @@
 """
-Single LLM call per article: relevance + summary + framing.
+Single LLM call per article: relevance + summary + framing + sentiment + frame matching.
 
-Replaces the separate summarize_source, classify_urgency, and keyword-based
-race_relevance calls. The LLM reads the article with full campaign context
-and makes a single holistic judgment about whether it matters for the race.
+Replaces the separate summarize_source, classify_urgency, keyword-based
+race_relevance, and match_article_to_frames calls. The LLM reads the article
+with full campaign context and makes a single holistic judgment — including
+which narrative frames apply and the article's sentiment toward the candidate.
 
 Falls back to the keyword scorer if the LLM call fails or is unavailable.
 """
@@ -13,7 +14,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import CampaignConfig, Opponent, SourceItem
+from app.models import CampaignConfig, NarrativeFrame, Opponent, SourceItem
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,25 @@ def _article_text(item: SourceItem, max_words: int = 600) -> str:
     return " ".join(words[:max_words])
 
 
-def _build_prompt(item: SourceItem, ctx: dict) -> str:
+def _build_frames_section(frames: list) -> str:
+    """Return a numbered NARRATIVE FRAMES block for the prompt, or empty string."""
+    if not frames:
+        return ""
+    lines = "\n".join(
+        f"{i + 1}. [{f.owner_type}] {f.name}: {f.description or ''}"
+        for i, f in enumerate(frames)
+    )
+    return f"\nNARRATIVE FRAMES (match by number — return numbers in frame_matches):\n{lines}\n"
+
+
+def _build_prompt(item: SourceItem, ctx: dict, frames: list | None = None) -> str:
     opponent_str = " and ".join(ctx["opponents"])
     issues_str = ", ".join(ctx["issues"]) if ctx["issues"] else "general campaign issues"
     article_text = _article_text(item)
+    frames_section = _build_frames_section(frames or [])
+    frames_json_note = (
+        '"frame_matches": [1, 3]' if frames else '"frame_matches": []'
+    )
 
     return f"""You are analyzing a news article for a political campaign intelligence tool.
 
@@ -75,7 +91,7 @@ CAMPAIGN CONTEXT:
 - Location: {ctx["location"]}
 - Opponent: {opponent_str}
 - Key campaign issues: {issues_str}
-
+{frames_section}
 ARTICLE:
 Title: {item.title or "No title"}
 Source: {item.source_name or "Unknown"}
@@ -105,6 +121,12 @@ copy the exact sentence into `opponent_attacks`. Only include sentences
 where the opponent themselves is the subject (NOT sentences where
 {ctx["candidate"]} is criticizing the opponent). Return [] if none.
 
+SENTIMENT: how the article's overall tone affects {ctx["candidate"]}:
+- "positive" = favorable coverage for the candidate
+- "negative" = unfavorable coverage for the candidate
+- "neutral" = balanced/factual, no clear tilt
+- "mixed" = contains both positive and negative elements
+
 Return ONLY a JSON object, no other text:
 {{
   "relevant": true or false,
@@ -113,13 +135,15 @@ Return ONLY a JSON object, no other text:
   "framing": "helps_candidate" or "hurts_candidate" or "opponent_news" or "background" or "irrelevant",
   "needs_attention": true or false,
   "reason": "One sentence explaining the relevance judgment.",
+  "sentiment": "positive" or "negative" or "neutral" or "mixed",
   "opponent_attacks": [
     {{
       "opponent_name": "name of the opponent making this statement",
       "type": "attack" or "claim" or "promise",
       "text": "the exact sentence from the article"
     }}
-  ]
+  ],
+  {frames_json_note}
 }}"""
 
 
@@ -131,7 +155,9 @@ def _fallback_result() -> dict:
         "framing": "irrelevant",
         "needs_attention": False,
         "reason": "LLM unavailable; article not scored.",
+        "sentiment": "neutral",
         "opponent_attacks": [],
+        "frame_matches": [],
         "_used_fallback": True,
     }
 
@@ -161,16 +187,32 @@ def _validate_opponent_attacks(raw_attacks, known_opponents: list[str]) -> list[
     return cleaned
 
 
+_VALID_SENTIMENTS = {"positive", "negative", "neutral", "mixed"}
+
+
 def analyze(db: Session, item: SourceItem) -> dict:
+    """Thin wrapper — calls analyze_with_frames with no frame list."""
+    return analyze_with_frames(db, item, frames=None)
+
+
+def analyze_with_frames(
+    db: Session,
+    item: SourceItem,
+    frames: list[NarrativeFrame] | None = None,
+) -> dict:
     """
-    Run one LLM call to assess whether an article matters for the campaign.
+    Single LLM call per article: relevance + summary + framing + sentiment +
+    frame matching.
+
+    When `frames` is provided the prompt includes a numbered frame list and
+    the response includes `frame_matches` (1-indexed ints).  Ingestion code is
+    responsible for translating those indices to NarrativeFrameMention rows.
 
     Returns a dict with:
-        relevant (bool), relevance_score (int 0-100), one_sentence (str|None),
-        framing (str), needs_attention (bool), reason (str)
+        relevant, relevance_score, one_sentence, framing, needs_attention,
+        reason, sentiment, opponent_attacks, frame_matches
 
-    On any failure, returns a fallback dict with _used_fallback=True so the
-    caller knows to run keyword scoring instead.
+    On any failure, returns a fallback dict with _used_fallback=True.
     """
     raw = None
     try:
@@ -179,11 +221,15 @@ def analyze(db: Session, item: SourceItem) -> dict:
 
         # Mock provider doesn't understand structured prompts — use keyword fallback
         if isinstance(provider, MockLLMProvider):
-            logger.warning("campaign_analysis: MockLLMProvider active — AI scoring disabled, using fallback for item %d", item.id)
+            logger.warning(
+                "campaign_analysis: MockLLMProvider active — AI scoring disabled, "
+                "using fallback for item %d",
+                item.id,
+            )
             return _fallback_result()
 
         ctx = _build_context(db)
-        prompt = _build_prompt(item, ctx)
+        prompt = _build_prompt(item, ctx, frames=frames)
         raw = provider.complete(prompt)
 
         if not raw or not raw.strip():
@@ -194,7 +240,6 @@ def analyze(db: Session, item: SourceItem) -> dict:
         text = raw.strip()
         if text.startswith("```"):
             lines = text.splitlines()
-            # Drop first line (```json or ```) and last line (```)
             inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
             text = "\n".join(inner).strip()
 
@@ -208,17 +253,37 @@ def analyze(db: Session, item: SourceItem) -> dict:
         result.setdefault("framing", "irrelevant")
         result.setdefault("reason", "")
         result.setdefault("one_sentence", None)
+
+        # Sentiment — coerce to a known value
+        raw_sentiment = (result.get("sentiment") or "neutral").strip().lower()
+        result["sentiment"] = raw_sentiment if raw_sentiment in _VALID_SENTIMENTS else "neutral"
+
         result["opponent_attacks"] = _validate_opponent_attacks(
             result.get("opponent_attacks"), ctx["opponents"]
         )
+
+        # frame_matches: validate each is a 1-based int within the frame list
+        n_frames = len(frames) if frames else 0
+        raw_matches = result.get("frame_matches") or []
+        if isinstance(raw_matches, list):
+            result["frame_matches"] = [
+                idx for idx in raw_matches
+                if isinstance(idx, int) and 1 <= idx <= n_frames
+            ]
+        else:
+            result["frame_matches"] = []
+
         result["_used_fallback"] = False
 
         logger.info(
-            "campaign_analysis: item=%d  relevant=%s  score=%d  framing=%s  title=%r",
+            "campaign_analysis: item=%d  relevant=%s  score=%d  framing=%s  "
+            "sentiment=%s  frames=%s  title=%r",
             item.id,
             result["relevant"],
             result["relevance_score"],
             result["framing"],
+            result["sentiment"],
+            result["frame_matches"],
             (item.title or "")[:60],
         )
         return result

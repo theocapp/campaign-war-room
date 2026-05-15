@@ -1,11 +1,7 @@
 """Tests for the single-LLM-call ingest pipeline.
 
-Phase 0 — Option C (hybrid) wires opponent attack extraction into the SAME
-LLM call that scores relevance, and persists the LLM's `reason` field as
-`relevance_reasons` (gap 13).
-
-This file is also the first unit-test coverage for `campaign_analysis.analyze`,
-which previously had none (audit debt 17).
+Phase 0 — Option C wires opponent attack extraction into the same LLM call.
+Phase 1 — Combined call also returns sentiment + frame_matches in one pass.
 """
 import json
 from datetime import datetime
@@ -18,13 +14,15 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.models import (
     CampaignConfig,
+    NarrativeFrame,
+    NarrativeFrameMention,
     Opponent,
     OpponentActivity,
     SourceItem,
 )
 from app.services import campaign_analysis, llm_provider
-from app.services.campaign_analysis import _validate_opponent_attacks, analyze
-from app.services.ingestion import _persist_opponent_attacks
+from app.services.campaign_analysis import _validate_opponent_attacks, analyze, analyze_with_frames
+from app.services.ingestion import _persist_opponent_attacks, _persist_frame_matches
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -252,3 +250,155 @@ def test_persist_attacks_strips_html(cognetti_db):
     assert "&#x2019;" not in activity.attack
     assert "<a" not in activity.attack
     assert "’" in activity.attack
+
+
+# ── Phase 1: combined call (sentiment + frame_matches) ────────────────────────
+
+
+@pytest.fixture
+def frames_db(cognetti_db):
+    """cognetti_db extended with two active NarrativeFrames."""
+    cognetti_db.add(NarrativeFrame(
+        name="Healthcare record",
+        description="Coverage of Cognetti’s healthcare positions",
+        owner_type="candidate",
+        active=True,
+        source="manual",
+    ))
+    cognetti_db.add(NarrativeFrame(
+        name="Bresnahan attacks",
+        description="Attacks launched by Bresnahan against Cognetti",
+        owner_type="opponent",
+        active=True,
+        source="manual",
+    ))
+    cognetti_db.commit()
+    return cognetti_db
+
+
+def test_analyze_with_frames_returns_sentiment(frames_db, monkeypatch):
+    item = SourceItem(
+        title="Bresnahan attacks Cognetti on healthcare",
+        raw_text="Rob Bresnahan said Cognetti’s record is reckless.",
+        source_name="Times-Tribune",
+        source_type="news",
+    )
+    frames_db.add(item)
+    frames_db.commit()
+
+    frames = frames_db.query(NarrativeFrame).all()
+    stub = _StubProvider(json.dumps({
+        "relevant": True,
+        "relevance_score": 80,
+        "one_sentence": "Bresnahan attacked Cognetti on healthcare.",
+        "framing": "hurts_candidate",
+        "needs_attention": True,
+        "reason": "Direct opponent attack.",
+        "sentiment": "negative",
+        "opponent_attacks": [],
+        "frame_matches": [1, 2],
+    }))
+    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+
+    result = analyze_with_frames(frames_db, item, frames=frames)
+
+    assert result["_used_fallback"] is False
+    assert result["sentiment"] == "negative"
+    assert result["frame_matches"] == [1, 2]
+
+
+def test_analyze_with_frames_coerces_bad_sentiment(frames_db, monkeypatch):
+    item = SourceItem(title="x", raw_text="x", source_name="x", source_type="news")
+    frames_db.add(item)
+    frames_db.commit()
+
+    stub = _StubProvider(json.dumps({
+        "relevant": False,
+        "relevance_score": 5,
+        "one_sentence": None,
+        "framing": "irrelevant",
+        "needs_attention": False,
+        "reason": "Not relevant.",
+        "sentiment": "VERY_BAD_VALUE",
+        "opponent_attacks": [],
+        "frame_matches": [],
+    }))
+    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+
+    result = analyze_with_frames(frames_db, item, frames=[])
+    assert result["sentiment"] == "neutral"
+
+
+def test_analyze_with_frames_ignores_out_of_range_indices(frames_db, monkeypatch):
+    item = SourceItem(title="x", raw_text="x", source_name="x", source_type="news")
+    frames_db.add(item)
+    frames_db.commit()
+
+    frames = frames_db.query(NarrativeFrame).all()  # 2 frames
+    stub = _StubProvider(json.dumps({
+        "relevant": True,
+        "relevance_score": 60,
+        "one_sentence": "Something happened.",
+        "framing": "background",
+        "needs_attention": False,
+        "reason": "Relevant.",
+        "sentiment": "neutral",
+        "opponent_attacks": [],
+        "frame_matches": [0, 1, 99],  # 0 and 99 are out of range; only 1 is valid
+    }))
+    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+
+    result = analyze_with_frames(frames_db, item, frames=frames)
+    assert result["frame_matches"] == [1]
+
+
+def test_persist_frame_matches_creates_mentions(frames_db):
+    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
+    frames_db.add(item)
+    frames_db.commit()
+
+    frames = frames_db.query(NarrativeFrame).all()
+    _persist_frame_matches(frames_db, item, frames, [1, 2])
+    frames_db.commit()
+
+    mentions = frames_db.query(NarrativeFrameMention).filter_by(source_item_id=item.id).all()
+    assert len(mentions) == 2
+    assert all(m.matched_by == "llm" for m in mentions)
+    assert all(m.confidence == 75 for m in mentions)
+
+
+def test_persist_frame_matches_deduplicates(frames_db):
+    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
+    frames_db.add(item)
+    frames_db.commit()
+
+    frames = frames_db.query(NarrativeFrame).all()
+    _persist_frame_matches(frames_db, item, frames, [1])
+    frames_db.commit()
+    # Call again — should not create a duplicate
+    _persist_frame_matches(frames_db, item, frames, [1])
+    frames_db.commit()
+
+    assert frames_db.query(NarrativeFrameMention).filter_by(source_item_id=item.id).count() == 1
+
+
+def test_analyze_no_frames_returns_empty_frame_matches(cognetti_db, monkeypatch):
+    item = SourceItem(title="x", raw_text="x", source_name="x", source_type="news")
+    cognetti_db.add(item)
+    cognetti_db.commit()
+
+    stub = _StubProvider(json.dumps({
+        "relevant": True,
+        "relevance_score": 50,
+        "one_sentence": "Something.",
+        "framing": "background",
+        "needs_attention": False,
+        "reason": "Relevant.",
+        "sentiment": "neutral",
+        "opponent_attacks": [],
+        "frame_matches": [],
+    }))
+    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+
+    result = analyze_with_frames(cognetti_db, item, frames=None)
+    assert result["frame_matches"] == []
