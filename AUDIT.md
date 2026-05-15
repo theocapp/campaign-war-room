@@ -138,16 +138,16 @@ Tasks:
 
 **Goal**: ingest does the right thing once, full-text search works, source-detail page exists.
 
-**Status**: not started
+**Status**: done (2026-05-15, branch `main`)
 
 Tasks:
-- [ ] Combine `campaign_analysis` + `match_article_to_frames` into one LLM call returning both verdict and frame matches (gap 12).
-- [ ] Move `rematch_all` out of HTTP request → background job (gap 11).
-- [ ] Add `sentiment` column on SourceItem + extend the LLM prompt to return it.
-- [ ] SQLite FTS5 virtual table over `source_items(title, raw_text)`. Expose `GET /api/search?q=`.
-- [ ] Add a source-detail page in the frontend (`/sources/:id`) showing extracted text, framing, sentiment, reasons, frame mentions.
-- [ ] Add `AbortController` to OpponentTracker selection.
-- [ ] Make the briefing summary cache key per-campaign.
+- [x] Combine `campaign_analysis` + `match_article_to_frames` into one LLM call returning both verdict and frame matches (gap 12). New function: `analyze_with_frames(db, item, frames)`.
+- [x] Move `rematch_all` out of HTTP request → background job (gap 11). `POST /narrative-frames/rematch` now returns `{"status": "queued"}` in <1s.
+- [x] Add `sentiment` column on SourceItem + extend the LLM prompt to return it.
+- [x] SQLite FTS5 virtual table over `source_items(title, raw_text)`. Expose `GET /api/search?q=`.
+- [x] Add a source-detail page in the frontend (`/sources/:id`) showing extracted text, framing, sentiment, reasons, frame mentions.
+- [x] Add `AbortController` to OpponentTracker selection.
+- [x] Make the briefing summary cache key per-campaign.
 
 **Acceptance**: search works, source-detail page renders, ingest LLM cost halved, sentiment shows on each article.
 
@@ -260,3 +260,6 @@ _(Add an entry when you make a non-obvious choice that future sessions need to k
 - **2026-05-15** — Groq is the only supported LLM in production; OpenAI/Anthropic providers exist as fallback only and should not be advertised as features.
 - **2026-05-15 (Phase 0)** — Option C selected for live-ingest wiring: opponent activity extraction rides in the same per-article LLM call (extending its JSON schema with `opponent_attacks`), and issue-clustering wiring was deleted entirely. Keeps the PRODUCT_BRIEF "one LLM call per article" invariant.
 - **2026-05-15 (Phase 0)** — `init_db()` now runs a one-shot idempotent backfill (`_phase0_backfill`) to clean legacy entity-encoded opponent quotes and merge duplicate Opponent rows. Idempotent on a clean DB; safe to leave permanently.
+- **2026-05-15 (Phase 1)** — `analyze_with_frames()` replaces the two-call pattern (analyze + match_article_to_frames). Frames list passed in by ingestion code; function returns `frame_matches` as 1-indexed ints; ingestion code creates NarrativeFrameMention rows. The standalone `match_article_to_frames` still exists for `rematch_all`.
+- **2026-05-15 (Phase 1)** — FTS5 triggers created once in `_migrate()` guarded by `sqlite_master` check. No external search service.
+- **2026-05-15 (Phase 1)** — `rematch_all` enqueued via APScheduler `trigger='date'` job (run-now); HTTP endpoint returns immediately. Falls back to daemon thread if scheduler is disabled.
