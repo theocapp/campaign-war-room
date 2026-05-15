@@ -11,32 +11,36 @@ from app.services import llm_provider
 
 log = logging.getLogger(__name__)
 
-_cache: dict = {
-    "text": None,
-    "generated_at": None,
-    "ttl_seconds": 1800,  # 30 minutes
-}
+_TTL_SECONDS = 1800  # 30 minutes
+_cache: dict[int, dict] = {}  # keyed by campaign_id
 
 
-def invalidate():
-    """Call this after an ingestion run to force regeneration on next request."""
-    _cache["text"] = None
-    _cache["generated_at"] = None
+def _campaign_key(campaign) -> int:
+    return getattr(campaign, "id", None) or 0
+
+
+def invalidate(campaign=None):
+    """Call after an ingestion run to force regeneration on next request.
+
+    If campaign is provided, only the cache entry for that campaign is cleared.
+    If campaign is None, all entries are cleared.
+    """
+    if campaign is not None:
+        _cache.pop(_campaign_key(campaign), None)
+    else:
+        _cache.clear()
 
 
 def get_or_generate(db: Session, articles: list[dict], campaign, opponents: list) -> str | None:
+    key = _campaign_key(campaign)
+    entry = _cache.get(key)
     now = time.time()
-    if (
-        _cache["text"]
-        and _cache["generated_at"]
-        and (now - _cache["generated_at"]) < _cache["ttl_seconds"]
-    ):
-        return _cache["text"]
+    if entry and entry.get("text") and (now - entry["generated_at"]) < _TTL_SECONDS:
+        return entry["text"]
 
     result = _generate(db, articles, campaign, opponents)
     if result:
-        _cache["text"] = result
-        _cache["generated_at"] = now
+        _cache[key] = {"text": result, "generated_at": now}
     return result
 
 
