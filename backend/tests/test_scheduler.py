@@ -77,7 +77,7 @@ class TestSchedulerConfig:
     def test_default_interval(self, monkeypatch):
         monkeypatch.delenv("RSS_AUTO_INGEST_INTERVAL_MINUTES", raising=False)
         from app.services import scheduler
-        assert scheduler._interval_minutes() == 60
+        assert scheduler._interval_minutes() == 30  # default is 30 min
 
     def test_custom_interval(self, monkeypatch):
         monkeypatch.setenv("RSS_AUTO_INGEST_INTERVAL_MINUTES", "30")

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import type { Opponent, OpponentActivity } from '../api/types'
 
@@ -26,6 +26,7 @@ export default function OpponentTracker() {
   const [showAdd, setShowAdd]       = useState(false)
   const [form, setForm]             = useState({ name: '', office: '', party: '', notes: '' })
   const [saving, setSaving]         = useState(false)
+  const activityAbortRef            = useRef<AbortController | null>(null)
 
   useEffect(() => {
     api.getOpponents().then(d => {
@@ -36,8 +37,17 @@ export default function OpponentTracker() {
   }, [])
 
   function loadActivity(opp: Opponent) {
+    // Cancel any in-flight activity fetch for a previously selected opponent.
+    activityAbortRef.current?.abort()
+    const controller = new AbortController()
+    activityAbortRef.current = controller
+
     setSelected(opp)
-    api.getOpponentActivity(opp.id).then(setActivities)
+    setActivities([])
+    fetch(`/api/opponents/${opp.id}/activity`, { signal: controller.signal })
+      .then(r => r.json())
+      .then((data: OpponentActivity[]) => { if (!controller.signal.aborted) setActivities(data) })
+      .catch(e => { if (e.name !== 'AbortError') console.error('loadActivity failed:', e) })
   }
 
   async function addOpponent() {
