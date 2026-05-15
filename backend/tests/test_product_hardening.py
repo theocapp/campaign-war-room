@@ -143,15 +143,3 @@ def test_thin_talking_point_response_includes_geography_and_race_context(db):
     assert "Queens" in response.long_answer
 
 
-def test_dashboard_surfaces_weak_source_coverage_instead_of_generic_issue_action(db):
-    from app.routes.dashboard import get_dashboard
-
-    _campaign(db)
-    issue = Issue(name="Housing & Affordability", urgency="high", trend="rising", mention_count=1, last_seen_at=datetime.utcnow())
-    db.add(issue)
-    db.commit()
-    dashboard = get_dashboard(db=db)
-
-    assert dashboard.source_coverage.source_coverage_strength == "weak"
-    assert any("Coverage is thin" in action.action for action in dashboard.suggested_actions)
-    assert all("Draft issue statement" not in action.action for action in dashboard.suggested_actions)

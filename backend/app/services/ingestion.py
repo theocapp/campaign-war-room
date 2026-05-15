@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.models import CanvassingNote, IssueMention, OpponentActivity, SourceItem
-from app.services import campaign_analysis, intelligence, narrative_frames, narratives, race_relevance, scoring, story_clustering
+from app.services import campaign_analysis, intelligence, narrative_frames, race_relevance, scoring, story_clustering
 from app.services.campaign_analysis import framing_to_action
 from app.services.snapshots import build_source_summary
 from app.services.source_ownership import classify_source_owner

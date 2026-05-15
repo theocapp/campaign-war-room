@@ -341,25 +341,6 @@ class TestFullCascade:
         assert step_statuses[2] != "error"
         assert step_statuses[3] != "error"
 
-    def test_narrative_failure_does_not_prevent_monitor_persistence(self, db, monkeypatch):
-        """Even when the narrative step fails, monitors must still be persisted."""
-        from app.services import narratives as narrative_svc
-        from app.services.campaign_setup import initialize_campaign
-
-        monkeypatch.setenv("SEARCH_PROVIDER", "mock")
-        monkeypatch.setattr(
-            narrative_svc,
-            "refresh_narratives",
-            lambda db: (_ for _ in ()).throw(RuntimeError("LLM down")),
-        )
-        _campaign(db)
-
-        result = initialize_campaign(db)
-
-        assert db.query(SourceMonitor).count() > 0
-        narrative_step = next(s for s in result["steps"] if s["step"] == 4)
-        assert narrative_step["status"] == "error"
-
     def test_initialization_via_endpoint_reflects_db_state(self, db, monkeypatch):
         """The /campaign/initialize endpoint response must match what is in the DB."""
         from app.routes.campaign import campaign_initialize

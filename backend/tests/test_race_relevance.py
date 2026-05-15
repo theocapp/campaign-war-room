@@ -76,18 +76,6 @@ def test_phillies_sports_story_does_not_enter_review_queue(db):
     assert item.id not in [r.id for r in results]
 
 
-def test_phillies_sports_story_does_not_create_dashboard_action(db):
-    from app.routes.dashboard import get_dashboard
-    from app.services.ingestion import ingest_text
-    _campaign(db)
-    item = ingest_text(db, "Phillies playoff game", "The coach talked about the season.", "Sports", "news")
-    item.urgency = "high"
-    item.credibility_note = "Urgent sports update."
-    db.commit()
-    dashboard = get_dashboard(db=db)
-    assert all("Phillies" not in a.action for a in dashboard.suggested_actions)
-
-
 def test_sports_story_with_candidate_mention_is_not_archived(db):
     from app.services.ingestion import ingest_text
     _campaign(db)

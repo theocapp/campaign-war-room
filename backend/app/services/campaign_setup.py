@@ -244,9 +244,9 @@ def initialize_campaign(db) -> dict:
         "detail": step3_detail,
     })
 
-    # Step 4 — Narrative count (KGNarrative is now the authoritative source)
-    from app.knowledge_graph.orm import KGNarrative
-    narratives_refreshed = db.query(KGNarrative).filter(KGNarrative.status == "active").count()
+    # Step 4 — Narrative frame count (campaign-defined frames are the authoritative source)
+    from app.models import NarrativeFrame
+    narratives_refreshed = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).count()  # noqa: E712
     steps.append({
         "step": 4, "label": "Narrative refresh",
         "status": "ok",

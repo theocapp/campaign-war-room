@@ -1,6 +1,6 @@
 import type {
   CampaignProfile, CampaignInitializeResult,
-  DashboardData, DashboardChanges, DashboardNarrativeCard, Issue, IssueDetail,
+  Issue, IssueDetail,
   SourceItem, SourceItemDetail, SourceTemplate,
   Opponent, OpponentActivity, CanvassingInsights, TalkingPointResponse,
   RssFeed, RssFeedIngestResult, SetupStatus, ReviewQueueItem, GeneratedTalkingPoint,
@@ -11,9 +11,6 @@ import type {
   MonitorIngestResult, IngestSearchMonitorsResult,
   ManualCapture, ManualCaptureResult,
   CandidateMessageLibrary, CandidateNarrative,
-  NarrativeDetail, NarrativeComparisonOut,
-  KGNarrativeSummary, KGNarrativeDetail, KGAlert, KGEntity,
-  DailyBriefing, NarrativeOverview,
   NarrativeFrameWithCounts, NarrativeFrameSuggestion,
   MorningBriefing,
 } from './types'
@@ -104,12 +101,6 @@ export const api = {
   getRace: (id: number) => get<RaceDirectory>(`/races/${id}`),
   selectRace: (id: number, body?: { candidate_id?: number; candidate_name?: string }) =>
     post<RaceSelectResult>(`/races/${id}/select`, body || {}),
-
-  // Dashboard
-  getDashboard: () => get<DashboardData>('/dashboard'),
-  getDashboardChanges: (hours = 24) => get<DashboardChanges>(`/dashboard/changes?hours=${hours}`),
-  getDailyBriefing: () => get<DailyBriefing>('/briefing/today'),
-  getNarrativeOverview: () => get<NarrativeOverview>('/narratives/overview'),
 
   // Candidate message library
   getMessageLibrary: () => get<CandidateMessageLibrary>('/message-library'),
@@ -244,18 +235,6 @@ export const api = {
     await throwIfNotOk(res)
     return res.json()
   },
-
-  // Narratives
-  getNarrativeBriefs: (limit = 50) => get<DashboardNarrativeCard[]>(`/narratives/briefs?limit=${limit}`),
-  getNarrativeDetail: (id: number) => get<NarrativeDetail>(`/narratives/${id}`),
-  getNarrativeComparison: () => get<NarrativeComparisonOut>('/narratives/compare'),
-
-  // Knowledge Graph
-  getKGNarratives: (limit = 20) => get<KGNarrativeSummary[]>(`/kg/narratives/emerging?limit=${limit}`),
-  getKGNarrativeDetail: (id: number) => get<KGNarrativeDetail>(`/kg/narratives/${id}`),
-  getKGAlerts: (limit = 50) => get<KGAlert[]>(`/kg/alerts?limit=${limit}`),
-  resolveKGAlert: (id: number) => post<KGAlert>(`/kg/alerts/${id}/resolve`, {}),
-  getKGEntity: (id: number) => get<KGEntity>(`/kg/entities/${id}`),
 
   // Talking Points
   generateTalkingPoints: (body: {

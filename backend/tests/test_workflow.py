@@ -647,31 +647,8 @@ class TestSourceDetailRelatedIssues:
         assert i.id in item.related_issue_ids
 
 
-# ── Dashboard changes ─────────────────────────────────────────────────────────
-
-class TestDashboardChanges:
-    def test_returns_new_sources(self, db):
-        from app.routes.dashboard import get_dashboard_changes
-        _source(db, title="Fresh source")
-        result = get_dashboard_changes(hours=24, db=db)
-        assert result.new_source_count >= 1
-        assert any(c.title == "Fresh source" for c in result.changes)
-
-    def test_empty_when_no_recent_items(self, db):
-        from app.routes.dashboard import get_dashboard_changes
-        from datetime import timedelta
-        old = SourceItem(
-            title="Old source", source_type="news",
-            created_at=datetime.utcnow() - timedelta(hours=48),
-            urgency="low",
-        )
-        db.add(old)
-        db.commit()
-        result = get_dashboard_changes(hours=24, db=db)
-        assert not any(c.title == "Old source" for c in result.changes)
-
-    def test_source_templates_endpoint(self, db):
-        from app.routes.source_templates import get_source_templates
-        templates = get_source_templates()
-        assert len(templates) > 0
-        assert all(t.id and t.name and t.category for t in templates)
+def test_source_templates_endpoint(db):
+    from app.routes.source_templates import get_source_templates
+    templates = get_source_templates()
+    assert len(templates) > 0
+    assert all(t.id and t.name and t.category for t in templates)

@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import Issue, IssueMention, OpponentActivity, SourceItem
-from app.services import intelligence, issue_clustering, narratives, opponent_analysis, race_relevance, scoring, story_clustering
+from app.services import intelligence, issue_clustering, opponent_analysis, race_relevance, scoring, story_clustering
 from app.services.ingestion import _assess_extraction_quality, _compute_priority_score
 from app.services.snapshots import build_source_summary
 from app.services.source_ownership import classify_source_owner

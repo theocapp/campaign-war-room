@@ -87,66 +87,6 @@ def _migrate(conn) -> None:
         "UPDATE source_items SET ingested_at = created_at WHERE ingested_at IS NULL"
     ))
 
-    # kg_sources provenance / credibility columns
-    existing_kgs = {row[1] for row in conn.execute(text("PRAGMA table_info(kg_sources)"))}
-    for col, col_type in {
-        "source_type":      "TEXT",
-        "source_name":      "TEXT",
-        "domain":           "TEXT",
-        "credibility_score":  "REAL DEFAULT 0.5",
-        "verified_official":  "INTEGER DEFAULT 0",
-    }.items():
-        if col not in existing_kgs:
-            conn.execute(text(f"ALTER TABLE kg_sources ADD COLUMN {col} {col_type}"))
-
-    # kg_claims columns (embedding for narrative engine; normalized_text + semantic_id for dedup)
-    existing_kgc = {row[1] for row in conn.execute(text("PRAGMA table_info(kg_claims)"))}
-    for col, col_type in {
-        "embedding":       "TEXT",
-        "normalized_text": "TEXT",
-    }.items():
-        if col not in existing_kgc:
-            conn.execute(text(f"ALTER TABLE kg_claims ADD COLUMN {col} {col_type}"))
-    # semantic_id was already present in the original schema; backfill index if missing
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_claims_semantic_id ON kg_claims(semantic_id)"
-    ))
-
-    # kg_narratives lifecycle columns (status + merged_into_id)
-    existing_kgn = {row[1] for row in conn.execute(text("PRAGMA table_info(kg_narratives)"))}
-    for col, col_type in {
-        "status":         "TEXT NOT NULL DEFAULT 'active'",
-        "merged_into_id": "INTEGER",
-    }.items():
-        if col not in existing_kgn:
-            conn.execute(text(f"ALTER TABLE kg_narratives ADD COLUMN {col} {col_type}"))
-
-    # kg_alerts table
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS kg_alerts (
-            id             INTEGER PRIMARY KEY,
-            narrative_id   INTEGER NOT NULL,
-            alert_type     TEXT    NOT NULL,
-            severity_score REAL    NOT NULL,
-            message        TEXT    NOT NULL,
-            created_at     DATETIME NOT NULL,
-            resolved_at    DATETIME,
-            FOREIGN KEY(narrative_id) REFERENCES kg_narratives(id) ON DELETE CASCADE
-        )
-    """))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_narrative   ON kg_alerts(narrative_id)"
-    ))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_type        ON kg_alerts(alert_type)"
-    ))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_created_at  ON kg_alerts(created_at)"
-    ))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_resolved_at ON kg_alerts(resolved_at)"
-    ))
-
     # manual_source_reminders table is created by metadata.create_all; no ALTER needed
     # source_packs / source_pack_items are created by metadata.create_all
     existing_im = {row[1] for row in conn.execute(text("PRAGMA table_info(issue_mentions)"))}
@@ -281,7 +221,6 @@ def _migrate(conn) -> None:
 
 def init_db():
     from app import models  # noqa: F401 — registers all models with Base
-    from app.knowledge_graph import orm as _kg_orm  # noqa: F401 — registers kg_* models
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         _migrate(conn)

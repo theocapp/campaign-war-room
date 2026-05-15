@@ -7,7 +7,7 @@ from app.routes import (
     dashboard, sources, opponents,
     campaign, setup, rss_feeds, review_queue, source_templates,
     admin, source_packs, source_reminders, race_import,
-    narratives, races, narrative_frames,
+    races, narrative_frames,
 )
 
 
@@ -49,7 +49,6 @@ for router in [
     source_reminders.router,
     race_import.router,
     races.router,
-    narratives.router,
     narrative_frames.router,
 ]:
     app.include_router(router, prefix="/api")
