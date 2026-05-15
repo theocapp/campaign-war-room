@@ -15,11 +15,13 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.models import CanvassingNote, IssueMention, OpponentActivity, SourceItem
+from app.models import CanvassingNote, Opponent, OpponentActivity, SourceItem
 from app.services import campaign_analysis, intelligence, narrative_frames, race_relevance, scoring, story_clustering
 from app.services.campaign_analysis import framing_to_action
+from app.services.opponent_analysis import _activity_fingerprint
 from app.services.snapshots import build_source_summary
 from app.services.source_ownership import classify_source_owner
+from app.services.text_utils import strip_html_to_text
 
 
 # ── HTML cleaning ─────────────────────────────────────────────────────────────
@@ -336,8 +338,6 @@ def _compute_priority_score(db: Session, item: SourceItem) -> int:
         score += 10
     elif item.urgency == "medium":
         score += 5
-    if db.query(IssueMention).filter_by(source_item_id=item.id).count():
-        score += 10
     if db.query(OpponentActivity).filter(OpponentActivity.source_item_id == item.id).count():
         score += 20
     if item.credibility_note:
@@ -355,6 +355,52 @@ def _compute_priority_score(db: Session, item: SourceItem) -> int:
     return max(0, score)
 
 
+def _persist_opponent_attacks(db: Session, item: SourceItem, attacks: list[dict]) -> int:
+    """Insert OpponentActivity rows for LLM-extracted attacks.
+
+    Matches opponent_name against known Opponent rows by normalized name.
+    Dedupes against existing rows on this source via the same fingerprint
+    helper used by the regex extractor, so re-analysis doesn't double-insert.
+    """
+    if not attacks:
+        return 0
+    opponents = db.query(Opponent).all()
+    by_normalized = {o.name.strip().lower(): o for o in opponents}
+    inserted = 0
+    for entry in attacks:
+        opponent = by_normalized.get(entry["opponent_name"].strip().lower())
+        if not opponent:
+            continue
+        clean_text = strip_html_to_text(entry["text"])[:500]
+        if not clean_text:
+            continue
+        # Build an activity dict matching OpponentActivity columns so the
+        # existing fingerprint helper works against it.
+        attack_type = entry["type"]
+        act_data = {
+            "claim": clean_text if attack_type == "claim" else None,
+            "attack": clean_text if attack_type == "attack" else None,
+            "promise": clean_text[:300] if attack_type == "promise" else None,
+        }
+        fp = _activity_fingerprint(act_data)
+        existing_fps = {
+            _activity_fingerprint({"attack": r.attack, "claim": r.claim, "promise": r.promise})
+            for r in db.query(OpponentActivity).filter(
+                OpponentActivity.opponent_id == opponent.id,
+                OpponentActivity.source_item_id == item.id,
+            )
+        }
+        if fp in existing_fps:
+            continue
+        db.add(OpponentActivity(
+            opponent_id=opponent.id,
+            source_item_id=item.id,
+            **act_data,
+        ))
+        inserted += 1
+    return inserted
+
+
 def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     db.add(item)
     db.flush()
@@ -363,7 +409,8 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     item.source_owner_confidence = ownership.source_owner_confidence
     story_clustering.assign_story_cluster(db, item)
 
-    # Single LLM call: relevance + summary + framing
+    # Single LLM call: relevance + summary + framing + opponent attack extraction.
+    # Per PRODUCT_BRIEF this is the ONLY LLM call per article on ingest.
     analysis = campaign_analysis.analyze(db, item)
 
     if analysis.get("_used_fallback"):
@@ -388,6 +435,11 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         item.race_relevance_score = analysis["relevance_score"]
         item.archived_as_irrelevant = not analysis["relevant"]
         item.actionability_label = framing_to_action(analysis["framing"])
+        # Gap 13: store the LLM's relevance reason so reviewers can see *why*
+        # an article was scored the way it was.
+        reason = (analysis.get("reason") or "").strip()
+        if reason:
+            item.relevance_reasons = reason
 
         if analysis.get("needs_attention"):
             item.urgency = "high"
@@ -398,7 +450,12 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         db.refresh(item)
 
         if analysis["relevant"]:
+            # Gap 9/10: opponent activity now comes from the same LLM call —
+            # no second pass, no regex fallback. Populates OpponentActivity so
+            # priority bumps and the Opponent Tracker reflect new articles.
+            _persist_opponent_attacks(db, item, analysis.get("opponent_attacks") or [])
             narrative_frames.match_article_to_frames(db, item)
+            db.commit()
 
     item.priority_score = _compute_priority_score(db, item)
     item.evidence_score = scoring.compute_evidence_score(item)

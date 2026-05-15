@@ -81,7 +81,8 @@ Title: {item.title or "No title"}
 Source: {item.source_name or "Unknown"}
 Text: {article_text}
 
-Your job: decide if this article matters for the {ctx["race"]} campaign.
+Your job: decide if this article matters for the {ctx["race"]} campaign, and
+extract any opponent attacks, claims, or promises in the same pass.
 
 MARK IRRELEVANT (relevant=false, score 0-15):
 - Sports results, restaurant reviews, weather reports
@@ -98,6 +99,12 @@ MARK RELEVANT (relevant=true, score 40-100):
 - Congressional votes or positions on {issues_str}
 - Statements or press releases from either campaign
 
+OPPONENT ATTACKS: when the article describes the opponent ({opponent_str})
+as the ACTOR — making a claim, launching an attack, or making a promise —
+copy the exact sentence into `opponent_attacks`. Only include sentences
+where the opponent themselves is the subject (NOT sentences where
+{ctx["candidate"]} is criticizing the opponent). Return [] if none.
+
 Return ONLY a JSON object, no other text:
 {{
   "relevant": true or false,
@@ -105,7 +112,14 @@ Return ONLY a JSON object, no other text:
   "one_sentence": "What happened politically in one sentence. null if irrelevant.",
   "framing": "helps_candidate" or "hurts_candidate" or "opponent_news" or "background" or "irrelevant",
   "needs_attention": true or false,
-  "reason": "One sentence explaining the relevance judgment."
+  "reason": "One sentence explaining the relevance judgment.",
+  "opponent_attacks": [
+    {{
+      "opponent_name": "name of the opponent making this statement",
+      "type": "attack" or "claim" or "promise",
+      "text": "the exact sentence from the article"
+    }}
+  ]
 }}"""
 
 
@@ -117,8 +131,34 @@ def _fallback_result() -> dict:
         "framing": "irrelevant",
         "needs_attention": False,
         "reason": "LLM unavailable; article not scored.",
+        "opponent_attacks": [],
         "_used_fallback": True,
     }
+
+
+def _validate_opponent_attacks(raw_attacks, known_opponents: list[str]) -> list[dict]:
+    """Coerce LLM-returned attacks into a clean list of dicts.
+
+    Drops entries with missing text, unknown opponent names, or invalid type.
+    """
+    if not isinstance(raw_attacks, list):
+        return []
+    valid_types = {"attack", "claim", "promise"}
+    known_lower = {o.lower() for o in known_opponents if o}
+    cleaned: list[dict] = []
+    for entry in raw_attacks:
+        if not isinstance(entry, dict):
+            continue
+        text = (entry.get("text") or "").strip()
+        attack_type = (entry.get("type") or "").strip().lower()
+        opponent_name = (entry.get("opponent_name") or "").strip()
+        if not text or attack_type not in valid_types or not opponent_name:
+            continue
+        # Only keep attacks attributed to an opponent we actually track.
+        if opponent_name.lower() not in known_lower:
+            continue
+        cleaned.append({"text": text, "type": attack_type, "opponent_name": opponent_name})
+    return cleaned
 
 
 def analyze(db: Session, item: SourceItem) -> dict:
@@ -168,6 +208,9 @@ def analyze(db: Session, item: SourceItem) -> dict:
         result.setdefault("framing", "irrelevant")
         result.setdefault("reason", "")
         result.setdefault("one_sentence", None)
+        result["opponent_attacks"] = _validate_opponent_attacks(
+            result.get("opponent_attacks"), ctx["opponents"]
+        )
         result["_used_fallback"] = False
 
         logger.info(
