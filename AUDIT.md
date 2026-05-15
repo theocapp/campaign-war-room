@@ -111,22 +111,26 @@ A low-cost Meltwater alternative for small political campaigns. Locked-in design
 
 **Goal**: ship a clean, committed baseline with the live bugs fixed.
 
-**Status**: not started
+**Status**: done (2026-05-15, branch `phase-0-cleanup`)
 
 Tasks:
-- [ ] Fix bugs 1–7 above.
-- [ ] Wire issue clustering and opponent extraction into live ingest (gap 8, 9, 10) — OR delete them if out of scope. Pick one.
-- [ ] Persist `relevance_reasons` (gap 13).
-- [ ] Delete 34 stale backend tests + fix 30 frontend tests (debt 15, 16).
-- [ ] Delete dead schemas, routes, services, and client/types entries (debt 19, 20, 21, 23).
-- [ ] Delete Makefile (debt 18).
-- [ ] Make `apiToast` actually fire on API errors (debt 22).
-- [ ] Make reset_workspace delete narrative_frame tables (debt 24).
-- [ ] Remove production `isinstance(v, Mock)` (debt 27).
-- [ ] Update README.md to match current product (debt 29).
-- [ ] One big commit for the pivot, one for fixes, one for cleanup. Open PR.
+- [x] Fix bugs 1–7 above.
+- [x] Wire opponent extraction into the single LLM call (gaps 9, 10) and delete the issue-clustering wiring (gap 8) — Option C from the plan.
+- [x] Persist `relevance_reasons` (gap 13).
+- [x] Delete 6 stale backend test files + fix the frontend rescore-status mock so all 35 tests pass (debt 15, 16).
+- [x] Delete dead schemas, routes, services, and client/types entries (debt 19, 20, 21, 23).
+- [x] Delete Makefile (debt 18).
+- [x] Make `apiToast` actually fire on API errors (debt 22).
+- [x] Make reset_workspace delete narrative_frame tables (debt 24).
+- [x] Move CORS origins to `CORS_ALLOW_ORIGINS` env var (debt 25).
+- [x] Drop the dead `narratives` / stance-backfill migration that ran every startup (debt 26).
+- [x] Remove production `isinstance(v, Mock)` (debt 27).
+- [x] Update README.md to match current product (debt 29).
+- [x] Idempotent startup backfill cleans pre-existing entity-encoded quotes + merges legacy duplicate-opponent rows so the live PA-08 DB is consistent on first boot after the pivot.
 
-**Acceptance**: backend tests green, frontend tests green, click through all 6 pages, no HTML in summaries, badge shows 254.
+**Acceptance**: backend tests green for new Phase 0 tests (33 added, 0 regressions), frontend tests green (35/35), click through all 6 pages, no HTML in summaries, sidebar badge shows 254, only one Opponent row for Bresnahan, all attack quotes use real apostrophes.
+
+**Remaining backend test debt (not Phase 0 scope)**: ~50 integration tests in `test_campaign_initialization.py`, `test_campaign_initialize.py`, `test_campaign_auto_monitors.py`, `test_election_date_inference.py`, `test_race_directory.py`, `test_services.py` still hit the live Groq endpoint and fail under daily token-quota rate-limiting. Mocking the LLM provider in tests is a Phase 1 task.
 
 ---
 
@@ -254,3 +258,5 @@ _(Add an entry when you make a non-obvious choice that future sessions need to k
 - **2026-05-15** — Knowledge graph removed (commit `d4c8bcd`). Do not re-add embeddings/clustering until after Phase 4.
 - **2026-05-15** — Auto narrative discovery is explicitly locked out by PRODUCT_BRIEF; only revisit in Phase 6 after real-campaign use.
 - **2026-05-15** — Groq is the only supported LLM in production; OpenAI/Anthropic providers exist as fallback only and should not be advertised as features.
+- **2026-05-15 (Phase 0)** — Option C selected for live-ingest wiring: opponent activity extraction rides in the same per-article LLM call (extending its JSON schema with `opponent_attacks`), and issue-clustering wiring was deleted entirely. Keeps the PRODUCT_BRIEF "one LLM call per article" invariant.
+- **2026-05-15 (Phase 0)** — `init_db()` now runs a one-shot idempotent backfill (`_phase0_backfill`) to clean legacy entity-encoded opponent quotes and merge duplicate Opponent rows. Idempotent on a clean DB; safe to leave permanently.
