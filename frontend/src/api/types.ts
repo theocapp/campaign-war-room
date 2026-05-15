@@ -146,12 +146,22 @@ export interface SourceItem {
   extraction_quality_reasons: string[]
   issue_link_strength: number | null
   issue_link_reasons: string[]
+  sentiment: 'positive' | 'negative' | 'neutral' | 'mixed' | null
   snapshot: SourceSnapshot | null
+}
+
+export interface FrameMention {
+  frame_id: number
+  frame_name: string
+  frame_owner_type: string
+  confidence: number
+  matched_by: string
 }
 
 export interface SourceItemDetail extends SourceItem {
   raw_text: string | null
   related_issues: Issue[]
+  frame_mentions: FrameMention[]
 }
 
 export interface IssueSnapshot {

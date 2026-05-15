@@ -165,6 +165,7 @@ class SourceItemOut(OrmBase):
     extraction_quality_reasons: list[str] = []
     issue_link_strength: Optional[int] = None
     issue_link_reasons: list[str] = []
+    sentiment: Optional[str] = None
     snapshot: Optional["SourceSnapshot"] = None
 
     @field_validator("title", "summary", mode="before")
@@ -206,9 +207,18 @@ class SourceItemOut(OrmBase):
         return [str(x) for x in (v or [])]
 
 
+class FrameMentionOut(OrmBase):
+    frame_id: int
+    frame_name: str
+    frame_owner_type: str
+    confidence: int
+    matched_by: str
+
+
 class SourceItemDetail(SourceItemOut):
     raw_text: Optional[str]
     related_issues: list["IssueOut"] = []
+    frame_mentions: list[FrameMentionOut] = []
 
     @field_validator("raw_text", mode="before")
     @classmethod

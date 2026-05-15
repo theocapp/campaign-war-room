@@ -3,8 +3,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import IssueMention, SourceItem
-from app.schemas import IssueOut, SourceItemOut, SourceItemDetail, RSSFeedIn, TextSourceIn, URLSourceIn
+from app.models import IssueMention, NarrativeFrame, NarrativeFrameMention, SourceItem
+from app.schemas import FrameMentionOut, IssueOut, SourceItemOut, SourceItemDetail, RSSFeedIn, TextSourceIn, URLSourceIn
 from app.services import ingestion
 from app.services.snapshots import build_source_snapshot, source_out
 
@@ -83,6 +83,27 @@ def get_source(source_id: int, db: Session = Depends(get_db)):
         if m.issue
     ]
     detail.related_issues = related
+
+    mentions = (
+        db.query(NarrativeFrameMention)
+        .filter_by(source_item_id=source_id)
+        .all()
+    )
+    frame_ids = [m.frame_id for m in mentions]
+    frames_by_id: dict[int, NarrativeFrame] = {
+        f.id: f
+        for f in db.query(NarrativeFrame).filter(NarrativeFrame.id.in_(frame_ids)).all()
+    } if frame_ids else {}
+    detail.frame_mentions = [
+        FrameMentionOut(
+            frame_id=m.frame_id,
+            frame_name=frames_by_id[m.frame_id].name if m.frame_id in frames_by_id else "Unknown",
+            frame_owner_type=frames_by_id[m.frame_id].owner_type if m.frame_id in frames_by_id else "unknown",
+            confidence=m.confidence,
+            matched_by=m.matched_by,
+        )
+        for m in mentions
+    ]
     return detail
 
 
