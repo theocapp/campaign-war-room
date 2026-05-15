@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models import (
     CampaignConfig, SourceItem, Issue, IssueMention,
-    Opponent, OpponentActivity, CanvassingNote,
+    Opponent, OpponentActivity,
     SourcePack, SourcePackItem,
 )
 from app.services.race_directory import seed_race_directory
@@ -254,53 +254,7 @@ def seed(db: Session) -> None:
         ),
     ])
 
-    # ── Canvassing notes ──────────────────────────────────────────────────────
-    notes = [
-        ("7A", "housing", "negative", "Rent went up $300 this year, looking to move out of district", _d(14)),
-        ("7A", "housing", "negative", "Landlord converting building to condos, worried about displacement", _d(14)),
-        ("7A", "housing", "negative", "Three neighbors moved out this year because of rent increases", _d(13)),
-        ("7A", "housing", "negative", "Can't find an affordable 2-bedroom in the district anymore", _d(13)),
-        ("7A", "housing", "negative", "Senior on fixed income, rent increase is 12% — can't absorb it", _d(12)),
-        ("7A", "infrastructure", "negative", "Pothole on Oak St damaged my car last month", _d(12)),
-        ("7A", "infrastructure", "negative", "Sidewalk near the park is cracked and dangerous for my elderly mother", _d(11)),
-        ("7A", "housing", "negative", "Been here 20 years. Never seen housing this unaffordable.", _d(11)),
-        ("7A", "housing", "mixed", "Want development but not at the expense of current residents", _d(10)),
-        ("7A", "infrastructure", "negative", "Same pothole on Maple Ave for two years, nobody fixes it", _d(10)),
-        ("7B", "education", "negative", "Class sizes at East Lakeview are out of control — 38 kids per room", _d(14)),
-        ("7B", "education", "negative", "Art program was cut last year. Kids have nothing after school now.", _d(13)),
-        ("7B", "education", "negative", "Principal told me they can't take new students next year", _d(13)),
-        ("7B", "education", "negative", "My kid shares a textbook with two other students — unacceptable", _d(12)),
-        ("7B", "housing", "negative", "Rent is eating 50% of my income. Something has to change.", _d(12)),
-        ("7B", "education", "positive", "The new after-school STEM program is great — want more of that", _d(11)),
-        ("7B", "education", "negative", "Teachers are burning out. Third teacher leaving our class this year.", _d(11)),
-        ("7B", "housing", "mixed", "Would support development if it includes affordable units", _d(10)),
-        ("7B", "education", "negative", "School needs a new building — this one is falling apart", _d(10)),
-        ("7C", "crime", "negative", "Car broken into twice in the last month, south side of district is not safe", _d(14)),
-        ("7C", "crime", "negative", "Feel unsafe walking home after dark. Need more street lighting.", _d(13)),
-        ("7C", "crime", "mixed", "Police response time improved but crime itself is up in this area", _d(12)),
-        ("7C", "housing", "negative", "Section 8 voucher doesn't cover market rents anymore", _d(12)),
-        ("7C", "crime", "negative", "Need more foot patrols, not just cars driving by", _d(11)),
-        ("7C", "crime", "negative", "Neighbor's car stolen twice this year. Police report filed, nothing happened.", _d(11)),
-        ("7C", "housing", "negative", "Afraid rising rents will force me out of the neighborhood I grew up in", _d(10)),
-        ("7D", "infrastructure", "negative", "Roads in 7D are the worst they have ever been in 15 years", _d(14)),
-        ("7D", "infrastructure", "negative", "Fell on broken sidewalk near the park, still healing", _d(14)),
-        ("7D", "infrastructure", "negative", "Bus stop at Cedar and 7th has been broken for 6 months. Reported 3 times.", _d(13)),
-        ("7D", "infrastructure", "negative", "Street floods every time it rains because drain is clogged", _d(13)),
-        ("7D", "infrastructure", "negative", "Potholes destroyed two tires this winter alone", _d(12)),
-        ("7D", "housing", "negative", "Senior living on fixed income, rent going up 15% next month", _d(12)),
-        ("7D", "infrastructure", "negative", "Street lights on our block have been out for three weeks", _d(11)),
-        ("7D", "infrastructure", "negative", "Can't bike to work safely — roads too dangerous", _d(10)),
-    ]
-
-    for precinct, issue, sentiment, note_text, date in notes:
-        db.add(CanvassingNote(
-            precinct=precinct,
-            issue=issue,
-            sentiment=sentiment,
-            notes=note_text,
-            date=date,
-        ))
-
+    # Canvassing demo data removed with the CanvassingNote schema (Phase 0).
     db.commit()
     print("[seed] Database seeded with Lakeview City District 7 demo scenario.")
 

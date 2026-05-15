@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -87,65 +88,14 @@ def _migrate(conn) -> None:
         "UPDATE source_items SET ingested_at = created_at WHERE ingested_at IS NULL"
     ))
 
-    # kg_sources provenance / credibility columns
-    existing_kgs = {row[1] for row in conn.execute(text("PRAGMA table_info(kg_sources)"))}
-    for col, col_type in {
-        "source_type":      "TEXT",
-        "source_name":      "TEXT",
-        "domain":           "TEXT",
-        "credibility_score":  "REAL DEFAULT 0.5",
-        "verified_official":  "INTEGER DEFAULT 0",
-    }.items():
-        if col not in existing_kgs:
-            conn.execute(text(f"ALTER TABLE kg_sources ADD COLUMN {col} {col_type}"))
-
-    # kg_claims columns (embedding for narrative engine; normalized_text + semantic_id for dedup)
-    existing_kgc = {row[1] for row in conn.execute(text("PRAGMA table_info(kg_claims)"))}
-    for col, col_type in {
-        "embedding":       "TEXT",
-        "normalized_text": "TEXT",
-    }.items():
-        if col not in existing_kgc:
-            conn.execute(text(f"ALTER TABLE kg_claims ADD COLUMN {col} {col_type}"))
-    # semantic_id was already present in the original schema; backfill index if missing
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_claims_semantic_id ON kg_claims(semantic_id)"
-    ))
-
-    # kg_narratives lifecycle columns (status + merged_into_id)
-    existing_kgn = {row[1] for row in conn.execute(text("PRAGMA table_info(kg_narratives)"))}
-    for col, col_type in {
-        "status":         "TEXT NOT NULL DEFAULT 'active'",
-        "merged_into_id": "INTEGER",
-    }.items():
-        if col not in existing_kgn:
-            conn.execute(text(f"ALTER TABLE kg_narratives ADD COLUMN {col} {col_type}"))
-
-    # kg_alerts table
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS kg_alerts (
-            id             INTEGER PRIMARY KEY,
-            narrative_id   INTEGER NOT NULL,
-            alert_type     TEXT    NOT NULL,
-            severity_score REAL    NOT NULL,
-            message        TEXT    NOT NULL,
-            created_at     DATETIME NOT NULL,
-            resolved_at    DATETIME,
-            FOREIGN KEY(narrative_id) REFERENCES kg_narratives(id) ON DELETE CASCADE
-        )
-    """))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_narrative   ON kg_alerts(narrative_id)"
-    ))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_type        ON kg_alerts(alert_type)"
-    ))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_created_at  ON kg_alerts(created_at)"
-    ))
-    conn.execute(text(
-        "CREATE INDEX IF NOT EXISTS idx_kg_alerts_resolved_at ON kg_alerts(resolved_at)"
-    ))
+    # opponents: FEC candidate ID for dedup against re-imports + name-format drift
+    existing_opp = {row[1] for row in conn.execute(text("PRAGMA table_info(opponents)"))}
+    if "fec_candidate_id" not in existing_opp:
+        conn.execute(text("ALTER TABLE opponents ADD COLUMN fec_candidate_id TEXT"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_opponents_fec_candidate_id "
+            "ON opponents(fec_candidate_id) WHERE fec_candidate_id IS NOT NULL"
+        ))
 
     # manual_source_reminders table is created by metadata.create_all; no ALTER needed
     # source_packs / source_pack_items are created by metadata.create_all
@@ -157,131 +107,108 @@ def _migrate(conn) -> None:
         if col not in existing_im:
             conn.execute(text(f"ALTER TABLE issue_mentions ADD COLUMN {col} {col_type}"))
 
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS narratives (
-            id INTEGER PRIMARY KEY,
-            canonical_text TEXT NOT NULL,
-            short_label VARCHAR NOT NULL,
-            narrative_type VARCHAR NOT NULL,
-            owner_type VARCHAR DEFAULT 'unknown',
-            direction VARCHAR DEFAULT 'neutral',
-            status VARCHAR DEFAULT 'emerging',
-            first_seen_at DATETIME,
-            last_seen_at DATETIME,
-            source_cluster_count INTEGER DEFAULT 0,
-            source_count INTEGER DEFAULT 0,
-            messenger_diversity_count INTEGER DEFAULT 0,
-            geography_count INTEGER DEFAULT 0,
-            traction_score INTEGER DEFAULT 0,
-            evidence_strength VARCHAR DEFAULT 'weak',
-            response_status VARCHAR DEFAULT 'no_response',
-            notes TEXT,
-            created_at DATETIME,
-            updated_at DATETIME
-        )
-    """))
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS narrative_mentions (
-            id INTEGER PRIMARY KEY,
-            narrative_id INTEGER NOT NULL,
-            source_item_id INTEGER,
-            opponent_activity_id INTEGER,
-            source_cluster_id VARCHAR,
-            matched_text TEXT,
-            mention_role VARCHAR DEFAULT 'repeat',
-            confidence_score INTEGER DEFAULT 50,
-            created_at DATETIME,
-            FOREIGN KEY(narrative_id) REFERENCES narratives(id),
-            FOREIGN KEY(source_item_id) REFERENCES source_items(id),
-            FOREIGN KEY(opponent_activity_id) REFERENCES opponent_activities(id)
-        )
-    """))
-    existing_narratives = {row[1] for row in conn.execute(text("PRAGMA table_info(narratives)"))}
-    for col, col_type in {
-        "owner_confidence": "VARCHAR DEFAULT 'low'",
-        "attribution_type": "VARCHAR DEFAULT 'unclear'",
-        "target_confidence": "VARCHAR DEFAULT 'low'",
-        "candidate_narrative_id": "INTEGER",
-        "target_person": "VARCHAR",
-        "stance": "VARCHAR DEFAULT 'neutral'",
-        "source_platform": "VARCHAR",
-        "source_url": "VARCHAR",
-        "source_author_name": "VARCHAR",
-    }.items():
-        if col not in existing_narratives:
-            conn.execute(text(f"ALTER TABLE narratives ADD COLUMN {col} {col_type}"))
-    # Backfill stance from direction for existing rows.
-    conn.execute(text("""
-        UPDATE narratives SET stance =
-            CASE direction
-                WHEN 'against_candidate' THEN 'attack'
-                WHEN 'for_candidate'     THEN 'support'
-                ELSE 'neutral'
-            END
-        WHERE stance IS NULL OR stance = 'neutral'
-    """))
-    existing_nm = {row[1] for row in conn.execute(text("PRAGMA table_info(narrative_mentions)"))}
-    for col, col_type in {
-        "owner_confidence": "VARCHAR DEFAULT 'low'",
-        "attribution_type": "VARCHAR DEFAULT 'unclear'",
-        "target_confidence": "VARCHAR DEFAULT 'low'",
-        "candidate_narrative_id": "INTEGER",
-        "source_platform": "VARCHAR",
-        "source_author_name": "VARCHAR",
-        "target_person": "VARCHAR",
-        "stance": "VARCHAR DEFAULT 'neutral'",
-        "published_at": "DATETIME",
-        "ingested_at": "DATETIME",
-    }.items():
-        if col not in existing_nm:
-            conn.execute(text(f"ALTER TABLE narrative_mentions ADD COLUMN {col} {col_type}"))
-
-    # Partial unique index: one source item per narrative (NULLs excluded so
-    # activity-only mentions with source_item_id=NULL are not constrained).
-    # The model-level UniqueConstraint handles fresh DBs; this handles existing ones.
-    conn.execute(text("""
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_nm_narrative_source
-        ON narrative_mentions(narrative_id, source_item_id)
-        WHERE source_item_id IS NOT NULL
-    """))
-
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS candidate_message_libraries (
-            id INTEGER PRIMARY KEY,
-            campaign_config_id INTEGER,
-            core_message TEXT,
-            short_bio_frame TEXT,
-            tone_guidance TEXT,
-            created_at DATETIME,
-            updated_at DATETIME,
-            FOREIGN KEY(campaign_config_id) REFERENCES campaign_config(id)
-        )
-    """))
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS candidate_narratives (
-            id INTEGER PRIMARY KEY,
-            library_id INTEGER NOT NULL,
-            short_label VARCHAR NOT NULL,
-            canonical_text TEXT NOT NULL,
-            narrative_kind VARCHAR NOT NULL,
-            issue_name VARCHAR,
-            preferred_phrases TEXT,
-            avoid_phrases TEXT,
-            must_mention_points TEXT,
-            red_lines TEXT,
-            priority INTEGER DEFAULT 0,
-            active INTEGER DEFAULT 1,
-            created_at DATETIME,
-            updated_at DATETIME,
-            FOREIGN KEY(library_id) REFERENCES candidate_message_libraries(id)
-        )
-    """))
+    # Note: `narratives`, `narrative_mentions`, `candidate_message_libraries`,
+    # and `candidate_narratives` tables were created here by earlier migrations.
+    # Their model classes were dropped during the narrative-frames pivot, so
+    # they no longer get created on fresh DBs. Existing DBs still have the
+    # tables sitting empty; intentional no-op rather than DROP — leave them.
     conn.commit()
 
 
 def init_db():
     from app import models  # noqa: F401 — registers all models with Base
-    from app.knowledge_graph import orm as _kg_orm  # noqa: F401 — registers kg_* models
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         _migrate(conn)
+    _phase0_backfill()
+
+
+def _phase0_backfill() -> None:
+    """One-shot, idempotent cleanup of data written before the Phase 0 fixes.
+
+    Two passes — both no-ops on a clean DB:
+      1. Decode HTML entities + strip tags from OpponentActivity quote fields
+         that still contain markup (left over before bug 2 fix).
+      2. Merge duplicate Opponent rows (normalized-name collisions left over
+         before bug 3 fix). Activities from the duplicate are re-pointed onto
+         the canonical row with fingerprint-based dedup, then the duplicate
+         is deleted.
+    """
+    from sqlalchemy import or_
+    from app.models import Opponent, OpponentActivity
+    from app.services.text_utils import strip_html_to_text
+    from app.services.opponent_analysis import _activity_fingerprint
+    from app.services.race_directory import _normalize_candidate_name
+
+    with SessionLocal() as db:
+        # Pass 1 — clean up encoded entities / residual tags in quote text.
+        dirty = (
+            db.query(OpponentActivity)
+            .filter(or_(
+                OpponentActivity.attack.like("%&#%"),
+                OpponentActivity.attack.like("%<%"),
+                OpponentActivity.claim.like("%&#%"),
+                OpponentActivity.claim.like("%<%"),
+                OpponentActivity.promise.like("%&#%"),
+                OpponentActivity.promise.like("%<%"),
+            ))
+            .all()
+        )
+        for row in dirty:
+            if row.attack:
+                row.attack = strip_html_to_text(row.attack)[:500]
+            if row.claim:
+                row.claim = strip_html_to_text(row.claim)[:500]
+            if row.promise:
+                row.promise = strip_html_to_text(row.promise)[:300]
+        if dirty:
+            db.commit()
+
+        # Pass 2 — merge duplicate opponents.
+        opponents = db.query(Opponent).all()
+        by_norm: dict[str, list[Opponent]] = {}
+        for opp in opponents:
+            key = _normalize_candidate_name(opp.name)
+            if not key:
+                continue
+            by_norm.setdefault(key, []).append(opp)
+
+        for group in by_norm.values():
+            if len(group) < 2:
+                continue
+            # Canonical = the one whose name is human-readable
+            # ("Rob Bresnahan" beats "BRESNAHAN, ROB"). If both / neither
+            # have commas, prefer the one with a FEC ID stamped, then
+            # whichever was created first.
+            def _rank(o: Opponent) -> tuple[int, int, int]:
+                has_comma = "," in (o.name or "")
+                has_fec = bool(o.fec_candidate_id)
+                created_ord = int((o.created_at or datetime.utcnow()).timestamp())
+                return (1 if has_comma else 0, 0 if has_fec else 1, created_ord)
+
+            group.sort(key=_rank)
+            canonical = group[0]
+            for dup in group[1:]:
+                # Pull FEC ID from the duplicate if canonical doesn't have one.
+                if dup.fec_candidate_id and not canonical.fec_candidate_id:
+                    canonical.fec_candidate_id = dup.fec_candidate_id
+                # Re-point activities, deduping against canonical's existing rows.
+                canon_fps = {
+                    _activity_fingerprint({"attack": r.attack, "claim": r.claim, "promise": r.promise})
+                    for r in db.query(OpponentActivity).filter(OpponentActivity.opponent_id == canonical.id)
+                }
+                dup_acts = (
+                    db.query(OpponentActivity)
+                    .filter(OpponentActivity.opponent_id == dup.id)
+                    .all()
+                )
+                for act in dup_acts:
+                    fp = _activity_fingerprint({"attack": act.attack, "claim": act.claim, "promise": act.promise})
+                    if fp in canon_fps:
+                        db.delete(act)
+                    else:
+                        act.opponent_id = canonical.id
+                        canon_fps.add(fp)
+                db.flush()
+                db.delete(dup)
+            db.commit()

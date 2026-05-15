@@ -50,8 +50,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     api.getCampaign()
       .then(p => setCandidateName(p.candidate_name || ''))
       .catch(() => {})
-    api.getReviewQueue()
-      .then(items => setReviewCount(items.length))
+    api.getReviewQueueCount()
+      .then(setReviewCount)
       .catch(() => {})
     api.getLastSynced()
       .then(iso => { setLastSynced(iso); refreshSyncLabel(iso) })
@@ -61,9 +61,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       .catch(() => {})
   }, [refreshSyncLabel])
 
-  // Tick the "X min ago" label every 30s without re-fetching
+  // Every 30s, re-fetch the last-synced timestamp (a poll from the backend) so
+  // the indicator reflects new ingests too — not just a stale relative-time
+  // label computed from the original load.
   useEffect(() => {
-    const t = setInterval(() => refreshSyncLabel(lastSynced), 30000)
+    const t = setInterval(() => {
+      api.getLastSynced()
+        .then(iso => { setLastSynced(iso); refreshSyncLabel(iso) })
+        .catch(() => refreshSyncLabel(lastSynced))
+    }, 30000)
     return () => clearInterval(t)
   }, [lastSynced, refreshSyncLabel])
 

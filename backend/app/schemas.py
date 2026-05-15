@@ -2,7 +2,6 @@ import html as _html
 import json
 from datetime import datetime
 from typing import Literal, Optional
-from unittest.mock import Mock
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
@@ -47,27 +46,11 @@ class CampaignProfileOut(OrmBase):
     @field_validator("key_priorities", "relevance_keywords", "excluded_keywords", "geography_keywords", "neighborhood_keywords", mode="before")
     @classmethod
     def _parse_string_list(cls, v):
-        if isinstance(v, Mock):
-            return None
         if isinstance(v, str):
             try:
                 return json.loads(v)
             except Exception:
                 return []
-        return v
-
-    @field_validator("race_level", "election_type", "district_number", mode="before")
-    @classmethod
-    def _parse_optional_string(cls, v):
-        if isinstance(v, Mock):
-            return None
-        return v
-
-    @field_validator("sparse_race_mode", mode="before")
-    @classmethod
-    def _parse_optional_bool(cls, v):
-        if isinstance(v, Mock):
-            return False
         return v
 
 
@@ -252,56 +235,6 @@ class URLSourceIn(BaseModel):
     source_type: str = "news"
 
 
-class ManualCaptureCreate(BaseModel):
-    title: str
-    raw_text: str
-    source_name: Optional[str] = "Manual Capture"
-    source_type: str = "campaign_note"
-    source_url: Optional[str] = None
-    capture_type: str = "pasted_text"
-    geography_tags: Optional[list[str]] = None
-    issue_tags: Optional[list[str]] = None
-    candidate_related: bool = False
-    opponent_related: bool = False
-    notes: Optional[str] = None
-
-
-class ManualCaptureOut(OrmBase):
-    id: int
-    source_item_id: int
-    title: str
-    source_name: Optional[str]
-    source_type: str
-    source_url: Optional[str]
-    capture_type: str
-    raw_text: str
-    geography_tags: list[str] = []
-    issue_tags: list[str] = []
-    candidate_related: bool = False
-    opponent_related: bool = False
-    notes: Optional[str]
-    created_at: datetime
-    source_item: Optional[SourceItemOut] = None
-
-    @field_validator("geography_tags", "issue_tags", mode="before")
-    @classmethod
-    def _parse_capture_tags(cls, v):
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-                return [str(x) for x in parsed]
-            except Exception:
-                return [p.strip() for p in v.split(",") if p.strip()]
-        return [str(x) for x in (v or [])]
-
-
-class ManualCaptureCreateResult(BaseModel):
-    capture: ManualCaptureOut
-    source_item: SourceItemOut
-    related_issues: list["IssueOut"] = []
-    message: str
-
-
 # ── Issues ────────────────────────────────────────────────────────────────────
 
 class IssueOut(OrmBase):
@@ -368,200 +301,6 @@ class OpponentActivityOut(OrmBase):
     created_at: datetime
     source_item: Optional[SourceItemOut]
 
-
-# ── Narratives ────────────────────────────────────────────────────────────────
-
-class NarrativeMentionOut(OrmBase):
-    id: int
-    narrative_id: int
-    source_item_id: Optional[int] = None
-    opponent_activity_id: Optional[int] = None
-    source_cluster_id: Optional[str] = None
-    matched_text: Optional[str] = None
-    mention_role: str
-    confidence_score: int
-    owner_confidence: str = "low"
-    attribution_type: str = "unclear"
-    target_confidence: str = "low"
-    candidate_narrative_id: Optional[int] = None
-    # Per-mention provenance — never inferred from body text.
-    source_platform: Optional[str] = None
-    source_author_name: Optional[str] = None
-    target_person: Optional[str] = None
-    stance: str = "neutral"
-    published_at: Optional[datetime] = None
-    ingested_at: Optional[datetime] = None
-    created_at: datetime
-    source_item: Optional[SourceItemOut] = None
-
-
-class NarrativeOut(OrmBase):
-    id: int
-    canonical_text: str
-    short_label: str
-    narrative_type: str
-    owner_type: str
-    direction: str
-    status: str
-    first_seen_at: Optional[datetime]
-    last_seen_at: Optional[datetime]
-    source_cluster_count: int
-    source_count: int
-    messenger_diversity_count: int
-    geography_count: int
-    traction_score: int
-    evidence_strength: str
-    response_status: str
-    owner_confidence: str = "low"
-    attribution_type: str = "unclear"
-    target_confidence: str = "low"
-    candidate_narrative_id: Optional[int] = None
-    # Attribution / targeting — populated from source metadata, never from text.
-    target_person: Optional[str] = None
-    stance: str = "neutral"
-    source_platform: Optional[str] = None
-    source_url: Optional[str] = None
-    source_author_name: Optional[str] = None
-    notes: Optional[str] = None
-    mentions: list[NarrativeMentionOut] = []
-
-    @field_validator("canonical_text", "short_label", mode="before")
-    @classmethod
-    def _unescape_narrative_text(cls, v):
-        return _unescape_text(v)
-
-
-class NarrativeBriefingOut(BaseModel):
-    narratives: list[NarrativeOut]
-    summary: str
-    generated_at: datetime
-
-
-class NarrativeBriefingCardsOut(BaseModel):
-    narratives: list["DashboardNarrativeCard"]
-    summary: str
-    generated_at: datetime
-
-
-class NarrativeDetailOut(BaseModel):
-    """Full narrative detail view with all supporting evidence."""
-    id: int
-    canonical_text: str
-    short_label: str
-    narrative_type: str
-    owner_type: str
-    direction: str
-    status: str
-    first_seen_at: Optional[datetime]
-    last_seen_at: Optional[datetime]
-    source_cluster_count: int
-    source_count: int
-    messenger_diversity_count: int
-    geography_count: int
-    traction_score: int
-    evidence_strength: str
-    response_status: str
-    owner_confidence: str
-    attribution_type: str
-    target_confidence: str
-    # Attribution / targeting — populated from source metadata, never from text.
-    target_person: Optional[str] = None
-    stance: str = "neutral"
-    source_platform: Optional[str] = None
-    source_url: Optional[str] = None
-    source_author_name: Optional[str] = None
-    notes: Optional[str] = None
-    # Briefing fields
-    what_changed: Optional[str] = None
-    why_it_matters: Optional[str] = None
-    spread_summary: Optional[str] = None
-    risk_or_opportunity: Optional[str] = None
-    action: Optional[str] = None
-    momentum_shift: Optional[str] = None
-    recent_window_summary: Optional[str] = None
-    # All mentions with source details
-    mentions: list[NarrativeMentionOut] = []
-
-    @field_validator("canonical_text", "short_label", mode="before")
-    @classmethod
-    def _unescape_narrative_text(cls, v):
-        return _unescape_text(v)
-
-
-# ── Candidate Message Library ────────────────────────────────────────────────
-
-class CandidateMessageLibraryIn(BaseModel):
-    core_message: Optional[str] = None
-    short_bio_frame: Optional[str] = None
-    tone_guidance: Optional[str] = None
-
-
-class CandidateMessageLibraryOut(OrmBase):
-    id: int
-    campaign_config_id: Optional[int] = None
-    core_message: Optional[str] = None
-    short_bio_frame: Optional[str] = None
-    tone_guidance: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-
-class CandidateNarrativeBase(BaseModel):
-    short_label: str
-    canonical_text: str
-    narrative_kind: str
-    issue_name: Optional[str] = None
-    preferred_phrases: Optional[list[str]] = None
-    avoid_phrases: Optional[list[str]] = None
-    must_mention_points: Optional[list[str]] = None
-    red_lines: Optional[list[str]] = None
-    priority: int = 0
-    active: bool = True
-
-
-class CandidateNarrativeCreate(CandidateNarrativeBase):
-    pass
-
-
-class CandidateNarrativeUpdate(BaseModel):
-    short_label: Optional[str] = None
-    canonical_text: Optional[str] = None
-    narrative_kind: Optional[str] = None
-    issue_name: Optional[str] = None
-    preferred_phrases: Optional[list[str]] = None
-    avoid_phrases: Optional[list[str]] = None
-    must_mention_points: Optional[list[str]] = None
-    red_lines: Optional[list[str]] = None
-    priority: Optional[int] = None
-    active: Optional[bool] = None
-
-
-class CandidateNarrativeOut(OrmBase):
-    id: int
-    library_id: int
-    short_label: str
-    canonical_text: str
-    narrative_kind: str
-    issue_name: Optional[str] = None
-    preferred_phrases: list[str] = []
-    avoid_phrases: list[str] = []
-    must_mention_points: list[str] = []
-    red_lines: list[str] = []
-    priority: int = 0
-    active: bool = True
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-    @field_validator("preferred_phrases", "avoid_phrases", "must_mention_points", "red_lines", mode="before")
-    @classmethod
-    def _parse_json_lists(cls, v):
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-                return [str(x) for x in parsed]
-            except Exception:
-                return [p.strip() for p in v.split(",") if p.strip()]
-        return [str(x) for x in (v or [])]
 
 
 class NarrativeComparisonItem(BaseModel):
@@ -1107,8 +846,7 @@ class ResetWorkspaceResult(BaseModel):
     cleared_sources: int
     cleared_issues: int
     cleared_opponents: int
-    cleared_canvassing: int
-    cleared_talking_points: int
+    cleared_narrative_frames: int
     cleared_feeds: int
     preserved_feeds: int
     candidate_name: str
@@ -1220,29 +958,3 @@ class RaceImportResult(BaseModel):
     errors: list[str]
 
 
-# ── Talking point history ─────────────────────────────────────────────────────
-
-class GeneratedTalkingPointOut(OrmBase):
-    id: int
-    issue_name: str
-    tone: str
-    short_answer: str
-    long_answer: str
-    debate_answer: str
-    social_post: str
-    risk_warning: Optional[str]
-    evidence_notes: str
-    source_titles_used: list[str] = []
-    source_urls_used: list[str] = []
-    created_at: datetime
-
-    @field_validator("source_titles_used", "source_urls_used", mode="before")
-    @classmethod
-    def _parse_list(cls, v):
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-                return [x for x in parsed if x is not None]
-            except Exception:
-                return []
-        return [x for x in (v or []) if x is not None]

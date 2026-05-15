@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +8,7 @@ from app.routes import (
     dashboard, sources, opponents,
     campaign, setup, rss_feeds, review_queue, source_templates,
     admin, source_packs, source_reminders, race_import,
-    narratives, races, narrative_frames,
+    races, narrative_frames,
 )
 
 
@@ -28,9 +29,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Campaign War Room AI", version="0.3.0", lifespan=lifespan)
 
+_CORS_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://localhost:4173",
+    ).split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:4173"],
+    allow_origins=_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -49,7 +57,6 @@ for router in [
     source_reminders.router,
     race_import.router,
     races.router,
-    narratives.router,
     narrative_frames.router,
 ]:
     app.include_router(router, prefix="/api")

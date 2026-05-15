@@ -27,12 +27,27 @@ vi.mock('../src/api/client', () => ({
     selectRace: vi.fn(),
     resetWorkspace: vi.fn(),
     importRaceCSV: vi.fn(),
+    // Background rescore polling — CampaignSetup polls every 5s.
+    getRescoreStatus: vi.fn(),
+    startRescore: vi.fn(),
+    stopRescore: vi.fn(),
   },
 }))
 
 import { api } from '../src/api/client'
 
 const mockApi = /** @type {any} */ (api)
+
+const idleRescoreStatus = {
+  running: false,
+  total: 0,
+  processed: 0,
+  updated: 0,
+  errors: 0,
+  current_title: null,
+  started_at: null,
+  finished_at: null,
+}
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -118,6 +133,7 @@ function renderSetup() {
 describe('Setup flow — fresh campaign initialization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockApi.getRescoreStatus.mockResolvedValue(idleRescoreStatus)
     mockApi.getCampaign.mockResolvedValue(emptyProfile)
     mockApi.getRaces.mockResolvedValue([sampleRace])
     mockApi.getRace.mockResolvedValue(sampleRace)
@@ -189,6 +205,7 @@ describe('Setup flow — fresh campaign initialization', () => {
 describe('Setup flow — race selection before initialization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockApi.getRescoreStatus.mockResolvedValue(idleRescoreStatus)
     mockApi.getCampaign.mockResolvedValue(emptyProfile)
     mockApi.getRaces.mockResolvedValue([sampleRace])
     mockApi.getRace.mockResolvedValue(sampleRace)
@@ -239,6 +256,7 @@ describe('Setup flow — race selection before initialization', () => {
 describe('Setup flow — idempotent re-initialization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockApi.getRescoreStatus.mockResolvedValue(idleRescoreStatus)
     mockApi.getCampaign.mockResolvedValue(filledProfile)
     mockApi.getRaces.mockResolvedValue([sampleRace])
     mockApi.updateCampaign.mockResolvedValue(filledProfile)
@@ -285,6 +303,7 @@ describe('Setup flow — idempotent re-initialization', () => {
 describe('Setup flow — error recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockApi.getRescoreStatus.mockResolvedValue(idleRescoreStatus)
     mockApi.getCampaign.mockResolvedValue(filledProfile)
     mockApi.getRaces.mockResolvedValue([])
     mockApi.updateCampaign.mockResolvedValue(filledProfile)
@@ -324,6 +343,7 @@ describe('Setup flow — error recovery', () => {
 describe('Setup flow — advanced settings round-trip', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockApi.getRescoreStatus.mockResolvedValue(idleRescoreStatus)
     mockApi.getCampaign.mockResolvedValue(emptyProfile)
     mockApi.getRaces.mockResolvedValue([])
     mockApi.updateCampaign.mockResolvedValue(filledProfile)

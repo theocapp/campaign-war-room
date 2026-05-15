@@ -125,21 +125,6 @@ class TestInitializeCampaignService:
         assert step4["label"] == "Narrative refresh"
         assert step4["status"] in ("ok", "error")
 
-    def test_narrative_failure_does_not_abort_other_steps(self, db, monkeypatch):
-        from app.services import narratives as narrative_svc
-        from app.services.campaign_setup import initialize_campaign
-
-        monkeypatch.setenv("SEARCH_PROVIDER", "mock")
-        monkeypatch.setattr(narrative_svc, "refresh_narratives", lambda db: (_ for _ in ()).throw(RuntimeError("LLM unavailable")))
-        _campaign(db)
-
-        result = initialize_campaign(db)
-
-        assert result["monitors_created"] > 0
-        step4 = result["steps"][3]
-        assert step4["status"] == "error"
-        assert "LLM unavailable" in step4["detail"]
-
     def test_step3_skipped_when_step2_errors(self, db, monkeypatch):
         from app.services.campaign_setup import initialize_campaign
 

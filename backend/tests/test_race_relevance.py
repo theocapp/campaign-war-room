@@ -76,18 +76,6 @@ def test_phillies_sports_story_does_not_enter_review_queue(db):
     assert item.id not in [r.id for r in results]
 
 
-def test_phillies_sports_story_does_not_create_dashboard_action(db):
-    from app.routes.dashboard import get_dashboard
-    from app.services.ingestion import ingest_text
-    _campaign(db)
-    item = ingest_text(db, "Phillies playoff game", "The coach talked about the season.", "Sports", "news")
-    item.urgency = "high"
-    item.credibility_note = "Urgent sports update."
-    db.commit()
-    dashboard = get_dashboard(db=db)
-    assert all("Phillies" not in a.action for a in dashboard.suggested_actions)
-
-
 def test_sports_story_with_candidate_mention_is_not_archived(db):
     from app.services.ingestion import ingest_text
     _campaign(db)
@@ -128,32 +116,8 @@ def test_priority_score_favors_race_relevance_over_urgency(db):
     assert _compute_priority_score(db, relevant) > _compute_priority_score(db, sports)
 
 
-def test_talking_points_warn_when_no_relevant_evidence_exists(db):
-    from app.routes.talking_points import generate_talking_points
-    from app.schemas import TalkingPointRequest
-    _campaign(db)
-    issue = Issue(name="Housing", urgency="low", trend="stable", mention_count=1, last_seen_at=datetime.utcnow())
-    db.add(issue)
-    db.commit()
-    source = SourceItem(
-        title="Generic housing trend",
-        raw_text="Housing costs are discussed nationally.",
-        source_name="Wire",
-        source_type="news",
-        published_at=datetime.utcnow(),
-        race_relevance_score=20,
-        race_relevance_label="low",
-        actionability_label="ignore",
-        content_category="irrelevant",
-        archived_as_irrelevant=True,
-    )
-    db.add(source)
-    db.commit()
-    db.add(IssueMention(issue_id=issue.id, source_item_id=source.id))
-    db.commit()
-    response = generate_talking_points(body=TalkingPointRequest(issue_id=issue.id), db=db)
-    assert "Evidence is too thin" in response.short_answer
-    assert response.source_titles_used == []
+# talking-points warning test removed: the talking_points route was dropped
+# during the pivot.
 
 
 def test_sparse_race_mode_changes_relevance_behavior(db):

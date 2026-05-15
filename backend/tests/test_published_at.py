@@ -195,8 +195,7 @@ class TestIngestUrlPublishedAt:
         with patch("app.services.ingestion.httpx.get", return_value=mock_resp):
             with patch("app.services.ingestion.intelligence.summarize_source", return_value="test summary"):
                 with patch("app.services.ingestion.intelligence.classify_urgency", return_value="low"):
-                    with patch("app.services.ingestion.narratives.refresh_narratives"):
-                        return ingestion.ingest_url(db, url, "news")
+                    return ingestion.ingest_url(db, url, "news")
 
     def test_no_date_in_html_leaves_published_at_none(self, db):
         """Key requirement: published_at must be NULL, not ingestion time, when no date is in HTML."""

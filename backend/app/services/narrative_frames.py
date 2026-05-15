@@ -4,6 +4,7 @@ match articles to frames.
 """
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,6 +13,42 @@ from sqlalchemy.orm import Session
 from app.models import NarrativeFrame, NarrativeFrameMention, SourceItem, CampaignConfig, Opponent
 
 logger = logging.getLogger(__name__)
+
+
+def _name_tokens(full_name: str) -> list[str]:
+    """Meaningful (>2 char) lowercase tokens from a person's name.
+
+    "BRESNAHAN, ROB" → ["bresnahan", "rob"]. Used so the validator matches
+    either order or either casing in frame text.
+    """
+    if not full_name:
+        return []
+    raw = re.sub(r"[^a-zA-Z\s]", " ", full_name).lower()
+    return [tok for tok in raw.split() if len(tok) > 2]
+
+
+def _mentions_person(text: str, full_name: str) -> bool:
+    if not text or not full_name:
+        return False
+    lower = text.lower()
+    return any(tok in lower for tok in _name_tokens(full_name))
+
+
+def _validate_owner_type(
+    owner_type: str,
+    frame_text: str,
+    candidate: str,
+    opponents: list[str],
+) -> str:
+    """Downgrade owner_type to 'media' when the frame text doesn't mention
+    the relevant party. Bug 6: the LLM kept labelling generic news as
+    'opponent' even when no opponent was named.
+    """
+    if owner_type == "candidate" and not _mentions_person(frame_text, candidate):
+        return "media"
+    if owner_type == "opponent" and not any(_mentions_person(frame_text, o) for o in opponents):
+        return "media"
+    return owner_type
 
 
 def _campaign_context(db: Session) -> dict:
@@ -66,16 +103,27 @@ CAMPAIGN:
 RECENT RELEVANT ARTICLE SUMMARIES:
 {summaries_text}
 
-Based on these summaries, identify 3 to 5 distinct narrative frames this campaign should track. Each frame should be:
+Based on these summaries, identify 3 to 5 distinct narrative frames this campaign should track.
+
+CRITICAL: A frame is a recurring CATEGORY of story, not one specific event.
+- Good description: "Public-safety coverage tying the opponent to rising crime statistics."
+- Bad description: "A March 12 press conference where Smith blamed Jones for a shooting."
+Describe the category. Do not name specific dates or articles in the description.
+
+owner_type rules — be strict:
+- "candidate": ONLY if the frame is one {ctx["candidate"]} is actively pushing, or that clearly helps them. The name "{ctx["candidate"]}" should appear in the frame.
+- "opponent": ONLY if the frame is one the opponent is pushing, or that clearly helps them. An opponent's name from this list ({opponent_str}) should appear in the frame.
+- "media": Neutral or contested coverage where no campaign clearly owns it. Use this when in doubt — generic local-news coverage of an issue is "media", not "opponent".
+
+Each frame should be:
 - Specific to this race (not generic national politics)
 - Something that appears in multiple articles or is strategically important
-- Labeled by who benefits: "candidate" (helps {ctx["candidate"]}), "opponent" (helps their opponent), or "media" (neutral coverage theme)
 
 Return ONLY a JSON array, no other text:
 [
   {{
     "name": "Short frame name (5 words max)",
-    "description": "One sentence: what this frame covers and why it matters.",
+    "description": "One sentence: what category this frame covers and why it matters.",
     "owner_type": "candidate" or "opponent" or "media"
   }}
 ]"""
@@ -109,6 +157,17 @@ Return ONLY a JSON array, no other text:
                 owner_type = "media"
             if not name:
                 continue
+
+            # Validate owner_type — the LLM tends to over-assign "opponent" to
+            # generic news. Downgrade to "media" unless the frame text actually
+            # mentions the relevant party. Names are compared case-insensitively
+            # against the frame's name + description.
+            owner_type = _validate_owner_type(
+                owner_type=owner_type,
+                frame_text=f"{name} {description}",
+                candidate=ctx["candidate"],
+                opponents=ctx["opponents"],
+            )
 
             # Don't duplicate if a frame with this name already exists
             existing = db.query(NarrativeFrame).filter(NarrativeFrame.name == name).first()

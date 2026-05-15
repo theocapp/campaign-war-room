@@ -70,41 +70,8 @@ def test_source_snapshot_appears_in_source_payload(db):
     assert detail.snapshot.evidence_summary in {"moderate", "strong"}
 
 
-def test_issue_snapshot_uses_distinct_developments_not_duplicates(db):
-    from app.routes.issues import get_issue
-
-    _campaign(db)
-    issue = Issue(name="Housing & Affordability", urgency="high", trend="rising", mention_count=2, last_seen_at=datetime.utcnow())
-    db.add(issue)
-    db.commit()
-    first = _source(db, "Housing plan covered by outlet A", cluster="housing-1")
-    dupe = _source(db, "Housing plan covered by outlet B", cluster="housing-1")
-    second = _source(db, "Tenant forum raises rent issue", cluster="housing-2")
-    for source in [first, dupe, second]:
-        db.add(IssueMention(issue_id=issue.id, source_item_id=source.id, link_strength=70))
-    db.commit()
-
-    detail = get_issue(issue.id, db=db)
-    assert detail.snapshot is not None
-    assert "2 distinct source cluster" in detail.snapshot.issue_snapshot
-    assert len(detail.snapshot.top_distinct_developments) == 2
-
-
-def test_weak_evidence_produces_cautious_snapshot_language(db):
-    from app.routes.issues import get_issue
-
-    _campaign(db)
-    issue = Issue(name="Housing & Affordability", urgency="medium", trend="stable", mention_count=1, last_seen_at=datetime.utcnow())
-    db.add(issue)
-    db.commit()
-    source = _source(db, evidence=35, credibility=35)
-    db.add(IssueMention(issue_id=issue.id, source_item_id=source.id, link_strength=70))
-    db.commit()
-
-    detail = get_issue(issue.id, db=db)
-    assert detail.snapshot.evidence_strength == "weak"
-    assert detail.snapshot.messaging_readiness == "weak"
-    assert "too thin" in detail.snapshot.why_it_matters_now
+# issue-snapshot tests removed: depended on app.routes.issues which was
+# dropped during the narrative-frames pivot.
 
 
 def test_source_snapshot_includes_geography_and_opponent_actor_context(db):
