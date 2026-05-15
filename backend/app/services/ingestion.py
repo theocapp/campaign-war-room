@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.models import Opponent, OpponentActivity, SourceItem
+from app.models import NarrativeFrame, NarrativeFrameMention, Opponent, OpponentActivity, SourceItem
 from app.services import campaign_analysis, intelligence, narrative_frames, race_relevance, scoring, story_clustering
 from app.services.campaign_analysis import framing_to_action
 from app.services.opponent_analysis import _activity_fingerprint
@@ -399,6 +399,31 @@ def _persist_opponent_attacks(db: Session, item: SourceItem, attacks: list[dict]
     return inserted
 
 
+def _persist_frame_matches(
+    db: Session,
+    item: SourceItem,
+    frames: list[NarrativeFrame],
+    matched_indices: list[int],
+) -> None:
+    """Create NarrativeFrameMention rows for frames the LLM matched (1-indexed)."""
+    for idx in matched_indices:
+        if not isinstance(idx, int) or idx < 1 or idx > len(frames):
+            continue
+        frame = frames[idx - 1]
+        existing = (
+            db.query(NarrativeFrameMention)
+            .filter_by(frame_id=frame.id, source_item_id=item.id)
+            .first()
+        )
+        if not existing:
+            db.add(NarrativeFrameMention(
+                frame_id=frame.id,
+                source_item_id=item.id,
+                confidence=75,
+                matched_by="llm",
+            ))
+
+
 def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     db.add(item)
     db.flush()
@@ -407,9 +432,13 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     item.source_owner_confidence = ownership.source_owner_confidence
     story_clustering.assign_story_cluster(db, item)
 
-    # Single LLM call: relevance + summary + framing + opponent attack extraction.
+    # Fetch active frames once so we can pass them into the combined LLM call.
+    active_frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+
+    # Single combined LLM call: relevance + summary + framing + sentiment +
+    # opponent attacks + frame matching.
     # Per PRODUCT_BRIEF this is the ONLY LLM call per article on ingest.
-    analysis = campaign_analysis.analyze(db, item)
+    analysis = campaign_analysis.analyze_with_frames(db, item, frames=active_frames)
 
     if analysis.get("_used_fallback"):
         # Groq unavailable — fall back to keyword scoring and old summarize path
@@ -433,8 +462,8 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         item.race_relevance_score = analysis["relevance_score"]
         item.archived_as_irrelevant = not analysis["relevant"]
         item.actionability_label = framing_to_action(analysis["framing"])
-        # Gap 13: store the LLM's relevance reason so reviewers can see *why*
-        # an article was scored the way it was.
+        item.sentiment = analysis.get("sentiment", "neutral")
+
         reason = (analysis.get("reason") or "").strip()
         if reason:
             item.relevance_reasons = reason
@@ -448,11 +477,8 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         db.refresh(item)
 
         if analysis["relevant"]:
-            # Gap 9/10: opponent activity now comes from the same LLM call —
-            # no second pass, no regex fallback. Populates OpponentActivity so
-            # priority bumps and the Opponent Tracker reflect new articles.
             _persist_opponent_attacks(db, item, analysis.get("opponent_attacks") or [])
-            narrative_frames.match_article_to_frames(db, item)
+            _persist_frame_matches(db, item, active_frames, analysis.get("frame_matches") or [])
             db.commit()
 
     item.priority_score = _compute_priority_score(db, item)
