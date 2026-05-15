@@ -1,15 +1,27 @@
-"""First-pass narrative extraction and traction scoring.
+"""Legacy narrative compatibility stubs.
 
-This deliberately uses conservative deterministic rules. Narratives should be
-fewer and higher-signal than issue tags, so broad issue mentions alone do not
-create narratives.
+KGNarrative is now the authoritative source for all narrative data.
+All production routes and services read from kg_narratives directly.
+
+refresh_narratives() is a no-op stub kept for backward compatibility.
+top_narratives() queries the legacy Narrative table (which is no longer
+populated) and is kept only to avoid breaking test imports.
 """
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
+import os
 import re
 
 logger = logging.getLogger(__name__)
+
+# ── Authority flag ────────────────────────────────────────────────────────────
+# When True, refresh_narratives() projects from KGNarrative (authoritative).
+# When False, the legacy token-based clustering pipeline runs instead.
+# Set USE_KG_NARRATIVES=false in the environment to revert to legacy behaviour.
+USE_KG_NARRATIVES: bool = (
+    os.environ.get("USE_KG_NARRATIVES", "true").lower() not in ("0", "false", "no")
+)
 
 _REFRESH_COOLDOWN = timedelta(seconds=60)
 _last_refresh: datetime | None = None
@@ -179,6 +191,10 @@ def _short_label(text: str) -> str:
 def _source_time(source: SourceItem | None) -> datetime:
     if not source:
         return datetime.utcnow()
+    if source.source_type == "reference":
+        # Reference pages have no meaningful publish date; use epoch so they
+        # never appear "recent" and don't inflate narrative velocity scores.
+        return datetime(2000, 1, 1)
     return source.published_at or source.ingested_at or source.created_at or datetime.utcnow()
 
 
@@ -692,6 +708,8 @@ def _candidate_from_message_library(
     )
 
 
+# DEPRECATED: replaced by KGNarrative clustering (narrative_engine.run_clustering).
+# Do NOT add new callers.  Retained for rollback when USE_KG_NARRATIVES=false.
 def _group_candidates(candidates: list[NarrativeCandidate], campaign: CampaignConfig | None, opponent_names: list[str]) -> list[list[NarrativeCandidate]]:
     grouped: list[tuple[str, list[NarrativeCandidate]]] = []
     for candidate in candidates:
@@ -711,6 +729,8 @@ def _group_candidates(candidates: list[NarrativeCandidate], campaign: CampaignCo
     return [items for _key, items in grouped]
 
 
+# DEPRECATED: replaced by KGNarrative velocity/evidence scoring.
+# Do NOT add new callers.  Retained for rollback when USE_KG_NARRATIVES=false.
 def _score_group(items: list[NarrativeCandidate]) -> dict:
     sources = [item.source_item for item in items if item.source_item]
     source_ids = {s.id for s in sources}
@@ -784,146 +804,24 @@ def _score_group(items: list[NarrativeCandidate]) -> dict:
     }
 
 
-def refresh_narratives(db: Session, force: bool = False) -> list[Narrative]:
-    """Rebuild MVP narratives from current evidence.
+def refresh_narratives(db: Session, force: bool = False) -> list:
+    """No-op stub. Narrative projection has been removed.
 
-    This is intentionally rebuild-based for the MVP so changes in extraction
-    rules can be reflected without a separate migration/backfill workflow.
-
-    Rebuilds are throttled to at most once per 60 seconds. Pass force=True
-    (e.g. from an explicit UI action) to bypass the cooldown.
+    KGNarrative is now queried directly by all routes and services.
+    This function is kept for backward compatibility with callers that
+    haven't been updated yet; it returns an empty list and does nothing.
     """
-    global _last_refresh
-    now = datetime.utcnow()
-    if not force and _last_refresh is not None and (now - _last_refresh) < _REFRESH_COOLDOWN:
-        logger.debug("Narrative refresh skipped (last ran %ss ago)", (now - _last_refresh).seconds)
-        return db.query(Narrative).order_by(Narrative.traction_score.desc()).all()
-    _last_refresh = now
-
-    campaign = db.query(CampaignConfig).first()
-    opponent_names = [o.name for o in db.query(Opponent).all()]
-
-    candidates: list[NarrativeCandidate] = []
-    activities = (
-        db.query(OpponentActivity)
-        .options(joinedload(OpponentActivity.source_item))
-        .order_by(OpponentActivity.created_at.desc())
-        .limit(250)
-        .all()
-    )
-    for activity in activities:
-        candidate = _candidate_from_opponent_activity(activity, campaign)
-        if candidate:
-            candidates.append(candidate)
-
-    opponents = db.query(Opponent).all()
-    candidate_capture_ids = {
-        row[0]
-        for row in db.query(ManualCapture.source_item_id).filter(ManualCapture.candidate_related == True).all()  # noqa: E712
-    }
-    candidate_library_narratives = (
-        db.query(CandidateNarrative)
-        .filter(CandidateNarrative.active == True)  # noqa: E712
-        .order_by(CandidateNarrative.priority.desc(), CandidateNarrative.created_at.desc())
-        .all()
-    )
-    sources = (
-        db.query(SourceItem)
-        .order_by(SourceItem.created_at.desc())
-        .limit(300)
-        .all()
-    )
-    for source in sources:
-        candidate = _candidate_from_message_library(source, campaign, candidate_library_narratives, candidate_capture_ids)
-        if candidate:
-            candidates.append(candidate)
-            continue
-        candidate = _candidate_from_source(source, campaign, opponents)
-        if candidate:
-            candidates.append(candidate)
-
-    groups = _group_candidates(candidates, campaign, opponent_names)
-
-    db.query(NarrativeMention).delete()
-    db.query(Narrative).delete()
-    db.flush()
-
-    narratives: list[Narrative] = []
-    for items in groups:
-        score = _score_group(items)
-        seed = max(items, key=lambda item: item.confidence_score)
-        _seed_source = seed.source_item
-        narrative = Narrative(
-            canonical_text=seed.text,
-            short_label=_short_label(seed.text),
-            narrative_type=seed.narrative_type,
-            owner_type=seed.owner_type,
-            direction=seed.direction,
-            status=score["status"],
-            first_seen_at=score["first_seen_at"],
-            last_seen_at=score["last_seen_at"],
-            source_cluster_count=score["source_cluster_count"],
-            source_count=score["source_count"],
-            messenger_diversity_count=score["messenger_diversity_count"],
-            geography_count=score["geography_count"],
-            traction_score=score["traction_score"],
-            evidence_strength=score["evidence_strength"],
-            response_status=score["response_status"],
-            owner_confidence=score["owner_confidence"],
-            attribution_type=score["attribution_type"],
-            target_confidence=score["target_confidence"],
-            candidate_narrative_id=seed.candidate_narrative_id,
-            target_person=seed.target_person,
-            stance=seed.stance,
-            source_platform=_seed_source.source_type if _seed_source else None,
-            source_url=_seed_source.source_url if _seed_source else None,
-            source_author_name=_seed_source.source_author if _seed_source else None,
-            notes=score["notes"],
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-        )
-        db.add(narrative)
-        db.flush()
-        # Dedup by source_item_id: the same URL must not appear more than once
-        # as evidence for a single narrative.  Sort highest-confidence first so
-        # the best match wins when two candidates share the same source.
-        # NULL source_ids (activity-only mentions) are never suppressed.
-        seen_source_ids: set[int] = set()
-        for item in sorted(items, key=lambda i: i.confidence_score, reverse=True):
-            source = item.source_item
-            source_id = source.id if source else None
-            if source_id is not None:
-                if source_id in seen_source_ids:
-                    continue
-                seen_source_ids.add(source_id)
-            db.add(NarrativeMention(
-                narrative_id=narrative.id,
-                source_item_id=source.id if source else None,
-                opponent_activity_id=item.opponent_activity.id if item.opponent_activity else None,
-                source_cluster_id=_cluster_key(source) if source else None,
-                matched_text=item.text[:500],
-                mention_role=item.mention_role,
-                confidence_score=item.confidence_score,
-                owner_confidence=item.owner_confidence,
-                attribution_type=item.attribution_type,
-                target_confidence=item.target_confidence,
-                candidate_narrative_id=item.candidate_narrative_id,
-                source_platform=source.source_type if source else None,
-                source_author_name=source.source_author if source else None,
-                target_person=item.target_person,
-                stance=item.stance,
-                published_at=source.published_at if source else None,
-                ingested_at=source.ingested_at if source else None,
-            ))
-        narratives.append(narrative)
-
-    db.commit()
-    return narratives
+    return []
 
 
 def top_narratives(db: Session, limit: int = 5) -> list[Narrative]:
-    if db.query(Narrative).count() == 0:
-        refresh_narratives(db)
+    """Legacy query of the Narrative table.
+
+    This table is no longer populated. Routes and services that previously
+    called this should now query KGNarrative directly via
+    app.knowledge_graph.orm.KGNarrative. This stub remains to avoid breaking
+    test imports.
+    """
     return (
         db.query(Narrative)
         .options(joinedload(Narrative.mentions).joinedload(NarrativeMention.source_item))

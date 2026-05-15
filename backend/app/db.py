@@ -1,11 +1,28 @@
 from pathlib import Path
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DB_PATH = Path(__file__).parent.parent / "war_room.db"
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,  # seconds to wait for a lock at the Python level
+    },
+)
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_conn, _record):
+    cursor = dbapi_conn.cursor()
+    # WAL lets readers proceed while a writer is active and queues concurrent
+    # writers instead of immediately raising "database is locked".
+    cursor.execute("PRAGMA journal_mode=WAL")
+    # 30-second retry at the SQLite level — authoritative for lock contention.
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

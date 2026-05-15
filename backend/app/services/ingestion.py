@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import time
 from datetime import datetime
 from typing import Optional
 
@@ -17,7 +16,8 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.models import CanvassingNote, IssueMention, OpponentActivity, SourceItem
-from app.services import intelligence, issue_clustering, narratives, opponent_analysis, race_relevance, scoring, story_clustering
+from app.services import campaign_analysis, intelligence, narrative_frames, narratives, race_relevance, scoring, story_clustering
+from app.services.campaign_analysis import framing_to_action
 from app.services.snapshots import build_source_summary
 from app.services.source_ownership import classify_source_owner
 
@@ -269,6 +269,47 @@ def _parse_html_published_date(html: str) -> Optional[datetime]:
     return None
 
 
+_REFERENCE_DOMAINS = {
+    "ballotpedia.org",
+    "votesmart.org",
+    "opensecrets.org",
+    "govtrack.us",
+    "congress.gov",
+    "house.gov",
+    "senate.gov",
+    "fec.gov",
+    "ourcampaigns.com",
+    "congressweb.com",
+    "linkedin.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "paigeforpa.com",
+    "leadershipnowproject.org",
+    "breezy.hr",
+    "democracy-summer.breezy.hr",
+}
+
+
+def _is_reference_url(url: Optional[str]) -> bool:
+    """Return True if the URL points to an evergreen reference page (profile, bio, directory)."""
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower().lstrip("www.")
+        if any(host == d or host.endswith("." + d) for d in _REFERENCE_DOMAINS):
+            return True
+        # Campaign websites (.com/candidate-name, paigefor*, *forpa*, *forcongress*)
+        if any(kw in host for kw in ("forpa", "forcongress", "for" + host.split(".")[0])):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _rss_published_at(published_parsed) -> Optional[datetime]:
     """Convert a feedparser published_parsed struct_time (UTC) to a naive UTC datetime.
 
@@ -283,119 +324,6 @@ def _rss_published_at(published_parsed) -> Optional[datetime]:
         return datetime(*published_parsed[:6])
     except (TypeError, ValueError):
         return None
-
-
-# ── Knowledge graph pipeline ─────────────────────────────────────────────────
-
-def _kg_enabled() -> bool:
-    return os.environ.get("ENABLE_KG_PIPELINE", "").lower() in ("1", "true", "yes")
-
-
-def _run_kg_pipeline(db: Session, item: SourceItem) -> None:
-    """
-    Run KG extraction and ingestion for a single SourceItem.
-
-    Guarded by the ENABLE_KG_PIPELINE env var and skips items marked
-    archived_as_irrelevant.  All exceptions are caught and logged so this can
-    never crash the existing ingestion pipeline.
-
-    Transaction contract: this function issues its own db.commit() after a
-    successful ingest so that KG writes are durable.  On failure, nothing is
-    committed and the existing data (already committed by _create_and_analyze)
-    is unaffected.
-    """
-    if not _kg_enabled():
-        return
-    if item.archived_as_irrelevant:
-        return
-
-    text = (item.raw_text or item.title or "").strip()
-    if not text:
-        return
-
-    try:
-        # Lazy imports keep module startup fast when the feature is disabled
-        # and prevent circular-import issues if this module is imported early.
-        from app.knowledge_graph.extractor import KGExtractor
-        from app.knowledge_graph.ingestion import KGIngestionService, get_or_create_kg_source
-        from app.services.llm_provider import get_provider
-
-        t0 = time.perf_counter()
-
-        logger.info(
-            "KG pipeline: starting  source_item_id=%d  relevance=%s  text_len=%d",
-            item.id,
-            getattr(item, "race_relevance_score", "?"),
-            len(text),
-        )
-
-        # Mirror the SourceItem into kg_sources (idempotent on content_hash)
-        kg_source = get_or_create_kg_source(
-            db,
-            url=item.source_url or "",
-            title=item.title,
-            text=item.raw_text,
-            published_at=item.published_at,
-            source_item_id=item.id,
-            source_type=getattr(item, "source_type", None),
-            source_name=getattr(item, "source_name", None),
-            source_owner_type=getattr(item, "source_owner_type", None),
-        )
-
-        # Extract → validate
-        provider = get_provider()
-        extractor = KGExtractor(provider)
-        result = extractor.extract(text)
-
-        logger.info(
-            "KG pipeline: extraction done  source_item_id=%d  "
-            "raw_claims=%d  accepted_claims=%d  dropped_claims=%d  "
-            "entities=%d  issues=%d",
-            item.id,
-            len(result.claims) + result.dropped_claims,
-            len(result.claims),
-            result.dropped_claims,
-            len(result.entities),
-            len(result.issues),
-        )
-        if len(result.claims) == 0:
-            logger.warning(
-                "KG pipeline: ZERO claims extracted for source_item_id=%d  "
-                "title=%r  source=%r — check extractor logs above",
-                item.id,
-                (item.title or "")[:80],
-                getattr(item, "source_name", "?"),
-            )
-
-        # Persist into kg_* tables
-        svc = KGIngestionService()
-        report = svc.ingest(result, source_id=kg_source.id, db=db)
-        db.commit()
-
-        elapsed = time.perf_counter() - t0
-        logger.info(
-            "KG pipeline: complete  source_item_id=%d  "
-            "claims_new=%d  claims_skipped=%d  entities_new=%d  "
-            "edges_new=%d  elapsed=%.2fs",
-            item.id,
-            report.claims_created,
-            report.claims_skipped,
-            report.entities_created,
-            report.edges_created,
-            elapsed,
-        )
-        if report.errors:
-            logger.warning(
-                "KG pipeline: source_item_id=%d  partial errors=%s",
-                item.id, report.errors,
-            )
-
-    except Exception as exc:
-        logger.error(
-            "KG pipeline failed for source_item_id=%d: %s: %s",
-            item.id, type(exc).__name__, exc,
-            exc_info=True,
-        )
 
 
 # ── Core analyze-and-save pipeline ───────────────────────────────────────────
@@ -434,26 +362,48 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     item.source_owner_type = ownership.source_owner_type
     item.source_owner_confidence = ownership.source_owner_confidence
     story_clustering.assign_story_cluster(db, item)
-    if not item.summary and item.raw_text:
-        if item.extraction_quality_label == "poor":
-            item.summary = build_source_summary(item)
-        else:
-            item.summary = intelligence.summarize_source(item.raw_text)
-    if not item.urgency or item.urgency == "low":
-        item.urgency = intelligence.classify_urgency(f"{item.title} {item.raw_text or ''}")
-    relevance = race_relevance.apply_relevance(db, item)
-    db.commit()
-    db.refresh(item)
-    if not relevance.archived_as_irrelevant:
-        issue_clustering.assign_issues_to_source(db, item)
-        opponent_analysis.analyze_source_for_opponents(db, item)
+
+    # Single LLM call: relevance + summary + framing
+    analysis = campaign_analysis.analyze(db, item)
+
+    if analysis.get("_used_fallback"):
+        # Groq unavailable — fall back to keyword scoring and old summarize path
+        if not item.summary and item.raw_text:
+            if item.extraction_quality_label == "poor":
+                item.summary = build_source_summary(item)
+            else:
+                item.summary = intelligence.summarize_source(item.raw_text)
+        if not item.urgency or item.urgency == "low":
+            item.urgency = intelligence.classify_urgency(f"{item.title} {item.raw_text or ''}")
         race_relevance.apply_relevance(db, item)
+        db.commit()
+        db.refresh(item)
+    else:
+        # Apply the LLM's single-call judgment
+        if analysis.get("one_sentence"):
+            item.summary = analysis["one_sentence"]
+        elif not item.summary and item.raw_text and item.extraction_quality_label == "poor":
+            item.summary = build_source_summary(item)
+
+        item.race_relevance_score = analysis["relevance_score"]
+        item.archived_as_irrelevant = not analysis["relevant"]
+        item.actionability_label = framing_to_action(analysis["framing"])
+
+        if analysis.get("needs_attention"):
+            item.urgency = "high"
+        elif not item.urgency or item.urgency == "low":
+            item.urgency = "medium" if analysis["relevant"] else "low"
+
+        db.commit()
+        db.refresh(item)
+
+        if analysis["relevant"]:
+            narrative_frames.match_article_to_frames(db, item)
+
     item.priority_score = _compute_priority_score(db, item)
     item.evidence_score = scoring.compute_evidence_score(item)
     item.credibility_score = scoring.compute_credibility_score(item)
     db.commit()
-    narratives.refresh_narratives(db)
-    _run_kg_pipeline(db, item)
     return item
 
 
@@ -555,16 +505,16 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
     added_items: list[SourceItem] = []
     skipped = 0
 
-    for entry in feed.entries[:20]:
+    for entry in feed.entries[:50]:
         url = entry.get("link") or ""
-        title = _normalize_text(entry.get("title") or "Untitled")[:200]
+        title = _strip_tags(entry.get("title") or "Untitled")[:200]
 
         # Deduplicate by source_url
         if url and db.query(SourceItem).filter_by(source_url=url).first():
             skipped += 1
             continue
 
-        raw_text = _normalize_text(entry.get("summary") or entry.get("description") or "")[:4000]
+        raw_text = _strip_tags(entry.get("summary") or entry.get("description") or "")[:4000]
 
         published = _rss_published_at(getattr(entry, "published_parsed", None))
 
@@ -576,12 +526,13 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
         )
         source_author = _normalize_text(rss_author)[:200] or None
 
+        inferred_type = "reference" if (not published and _is_reference_url(url)) else "news"
         item = SourceItem(
             title=title,
             raw_text=raw_text,
             source_url=url or None,
             source_name=label or feed.feed.get("title", feed_url),
-            source_type="news",
+            source_type=inferred_type,
             published_at=published,
             source_author=source_author,
         )

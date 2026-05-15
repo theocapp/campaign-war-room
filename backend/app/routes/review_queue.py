@@ -31,20 +31,18 @@ def _enrich(db: Session, item: SourceItem) -> ReviewQueueItemOut:
 
 @router.get("/review-queue", response_model=list[ReviewQueueItemOut])
 def get_review_queue(db: Session = Depends(get_db)):
+    from datetime import datetime, timedelta
+    cutoff = datetime.utcnow() - timedelta(hours=48)
     items = (
         db.query(SourceItem)
         .options(joinedload(SourceItem.issue_mentions))
-        .filter(SourceItem.archived_as_irrelevant == False)  # noqa: E712
         .filter(SourceItem.reviewed == False)  # noqa: E712
         .filter(SourceItem.dismissed == False)  # noqa: E712
-        .filter(
-            or_(
-                SourceItem.race_relevance_score >= 40,
-                SourceItem.actionability_label.in_(["review", "respond"]),
-            )
-        )
-        .order_by(SourceItem.priority_score.desc(), SourceItem.created_at.desc())
-        .limit(50)
+        .filter(SourceItem.archived_as_irrelevant == False)  # noqa: E712
+        .filter(SourceItem.created_at >= cutoff)
+        .filter(SourceItem.race_relevance_score.isnot(None))
+        .order_by(SourceItem.race_relevance_score.desc(), SourceItem.created_at.desc())
+        .limit(60)
         .all()
     )
     return [_enrich(db, item) for item in unique_by_cluster(items)]
@@ -121,6 +119,32 @@ def dismiss_item(source_id: int, body: ReviewAction, db: Session = Depends(get_d
     db.commit()
     db.refresh(item)
     return _enrich(db, item)
+
+
+@router.post("/review-queue/{source_id}/mark-relevant")
+def mark_relevant(source_id: int, db: Session = Depends(get_db)):
+    """Human override: confirm this article IS relevant to the race."""
+    item = db.get(SourceItem, source_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Source not found")
+    item.archived_as_irrelevant = False
+    item.reviewed = True
+    item.dismissed = False
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/review-queue/{source_id}/mark-irrelevant")
+def mark_irrelevant(source_id: int, db: Session = Depends(get_db)):
+    """Human override: mark this article as NOT relevant to the race."""
+    item = db.get(SourceItem, source_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Source not found")
+    item.archived_as_irrelevant = True
+    item.reviewed = True
+    item.dismissed = True
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/review-queue/{source_id}/priority", response_model=ReviewQueueItemOut)

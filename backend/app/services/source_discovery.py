@@ -1,8 +1,15 @@
 """Generate campaign-specific source monitor suggestions."""
 import json
 from typing import Any
+from urllib.parse import urlencode
 
 from app.models import CampaignConfig, Opponent
+
+
+def _gnews_url(query: str) -> str:
+    """Build a Google News RSS search URL for the given query string."""
+    params = urlencode({"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    return f"https://news.google.com/rss/search?{params}"
 
 
 def _terms(value: str | list[str] | None) -> list[str]:
@@ -62,6 +69,59 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
 
     monitors: list[dict[str, Any]] = []
     seen: set[tuple] = set()
+
+    # ── Google News RSS feeds (auto-ingested by the scheduler) ────────────────
+    # These are created as monitor_type="rss" so _ensure_rss_feed in monitors.py
+    # adds them to the rss_feeds table and the scheduler picks them up automatically.
+    if candidate:
+        _add(monitors, seen,
+             name=f"Google News: {candidate}",
+             monitor_type="rss",
+             url=_gnews_url(candidate),
+             category="candidate",
+             relevance_hint="Automatically tracks all Google News coverage mentioning the candidate.")
+        if office:
+            _add(monitors, seen,
+                 name=f"Google News: {candidate} {office}",
+                 monitor_type="rss",
+                 url=_gnews_url(f'"{candidate}" {office}'),
+                 category="candidate",
+                 relevance_hint="Google News feed filtered to candidate + office title.")
+
+    for opponent in opponents:
+        if not opponent.name:
+            continue
+        _add(monitors, seen,
+             name=f"Google News: {opponent.name}",
+             monitor_type="rss",
+             url=_gnews_url(opponent.name),
+             category="opponent",
+             source_type="opponent_statement",
+             relevance_hint="Automatically tracks all Google News coverage mentioning the opponent.")
+        if candidate and opponent.name:
+            _add(monitors, seen,
+                 name=f"Google News: {candidate} vs {opponent.name}",
+                 monitor_type="rss",
+                 url=_gnews_url(f'"{candidate}" "{opponent.name}"'),
+                 category="race",
+                 relevance_hint="Google News feed for articles that mention both candidates together.")
+
+    if district and office:
+        _add(monitors, seen,
+             name=f"Google News: {district} {office}",
+             monitor_type="rss",
+             url=_gnews_url(f'"{district}" {office}'),
+             category="race",
+             relevance_hint="Google News feed for the race district and office.")
+
+    if location and office:
+        _add(monitors, seen,
+             name=f"Google News: {location} {office}",
+             monitor_type="rss",
+             url=_gnews_url(f'"{location}" {office} election'),
+             category="race",
+             relevance_hint="Google News feed for the race location and office.")
+    # ── End Google News RSS feeds ─────────────────────────────────────────────
 
     if candidate:
         _add(monitors, seen, name=f"{candidate} news search", monitor_type="search_query",

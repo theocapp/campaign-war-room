@@ -180,7 +180,6 @@ def initialize_campaign(db) -> dict:
     """
     from app.models import CampaignConfig
     from app.services.monitors import auto_setup_monitors
-    from app.services.narratives import refresh_narratives
 
     steps: list[dict] = []
     monitors_created = monitors_skipped = sources_ingested = narratives_refreshed = 0
@@ -245,20 +244,14 @@ def initialize_campaign(db) -> dict:
         "detail": step3_detail,
     })
 
-    # Step 4 — Narrative refresh
-    try:
-        narratives = refresh_narratives(db)
-        narratives_refreshed = len(narratives)
-        steps.append({
-            "step": 4, "label": "Narrative refresh",
-            "status": "ok",
-            "detail": f"{narratives_refreshed} narrative(s) tracked.",
-        })
-    except Exception as exc:
-        steps.append({
-            "step": 4, "label": "Narrative refresh",
-            "status": "error", "detail": str(exc),
-        })
+    # Step 4 — Narrative count (KGNarrative is now the authoritative source)
+    from app.knowledge_graph.orm import KGNarrative
+    narratives_refreshed = db.query(KGNarrative).filter(KGNarrative.status == "active").count()
+    steps.append({
+        "step": 4, "label": "Narrative refresh",
+        "status": "ok",
+        "detail": f"{narratives_refreshed} narrative(s) tracked.",
+    })
 
     errors = [s for s in steps if s["status"] == "error"]
     message = (

@@ -1,4 +1,5 @@
 """Admin / workspace management endpoints."""
+from app.services import rescore as rescore_svc
 import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -106,3 +107,21 @@ def reanalyze_sources_endpoint(body: ReanalyzeSourcesRequest, db: Session = Depe
             dry_run=body.dry_run,
         ),
     )
+
+
+@router.post("/admin/rescore-articles")
+def start_rescore(db: Session = Depends(get_db)):
+    """Start background LLM rescoring of all articles. Returns immediately."""
+    return rescore_svc.start_rescore(db)
+
+
+@router.get("/admin/rescore-status")
+def rescore_status():
+    """Check progress of the background rescore job."""
+    return rescore_svc.get_status()
+
+
+@router.post("/admin/rescore-stop")
+def stop_rescore():
+    """Stop the background rescore job early."""
+    return rescore_svc.stop_rescore()

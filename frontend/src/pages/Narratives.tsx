@@ -1,240 +1,400 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { DashboardNarrativeCard } from '../api/types'
+import type { NarrativeFrameWithCounts } from '../api/types'
 
-type FilterKey = 'all' | string
-
-const ALL = 'all'
-
-function uniqueOptions(items: DashboardNarrativeCard[], key: keyof DashboardNarrativeCard) {
-  return Array.from(new Set(items.map(item => String(item[key] || '')).filter(Boolean))).sort()
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-function changeSignals(n: DashboardNarrativeCard) {
-  const lines: string[] = []
-  if (n.momentum_shift && n.momentum_shift !== 'unchanged') lines.push(`Momentum: ${n.momentum_shift}`)
-  if (n.recent_window_summary) lines.push(n.recent_window_summary)
-  if (n.what_changed) lines.push(n.what_changed)
-  if (n.spread_summary) lines.push(n.spread_summary)
-  if (typeof n.new_source_clusters_count === 'number' && n.new_source_clusters_count > 0)
-    lines.push(`${n.new_source_clusters_count} new cluster${n.new_source_clusters_count === 1 ? '' : 's'}`)
-  if (n.escaped_owned_recently) lines.push('Now spreading outside owned channels')
-  const messengers = (n.new_messenger_types || []).filter(Boolean).slice(0, 2)
-  if (messengers.length > 0) lines.push(`New messenger${messengers.length > 1 ? 's' : ''}: ${messengers.join(', ')}`)
-  return lines.slice(0, 3)
+const OWNER_LABELS: Record<string, string> = {
+  candidate: 'Our message',
+  opponent: 'Opponent attack',
+  media: 'Media theme',
 }
 
-function ownerBorderColor(ownerType: string) {
-  if (ownerType === 'opponent')  return 'var(--opponent-border)'
-  if (ownerType === 'candidate') return 'var(--candidate-border)'
-  return 'var(--border)'
+const OWNER_COLORS: Record<string, string> = {
+  candidate: 'var(--candidate-border, #22c55e)',
+  opponent: 'var(--opponent-border, #ef4444)',
+  media: 'var(--border, #64748b)',
 }
 
-function tractionColor(score: number) {
-  if (score >= 65) return 'var(--opponent)'
-  if (score >= 35) return 'var(--warning)'
-  return 'var(--text-muted)'
+const TREND_ICONS: Record<string, string> = {
+  up: '↑',
+  down: '↓',
+  flat: '→',
 }
 
-const OWNER_TABS = ['all', 'opponent', 'candidate', 'media'] as const
+const TREND_COLORS: Record<string, string> = {
+  up: '#f97316',
+  down: '#64748b',
+  flat: '#94a3b8',
+}
 
-export default function Narratives() {
-  const [narratives, setNarratives]     = useState<DashboardNarrativeCard[]>([])
-  const [loading, setLoading]           = useState(true)
-  const [error, setError]               = useState<string | null>(null)
-  const [ownerType, setOwnerType]       = useState<FilterKey>(ALL)
-  const [direction, setDirection]       = useState<FilterKey>(ALL)
-  const [status, setStatus]             = useState<FilterKey>(ALL)
-  const [evidence, setEvidence]         = useState<FilterKey>(ALL)
-  const [responseStatus, setResponseStatus] = useState<FilterKey>(ALL)
-
-  useEffect(() => {
-    api.getNarrativeBriefs(50)
-      .then(setNarratives)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [])
-
-  const filtered = useMemo(() => narratives.filter(n => (
-    (ownerType === ALL || n.owner_type === ownerType) &&
-    (direction === ALL || n.direction === direction) &&
-    (status === ALL || n.status === status) &&
-    (evidence === ALL || n.evidence_strength === evidence) &&
-    (responseStatus === ALL || n.response_status === responseStatus)
-  )), [narratives, ownerType, direction, status, evidence, responseStatus])
-
-  const hasFilters = direction !== ALL || status !== ALL || evidence !== ALL || responseStatus !== ALL
-
-  if (loading) return <div className="loading-text">Loading narratives…</div>
-  if (error)   return <div className="loading-text" style={{ color: 'var(--opponent)' }}>Error: {error}</div>
-
+function FrameCard({
+  frame,
+  onDelete,
+  onEdit,
+}: {
+  frame: NarrativeFrameWithCounts
+  onDelete: (id: number) => void
+  onEdit: (frame: NarrativeFrameWithCounts) => void
+}) {
   return (
-    <div className="page-wide">
-      {/* Header */}
-      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+    <div style={{
+      background: 'var(--surface, #1e293b)',
+      border: `2px solid ${OWNER_COLORS[frame.owner_type] || 'var(--border)'}`,
+      borderRadius: 8,
+      padding: '16px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
         <div>
-          <div className="label" style={{ marginBottom: 5 }}>Intelligence</div>
-          <h1 className="page-title">Narratives</h1>
-          <p className="page-subtitle">Campaign frames, opponent frames, and media frames with evidence underneath.</p>
-        </div>
-        <Link to="/sources" style={{ color: 'var(--accent-light)', fontSize: '0.78rem', textDecoration: 'none', flexShrink: 0, marginTop: 6 }}>
-          View sources →
-        </Link>
-      </div>
-
-      {/* Owner type pill tabs */}
-      <div className="pill-tabs" style={{ marginBottom: '1rem' }}>
-        {OWNER_TABS.map(tab => (
-          <button
-            key={tab}
-            className={`pill-tab${ownerType === tab ? ' active' : ''}`}
-            onClick={() => setOwnerType(tab)}
-          >
-            {tab === 'all' ? 'All' : tab.charAt(0).toUpperCase() + tab.slice(1)}
-          </button>
-        ))}
-      </div>
-
-      {/* Filters */}
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          {([
-            { label: 'Direction',       value: direction,      options: uniqueOptions(narratives, 'direction'),      set: setDirection },
-            { label: 'Status',          value: status,         options: uniqueOptions(narratives, 'status'),         set: setStatus },
-            { label: 'Evidence',        value: evidence,       options: uniqueOptions(narratives, 'evidence_strength'), set: setEvidence },
-            { label: 'Response',        value: responseStatus, options: uniqueOptions(narratives, 'response_status'), set: setResponseStatus },
-          ] as const).map(({ label, value, options, set }) => (
-            <label key={label} style={{ display: 'grid', gap: 4, fontSize: '0.68rem', color: 'var(--text-muted)' }}>
-              {label}
-              <select value={value} onChange={e => (set as (v: string) => void)(e.target.value)} style={{ minWidth: 130 }}>
-                {[ALL, ...options].map(o => (
-                  <option key={o} value={o}>{o === ALL ? 'All' : o.replace(/_/g, ' ')}</option>
-                ))}
-              </select>
-            </label>
-          ))}
-          {hasFilters && (
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() => { setDirection(ALL); setStatus(ALL); setEvidence(ALL); setResponseStatus(ALL) }}
-            >
-              Reset filters
-            </button>
+          <span style={{
+            fontSize: 10,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            color: OWNER_COLORS[frame.owner_type],
+            marginBottom: 4,
+            display: 'block',
+          }}>
+            {OWNER_LABELS[frame.owner_type] || frame.owner_type}
+            {frame.source === 'llm' && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · auto-suggested</span>}
+          </span>
+          <div style={{ fontWeight: 600, fontSize: 16, color: 'var(--text, #f1f5f9)' }}>{frame.name}</div>
+          {frame.description && (
+            <div style={{ fontSize: 13, color: 'var(--text-muted, #94a3b8)', marginTop: 4 }}>{frame.description}</div>
           )}
         </div>
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <button
+            onClick={() => onEdit(frame)}
+            style={{ background: 'transparent', border: '1px solid var(--border, #334155)', color: 'var(--text-muted, #94a3b8)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
+          >Edit</button>
+          <button
+            onClick={() => onDelete(frame.id)}
+            style={{ background: 'transparent', border: '1px solid #ef4444', color: '#ef4444', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
+          >Remove</button>
+        </div>
       </div>
 
-      {/* Result count */}
-      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', marginBottom: '0.75rem' }}>
-        {filtered.length} narrative{filtered.length !== 1 ? 's' : ''}
-        {hasFilters || ownerType !== ALL ? ' (filtered)' : ''}
-      </div>
-
-      {/* Narrative list */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {filtered.length === 0 && (
-          <div className="empty-state">
-            <div className="empty-state-icon">◻</div>
-            <div className="empty-state-title">No narratives match</div>
-            <div className="empty-state-body">Try adjusting the filters above.</div>
+      <div style={{ display: 'flex', gap: 20 }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text, #f1f5f9)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            {frame.mentions_this_week}
+            <span style={{ fontSize: 14, color: TREND_COLORS[frame.trend] }}>{TREND_ICONS[frame.trend]}</span>
           </div>
-        )}
-
-        {filtered.map(n => {
-          const signals = changeSignals(n)
-          return (
-            <Link
-              key={n.narrative_id}
-              to={`/narratives/${n.narrative_id}`}
-              style={{ textDecoration: 'none' }}
-            >
-              <div className="card card-hover" style={{ borderLeft: `3px solid ${ownerBorderColor(n.owner_type)}` }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 160px', gap: 16 }}>
-                  {/* Left: content */}
-                  <div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6, flexWrap: 'wrap' }}>
-                      <h2 style={{ margin: 0, fontSize: '0.93rem', fontWeight: 700, lineHeight: 1.3, flex: 1, minWidth: 0 }}>
-                        {n.short_label}
-                      </h2>
-                      <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                        <span className="badge badge-ghost" style={{ fontSize: '0.58rem' }}>{n.status}</span>
-                        <span className="badge badge-ghost" style={{ fontSize: '0.58rem' }}>{n.evidence_strength}</span>
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 8 }}>
-                      <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                        {n.owner_type}
-                      </span>
-                      <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
-                      {n.stance && n.stance !== 'neutral' && (
-                        <>
-                          <span style={{ fontSize: '0.62rem', fontFamily: 'JetBrains Mono', color: n.stance === 'attack' ? 'var(--opponent)' : 'var(--ok-light)' }}>
-                            {n.stance}
-                          </span>
-                          <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
-                        </>
-                      )}
-                      {n.target_person && (
-                        <>
-                          <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
-                            ↳ {n.target_person}
-                          </span>
-                          <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
-                        </>
-                      )}
-                      <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
-                        {n.attribution_type.replace(/_/g, ' ')}
-                      </span>
-                      <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
-                      <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
-                        {n.direction.replace(/_/g, ' ')}
-                      </span>
-                      <span style={{ color: 'var(--text-xmuted)', fontSize: '0.62rem' }}>·</span>
-                      <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono' }}>
-                        {n.response_status.replace(/_/g, ' ')}
-                      </span>
-                    </div>
-
-                    <p style={{ margin: '0 0 8px', fontSize: '0.79rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                      {n.canonical_text}
-                    </p>
-
-                    {signals.length > 0 && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        {signals.map(line => (
-                          <div key={line} style={{ fontSize: '0.71rem', color: 'var(--text-muted)', lineHeight: 1.35 }}>
-                            · {line}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Right: metrics */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end', justifyContent: 'flex-start' }}>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontSize: '1.35rem', fontWeight: 700, color: tractionColor(n.traction_score), fontFamily: 'JetBrains Mono', lineHeight: 1 }}>
-                        {n.traction_score}
-                      </div>
-                      <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>traction</div>
-                    </div>
-                    <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'JetBrains Mono', textAlign: 'right', lineHeight: 1.7 }}>
-                      <div>{n.source_cluster_count} cluster{n.source_cluster_count !== 1 ? 's' : ''}</div>
-                      <div>{n.messenger_diversity_count} messenger{n.messenger_diversity_count !== 1 ? 's' : ''}</div>
-                      <div>{n.source_count} source{n.source_count !== 1 ? 's' : ''}</div>
-                    </div>
-                    <div style={{ fontSize: '0.68rem', color: 'var(--accent-light)', fontFamily: 'JetBrains Mono' }}>
-                      Open brief →
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </Link>
-          )
-        })}
+          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>this week</div>
+        </div>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted, #94a3b8)' }}>{frame.mentions_last_week}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>last week</div>
+        </div>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted, #94a3b8)' }}>{frame.mentions_total}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>total</div>
+        </div>
       </div>
+
+      {frame.recent_articles.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted, #94a3b8)', marginBottom: 6 }}>Recent</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {frame.recent_articles.map(a => {
+              const title = stripHtml(a.title || '(no title)')
+              const summary = a.summary ? stripHtml(a.summary).slice(0, 140) : null
+              return (
+                <div key={a.id} style={{
+                  fontSize: 12, color: 'var(--text, #f1f5f9)',
+                  borderLeft: '2px solid var(--border, #334155)', paddingLeft: 8,
+                  overflow: 'hidden', minWidth: 0,
+                }}>
+                  <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {a.source_url
+                      ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{title}</a>
+                      : title}
+                  </div>
+                  {summary && (
+                    <div style={{
+                      color: 'var(--text-muted, #94a3b8)', marginTop: 2,
+                      display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}>
+                      {summary}{a.summary && stripHtml(a.summary).length > 140 ? '…' : ''}
+                    </div>
+                  )}
+                  {a.source_name && (
+                    <div style={{
+                      color: 'var(--text-muted, #94a3b8)', fontSize: 11, marginTop: 2,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>{a.source_name}</div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AddFrameModal({ onClose, onSave }: { onClose: () => void; onSave: (name: string, description: string, owner_type: string) => Promise<void> }) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [ownerType, setOwnerType] = useState('candidate')
+  const [saving, setSaving] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!name.trim()) return
+    setSaving(true)
+    await onSave(name.trim(), description.trim(), ownerType)
+    setSaving(false)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+      <div style={{ background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 10, padding: 24, width: 420, maxWidth: '90vw' }}>
+        <h3 style={{ margin: '0 0 16px', color: 'var(--text, #f1f5f9)' }}>Add Narrative Frame</h3>
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', display: 'block', marginBottom: 4 }}>Frame name *</label>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="e.g. Healthcare Access"
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--bg, #0f172a)', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text, #f1f5f9)', fontSize: 14, boxSizing: 'border-box' }}
+              required
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', display: 'block', marginBottom: 4 }}>Description</label>
+            <textarea
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="One sentence: what this frame covers and why it matters."
+              rows={2}
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--bg, #0f172a)', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text, #f1f5f9)', fontSize: 14, resize: 'vertical', boxSizing: 'border-box' }}
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', display: 'block', marginBottom: 4 }}>Owner</label>
+            <select
+              value={ownerType}
+              onChange={e => setOwnerType(e.target.value)}
+              style={{ width: '100%', padding: '8px 10px', background: 'var(--bg, #0f172a)', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text, #f1f5f9)', fontSize: 14, boxSizing: 'border-box' }}
+            >
+              <option value="candidate">Our message</option>
+              <option value="opponent">Opponent attack</option>
+              <option value="media">Media theme</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" onClick={onClose} style={{ padding: '8px 16px', background: 'transparent', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text-muted, #94a3b8)', cursor: 'pointer' }}>Cancel</button>
+            <button type="submit" disabled={saving || !name.trim()} style={{ padding: '8px 16px', background: '#3b82f6', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
+              {saving ? 'Saving…' : 'Add Frame'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function EditFrameModal({ frame, onClose, onSave }: { frame: NarrativeFrameWithCounts; onClose: () => void; onSave: (id: number, name: string, description: string, owner_type: string) => Promise<void> }) {
+  const [name, setName] = useState(frame.name)
+  const [description, setDescription] = useState(frame.description || '')
+  const [ownerType, setOwnerType] = useState<'candidate' | 'opponent' | 'media'>(frame.owner_type)
+  const [saving, setSaving] = useState(false)
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setSaving(true)
+    await onSave(frame.id, name.trim(), description.trim(), ownerType)
+    setSaving(false)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+      <div style={{ background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 10, padding: 24, width: 420, maxWidth: '90vw' }}>
+        <h3 style={{ margin: '0 0 16px', color: 'var(--text, #f1f5f9)' }}>Edit Narrative Frame</h3>
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', display: 'block', marginBottom: 4 }}>Frame name</label>
+            <input value={name} onChange={e => setName(e.target.value)} style={{ width: '100%', padding: '8px 10px', background: 'var(--bg, #0f172a)', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text, #f1f5f9)', fontSize: 14, boxSizing: 'border-box' }} required />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', display: 'block', marginBottom: 4 }}>Description</label>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} style={{ width: '100%', padding: '8px 10px', background: 'var(--bg, #0f172a)', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text, #f1f5f9)', fontSize: 14, resize: 'vertical', boxSizing: 'border-box' }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', display: 'block', marginBottom: 4 }}>Owner</label>
+            <select value={ownerType} onChange={e => setOwnerType(e.target.value as 'candidate' | 'opponent' | 'media')} style={{ width: '100%', padding: '8px 10px', background: 'var(--bg, #0f172a)', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text, #f1f5f9)', fontSize: 14, boxSizing: 'border-box' }}>
+              <option value="candidate">Our message</option>
+              <option value="opponent">Opponent attack</option>
+              <option value="media">Media theme</option>
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" onClick={onClose} style={{ padding: '8px 16px', background: 'transparent', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text-muted, #94a3b8)', cursor: 'pointer' }}>Cancel</button>
+            <button type="submit" disabled={saving} style={{ padding: '8px 16px', background: '#3b82f6', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontWeight: 600 }}>
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+export default function Narratives() {
+  const [frames, setFrames] = useState<NarrativeFrameWithCounts[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [showAdd, setShowAdd] = useState(false)
+  const [editFrame, setEditFrame] = useState<NarrativeFrameWithCounts | null>(null)
+  const [suggesting, setSuggesting] = useState(false)
+  const [rematching, setRematching] = useState(false)
+  const [statusMsg, setStatusMsg] = useState<string | null>(null)
+
+  function load() {
+    return api.getNarrativeFrames()
+      .then(setFrames)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { load() }, [])
+
+  async function handleAdd(name: string, description: string, owner_type: string) {
+    await api.createNarrativeFrame({ name, description, owner_type })
+    setShowAdd(false)
+    load()
+  }
+
+  async function handleEdit(id: number, name: string, description: string, owner_type: string) {
+    await api.updateNarrativeFrame(id, { name, description, owner_type })
+    setEditFrame(null)
+    load()
+  }
+
+  async function handleDelete(id: number) {
+    if (!confirm('Remove this narrative frame?')) return
+    await api.deleteNarrativeFrame(id)
+    load()
+  }
+
+  async function handleSuggest() {
+    setSuggesting(true)
+    setStatusMsg(null)
+    try {
+      const result = await api.suggestNarrativeFrames(14)
+      setStatusMsg(`Auto-suggested ${result.suggested} frame${result.suggested === 1 ? '' : 's'} from recent articles.`)
+      load()
+    } catch (e: any) {
+      setStatusMsg('Auto-suggest failed: ' + e.message)
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  async function handleRematch() {
+    setRematching(true)
+    setStatusMsg(null)
+    try {
+      const result = await api.rematchNarrativeFrames(30)
+      setStatusMsg(`Matched ${result.matched_mentions} article mentions to frames.`)
+      load()
+    } catch (e: any) {
+      setStatusMsg('Rematch failed: ' + e.message)
+    } finally {
+      setRematching(false)
+    }
+  }
+
+  const candidateFrames = frames.filter(f => f.owner_type === 'candidate')
+  const opponentFrames = frames.filter(f => f.owner_type === 'opponent')
+  const mediaFrames = frames.filter(f => f.owner_type === 'media')
+
+  return (
+    <div className="page">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: 'var(--text, #f1f5f9)' }}>Narrative Frames</h1>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-muted, #94a3b8)' }}>
+            Track how your message and the opponent's attacks are developing in coverage.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            onClick={handleSuggest}
+            disabled={suggesting}
+            style={{ padding: '8px 14px', background: '#7c3aed', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontWeight: 600, fontSize: 13, opacity: suggesting ? 0.7 : 1 }}
+          >
+            {suggesting ? 'Analyzing…' : 'Auto-suggest frames'}
+          </button>
+          {frames.length > 0 && (
+            <button
+              onClick={handleRematch}
+              disabled={rematching}
+              style={{ padding: '8px 14px', background: 'transparent', border: '1px solid var(--border, #334155)', borderRadius: 6, color: 'var(--text-muted, #94a3b8)', cursor: 'pointer', fontSize: 13, opacity: rematching ? 0.7 : 1 }}
+            >
+              {rematching ? 'Matching…' : 'Rematch articles'}
+            </button>
+          )}
+          <button
+            onClick={() => setShowAdd(true)}
+            style={{ padding: '8px 14px', background: '#3b82f6', border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontWeight: 600, fontSize: 13 }}
+          >
+            + Add frame
+          </button>
+        </div>
+      </div>
+
+      {statusMsg && (
+        <div style={{ marginBottom: 16, padding: '10px 14px', background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 6, fontSize: 13, color: 'var(--text, #f1f5f9)' }}>
+          {statusMsg}
+        </div>
+      )}
+
+      {loading && <div style={{ color: 'var(--text-muted, #94a3b8)' }}>Loading…</div>}
+      {error && <div style={{ color: '#ef4444' }}>Error: {error}</div>}
+
+      {!loading && frames.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '48px 24px', color: 'var(--text-muted, #94a3b8)' }}>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8, color: 'var(--text, #f1f5f9)' }}>No narrative frames yet</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted, #94a3b8)' }}>
+            Frames are generated automatically once enough relevant articles have been ingested.
+            If you have articles already, click <strong>Auto-suggest frames</strong> above to generate them now.
+          </div>
+        </div>
+      )}
+
+      {[
+        { label: 'Our Message', frames: candidateFrames },
+        { label: 'Opponent Attacks', frames: opponentFrames },
+        { label: 'Media Themes', frames: mediaFrames },
+      ].map(({ label, frames: group }) => group.length > 0 && (
+        <div key={label} style={{ marginBottom: 32 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted, #94a3b8)', margin: '0 0 12px' }}>{label}</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
+            {group.map(frame => (
+              <FrameCard
+                key={frame.id}
+                frame={frame}
+                onDelete={handleDelete}
+                onEdit={setEditFrame}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {showAdd && <AddFrameModal onClose={() => setShowAdd(false)} onSave={handleAdd} />}
+      {editFrame && <EditFrameModal frame={editFrame} onClose={() => setEditFrame(null)} onSave={handleEdit} />}
     </div>
   )
 }

@@ -122,6 +122,23 @@ def auto_setup_monitors(db: Session) -> dict:
         except Exception:
             pass
 
+    # Immediately ingest any newly created RSS feeds so content appears without
+    # waiting for the next scheduler tick.
+    new_rss_feeds = [
+        db.query(RssFeed).filter_by(url=m.url).first()
+        for m in created
+        if m.monitor_type == "rss" and m.url
+    ]
+    new_rss_feeds = [f for f in new_rss_feeds if f]
+    for feed in new_rss_feeds:
+        try:
+            result = ingestion.ingest_rss(db, feed.url, feed.name)
+            sources_ingested += result.added
+            feed.last_fetched_at = datetime.utcnow()
+            db.commit()
+        except Exception:
+            pass
+
     return {
         "generated": len(created),
         "skipped": skipped,

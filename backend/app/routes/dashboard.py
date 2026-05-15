@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
-from app.models import CampaignConfig, Issue, IssueMention, SourceItem, Opponent, OpponentActivity, CanvassingNote, GeneratedTalkingPoint, SourceMonitor, ManualCapture, Narrative
+from app.models import CampaignConfig, Issue, IssueMention, SourceItem, Opponent, OpponentActivity, CanvassingNote, GeneratedTalkingPoint, SourceMonitor, ManualCapture
 from app.schemas import (
     DashboardOut, DashboardChange, DashboardChangesOut,
     IssueOut, SourceItemOut, OpponentActivityOut,
@@ -16,7 +16,7 @@ from app.schemas import (
     DashboardNarrativeComparison,
 )
 from app.routes.narratives import compare_narratives
-from app.services.narratives import top_narratives
+from app.knowledge_graph.orm import KGClaim, KGNarrative, KGNarrativeClaim
 from app.services.narrative_briefing import build_brief_cards
 from app.services.story_clustering import unique_by_cluster
 from app.services.snapshots import source_out
@@ -391,8 +391,20 @@ def _build_opponent_watch(activities: list[OpponentActivity]) -> DashboardOppone
     )
 
 
-def _build_narrative_cards(db: Session, narratives: list[Narrative]) -> list[DashboardNarrativeCard]:
-    # Delegate to central briefing builder to keep dashboard lightweight
+def _build_narrative_cards(db: Session) -> list[DashboardNarrativeCard]:
+    from sqlalchemy.orm import joinedload
+    narratives = (
+        db.query(KGNarrative)
+        .options(
+            joinedload(KGNarrative.claim_links)
+            .joinedload(KGNarrativeClaim.claim)
+            .joinedload(KGClaim.source)
+        )
+        .filter(KGNarrative.status == "active")
+        .order_by(KGNarrative.velocity_score.desc())
+        .limit(5)
+        .all()
+    )
     return build_brief_cards(db=db, narratives=narratives, limit=5)
 def _build_attention_cards(
     review_snapshot: DashboardReviewSnapshot,
@@ -673,7 +685,7 @@ def get_dashboard(db: Session = Depends(get_db)):
     review_snapshot = _build_review_snapshot(source_pool)
     priority_issues = _build_priority_issues(top_issues, source_pool)
     opponent_watch = _build_opponent_watch(opponent_activity)
-    narrative_briefing = _build_narrative_cards(db, top_narratives(db, limit=5))
+    narrative_briefing = _build_narrative_cards(db)
     comparison = compare_narratives(db=db)
     narrative_comparison = DashboardNarrativeComparison(
         top_opponent=comparison.top_opponent_narratives,
@@ -741,3 +753,144 @@ def get_dashboard(db: Session = Depends(get_db)):
         recent_developments=recent_developments,
         last_updated=datetime.utcnow(),
     )
+
+
+
+@router.get("/briefing/today")
+def get_daily_briefing(db: Session = Depends(get_db)):
+    from app.services.daily_briefing import generate_daily_briefing
+    return generate_daily_briefing(db)
+
+
+@router.get("/briefing/morning")
+def get_morning_briefing(db: Session = Depends(get_db)):
+    """
+    Single-page briefing: new articles, narrative pulse, needs-response, LLM race-situation memo.
+    """
+    from datetime import datetime, timedelta
+    from sqlalchemy import func
+    from app.models import SourceItem, NarrativeFrame, NarrativeFrameMention, Opponent
+    from app.services import briefing_summary as briefing_svc
+
+    cutoff_24h = datetime.utcnow() - timedelta(hours=24)
+    cutoff_48h = datetime.utcnow() - timedelta(hours=48)
+    cutoff_7d  = datetime.utcnow() - timedelta(days=7)
+    cutoff_14d = datetime.utcnow() - timedelta(days=14)
+
+    def _item_dict(item):
+        return {
+            "id": item.id,
+            "title": item.title,
+            "summary": item.summary,
+            "source_name": item.source_name,
+            "source_url": item.source_url,
+            "published_at": item.published_at.isoformat() if item.published_at else None,
+            "race_relevance_score": item.race_relevance_score,
+            "actionability_label": item.actionability_label,
+            "framing": getattr(item, "framing", None),
+        }
+
+    # Section 1 — Needs a response right now (published in last 48h)
+    respond = (
+        db.query(SourceItem)
+        .filter(
+            SourceItem.archived_as_irrelevant == False,
+            SourceItem.published_at >= cutoff_48h,
+            SourceItem.actionability_label == "respond",
+        )
+        .order_by(SourceItem.race_relevance_score.desc())
+        .limit(5)
+        .all()
+    )
+
+    # Section 2 — New since yesterday (published in last 48h, top relevant)
+    respond_ids = {i.id for i in respond}
+    new_articles_raw = (
+        db.query(SourceItem)
+        .filter(
+            SourceItem.archived_as_irrelevant == False,
+            SourceItem.published_at >= cutoff_48h,
+            SourceItem.race_relevance_score >= 50,
+        )
+        .order_by(SourceItem.race_relevance_score.desc())
+        .limit(50)
+        .all()
+    )
+
+    def _is_llm_scored(item) -> bool:
+        """Return False for articles whose summary looks like a raw RSS excerpt (not LLM-generated)."""
+        s = item.summary or ""
+        if "<" in s:
+            return False
+        if "[...]" in s:
+            return False
+        # Station attribution patterns: "(WBRE/WYOU) —" anywhere in summary
+        if " —" in s and ("(WB" in s or "(WN" in s or "(WY" in s or "(AP)" in s):
+            return False
+        return True
+
+    new_articles = [
+        a for a in new_articles_raw
+        if a.id not in respond_ids and _is_llm_scored(a)
+    ][:5]
+
+    # Section 3 — Narrative pulse
+    frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+    pulse = []
+    for frame in frames:
+        this_week = (
+            db.query(func.count(NarrativeFrameMention.id))
+            .filter(NarrativeFrameMention.frame_id == frame.id,
+                    NarrativeFrameMention.created_at >= cutoff_7d)
+            .scalar()
+        )
+        last_week = (
+            db.query(func.count(NarrativeFrameMention.id))
+            .filter(NarrativeFrameMention.frame_id == frame.id,
+                    NarrativeFrameMention.created_at >= cutoff_14d,
+                    NarrativeFrameMention.created_at < cutoff_7d)
+            .scalar()
+        )
+        trend = "up" if this_week > last_week else ("down" if this_week < last_week else "flat")
+        pulse.append({
+            "id": frame.id,
+            "name": frame.name,
+            "owner_type": frame.owner_type,
+            "this_week": this_week,
+            "last_week": last_week,
+            "trend": trend,
+        })
+    pulse.sort(key=lambda x: x["this_week"], reverse=True)
+
+    # Meta — ingested uses created_at, relevant uses published_at + same quality filter as new_articles
+    total_today = (
+        db.query(func.count(SourceItem.id))
+        .filter(SourceItem.created_at >= cutoff_24h)
+        .scalar()
+    )
+    relevant_candidates = (
+        db.query(SourceItem)
+        .filter(SourceItem.archived_as_irrelevant == False,
+                SourceItem.published_at >= cutoff_48h,
+                SourceItem.race_relevance_score >= 50)
+        .all()
+    )
+    relevant_today = sum(1 for i in relevant_candidates if _is_llm_scored(i))
+
+    # LLM race-situation memo
+    campaign = db.query(CampaignConfig).first()
+    opponents = db.query(Opponent).limit(3).all()
+    all_articles = [_item_dict(i) for i in respond] + [_item_dict(i) for i in new_articles]
+    race_memo = briefing_svc.get_or_generate(db, all_articles, campaign, opponents)
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "meta": {
+            "total_articles_today": total_today,
+            "relevant_articles_today": relevant_today,
+        },
+        "race_memo": race_memo,
+        "needs_response": [_item_dict(i) for i in respond],
+        "new_articles": [_item_dict(i) for i in new_articles],
+        "narrative_pulse": pulse,
+    }

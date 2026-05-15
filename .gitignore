@@ -29,3 +29,4 @@ Thumbs.db
 # Ignore AI tool workdirs
 .claude/
 .claire/
+.aider*

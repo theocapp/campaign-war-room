@@ -775,6 +775,7 @@ class DashboardNarrativeCard(BaseModel):
     escaped_owned_recently: bool = False
     momentum_shift: Optional[str] = None  # stronger | weaker | unchanged
     recent_window_summary: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
 
 
 class DashboardNarrativeComparison(BaseModel):

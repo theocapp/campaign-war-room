@@ -5,8 +5,12 @@ Extracts opponent claims, attacks, and promises at the sentence level.
 Deduplicates against existing OpponentActivity rows.
 """
 import re
+from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
-from app.models import Opponent, OpponentActivity, SourceItem
+from app.models import CampaignConfig, Opponent, OpponentActivity, SourceItem
+
+if TYPE_CHECKING:
+    from app.services.llm_provider import BaseLLMProvider
 
 
 def _norm_text(text: str | None, maxlen: int = 500) -> str:
@@ -66,16 +70,57 @@ def _split_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
-def _classify_sentence(sentence: str, opponent_name: str) -> dict | None:
+def _first_mention_pos(lower_text: str, name: str) -> int:
+    """Return the position of the first word-boundary match of any meaningful part of name.
+
+    Strips punctuation from name parts so FEC-format names like 'COGNETTI, PAIGE'
+    correctly match 'Cognetti' in natural text (the comma in 'COGNETTI,' would
+    otherwise prevent any match).
     """
-    If sentence mentions the opponent, classify it as attack / claim / promise.
-    Returns a classification dict or None if no opponent mention.
+    raw_parts = name.lower().split()
+    # Strip non-alpha characters so "cognetti," → "cognetti", "jr." → "jr"
+    parts = [re.sub(r'[^a-z]', '', p) for p in raw_parts]
+    # Keep only meaningful tokens (skip initials, "jr", "sr", "rep", etc.)
+    skip = {'jr', 'sr', 'mr', 'ms', 'dr', 'rep', 'sen', 'hon', 'the', 'and'}
+    parts = [p for p in parts if len(p) > 2 and p not in skip]
+    positions = []
+    for part in parts:
+        m = re.search(r'\b' + re.escape(part) + r'\b', lower_text)
+        if m:
+            positions.append(m.start())
+    return min(positions) if positions else -1
+
+
+def _classify_sentence(sentence: str, opponent_name: str, candidate_name: str = "") -> dict | None:
+    """
+    If sentence mentions the opponent AS THE SUBJECT, classify it as attack / claim / promise.
+
+    Skips sentences where the candidate appears before the opponent — those are the
+    candidate talking *about* the opponent (e.g. "Cognetti criticized Bresnahan for X"),
+    not the opponent acting.
+
+    Sets `needs_llm_verify=True` when both names are present and the opponent appears
+    first — these may be passive-voice sentences where the opponent is the grammatical
+    subject but the candidate is the actual actor (e.g. "Bresnahan was attacked by Cognetti").
     """
     lower = sentence.lower()
-    if opponent_name.lower() not in lower and not any(
-        part.lower() in lower for part in opponent_name.split()
-    ):
+
+    opp_pos = _first_mention_pos(lower, opponent_name)
+    if opp_pos == -1:
         return None
+
+    needs_llm_verify = False
+    if candidate_name:
+        cand_pos = _first_mention_pos(lower, candidate_name)
+        if cand_pos != -1:
+            if cand_pos < opp_pos:
+                # Candidate is clearly the subject — skip entirely.
+                return None
+            else:
+                # Both names present, opponent appears first.
+                # Could be passive voice ("Bresnahan was criticized by Cognetti").
+                # Flag for LLM verification.
+                needs_llm_verify = True
 
     is_attack = any(m in lower for m in _ATTACK_MARKERS)
     is_claim = any(m in lower for m in _CLAIM_MARKERS)
@@ -89,6 +134,7 @@ def _classify_sentence(sentence: str, opponent_name: str) -> dict | None:
         "is_claim": is_claim,
         "is_promise": is_promise,
         "sentence": sentence,
+        "needs_llm_verify": needs_llm_verify,
     }
 
 
@@ -100,18 +146,33 @@ def _detect_theme(text: str) -> str | None:
     return None
 
 
-def _extract_activities(full_text: str, opponent_name: str) -> list[dict]:
+def _extract_activities(
+    full_text: str,
+    opponent_name: str,
+    candidate_name: str = "",
+    llm: "BaseLLMProvider | None" = None,
+) -> list[dict]:
     """
     Return a list of activity dicts extracted from sentences in full_text.
     Each dict has: claim, attack, promise, contradiction_note, repeated_theme.
+
+    When both names appear in a sentence (ambiguous passive-voice cases), the LLM
+    is asked to confirm who the actual actor is. Sentences where the LLM says the
+    candidate is the actor are dropped.
     """
     sentences = _split_sentences(full_text)
     results: list[dict] = []
 
     for sentence in sentences:
-        classified = _classify_sentence(sentence, opponent_name)
+        classified = _classify_sentence(sentence, opponent_name, candidate_name)
         if not classified:
             continue
+
+        # LLM verification for ambiguous sentences where both names are present.
+        if classified.get("needs_llm_verify") and llm is not None and candidate_name:
+            actor = llm.verify_opponent_subject(sentence, opponent_name, candidate_name)
+            if actor == "candidate":
+                continue
 
         activity: dict = {
             "claim": None,
@@ -143,12 +204,17 @@ def _extract_activities(full_text: str, opponent_name: str) -> list[dict]:
 
 
 def analyze_source_for_opponents(db: Session, source_item: SourceItem) -> list[OpponentActivity]:
+    from app.services.llm_provider import get_provider
     opponents = db.query(Opponent).all()
     full_text = f"{source_item.title}. {source_item.raw_text or ''}"
     created: list[OpponentActivity] = []
 
+    campaign = db.query(CampaignConfig).first()
+    candidate_name = campaign.candidate_name if campaign else ""
+    llm = get_provider()
+
     for opponent in opponents:
-        activities = _extract_activities(full_text, opponent.name)
+        activities = _extract_activities(full_text, opponent.name, candidate_name, llm)
         if not activities:
             continue
 

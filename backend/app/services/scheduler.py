@@ -1,0 +1,193 @@
+"""
+Background scheduler for automated RSS ingestion.
+
+Controlled by two environment variables (set in .env or shell):
+
+    RSS_AUTO_INGEST_ENABLED          true | false   (default: true)
+    RSS_AUTO_INGEST_INTERVAL_MINUTES integer        (default: 60)
+
+The scheduler uses APScheduler's AsyncIOScheduler so it integrates cleanly
+with FastAPI's asyncio event loop.  The actual ingestion work is offloaded to
+a thread-pool via asyncio.to_thread so it never blocks the event loop.
+
+Ingestion shares the same threading.Lock as the manual ingest-all endpoint,
+so the two paths can never run concurrently.
+"""
+import asyncio
+import logging
+import os
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+log = logging.getLogger(__name__)
+
+_scheduler: AsyncIOScheduler | None = None
+
+
+def _is_enabled() -> bool:
+    val = os.getenv("RSS_AUTO_INGEST_ENABLED", "true").strip().lower()
+    return val not in ("false", "0", "no")
+
+
+def _interval_minutes() -> int:
+    try:
+        return max(1, int(os.getenv("RSS_AUTO_INGEST_INTERVAL_MINUTES", "30")))
+    except ValueError:
+        log.warning(
+            "Invalid RSS_AUTO_INGEST_INTERVAL_MINUTES value — defaulting to 60"
+        )
+        return 60
+
+
+def _run_narrative_refresh() -> None:
+    """
+    Sync: auto-suggest frames if none exist yet, then match recent unmatched articles.
+    Safe to call after every ingestion run — all operations are idempotent.
+    """
+    from app.db import SessionLocal
+    from app.models import NarrativeFrame, NarrativeFrameMention, SourceItem
+    from app.services import narrative_frames as nf_svc
+    from datetime import datetime, timedelta
+    from sqlalchemy import not_, exists
+
+    with SessionLocal() as db:
+        # Count active frames
+        frame_count = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).count()
+
+        # Count relevant articles from last 14 days
+        cutoff = datetime.utcnow() - timedelta(days=14)
+        relevant_count = (
+            db.query(SourceItem)
+            .filter(
+                SourceItem.archived_as_irrelevant == False,
+                SourceItem.created_at >= cutoff,
+                SourceItem.summary.isnot(None),
+            )
+            .count()
+        )
+
+        # Auto-suggest if we have data but no frames yet
+        if frame_count < 2 and relevant_count >= 10:
+            log.info(
+                "narrative_refresh: %d relevant articles, %d frames — auto-suggesting",
+                relevant_count, frame_count,
+            )
+            suggested = nf_svc.suggest_frames(db, days_back=14)
+            log.info("narrative_refresh: suggested %d frames", len(suggested))
+            # Re-count after suggestion
+            frame_count = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).count()
+
+        if frame_count == 0:
+            log.info("narrative_refresh: no frames to match against, skipping")
+            return
+
+        # Find relevant articles from last 48h with no frame mentions yet
+        recent_cutoff = datetime.utcnow() - timedelta(hours=48)
+        unmatched = (
+            db.query(SourceItem)
+            .filter(
+                SourceItem.archived_as_irrelevant == False,
+                SourceItem.created_at >= recent_cutoff,
+                not_(
+                    exists().where(NarrativeFrameMention.source_item_id == SourceItem.id)
+                ),
+            )
+            .all()
+        )
+
+        if not unmatched:
+            log.info("narrative_refresh: no unmatched articles, done")
+            return
+
+        log.info("narrative_refresh: matching %d unmatched articles to frames", len(unmatched))
+        total_mentions = 0
+        for item in unmatched:
+            matched = nf_svc.match_article_to_frames(db, item)
+            total_mentions += len(matched)
+        log.info("narrative_refresh: created %d frame mentions", total_mentions)
+
+
+async def _scheduled_ingest_job() -> None:
+    """Async job wrapper: runs sync ingestion in a thread-pool, then narrative refresh."""
+    from app.services.rss_ingestion import try_ingest_all_rss
+
+    log.info("Scheduled RSS ingestion starting")
+    try:
+        result = await asyncio.to_thread(try_ingest_all_rss, skip_if_locked=True)
+        if result is None:
+            log.warning(
+                "Scheduled RSS ingestion skipped — previous run still active"
+            )
+        else:
+            log.info(
+                "Scheduled RSS ingestion complete: "
+                "feeds=%d  added=%d  skipped=%d  errors=%d",
+                result.feeds_processed,
+                result.total_added,
+                result.total_skipped,
+                result.total_errors,
+            )
+    except Exception:
+        log.exception("Scheduled RSS ingestion failed with an unhandled exception")
+        return
+
+    # Auto-suggest frames and match new articles after ingestion
+    try:
+        await asyncio.to_thread(_run_narrative_refresh)
+    except Exception:
+        log.exception("Narrative refresh failed after scheduled ingestion")
+
+    # Invalidate briefing memo cache so next page load reflects new articles
+    try:
+        from app.services import briefing_summary
+        briefing_summary.invalidate()
+    except Exception:
+        log.warning("Failed to invalidate briefing summary cache")
+
+
+def start_scheduler() -> None:
+    """Start the background scheduler.  Called once during app startup."""
+    global _scheduler
+
+    if not _is_enabled():
+        log.info(
+            "RSS auto-ingestion disabled (RSS_AUTO_INGEST_ENABLED=false) — "
+            "scheduler not started"
+        )
+        return
+
+    interval = _interval_minutes()
+    log.info(
+        "Starting RSS auto-ingestion scheduler (interval=%d min)", interval
+    )
+
+    _scheduler = AsyncIOScheduler()
+    _scheduler.add_job(
+        _scheduled_ingest_job,
+        trigger="interval",
+        minutes=interval,
+        id="rss_auto_ingest",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Run narrative refresh once at startup to catch up on any unmatched articles
+    _scheduler.add_job(
+        lambda: asyncio.ensure_future(asyncio.to_thread(_run_narrative_refresh)),
+        trigger="date",
+        id="narrative_refresh_startup",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    log.info("RSS ingestion scheduler started")
+
+
+def stop_scheduler() -> None:
+    """Stop the background scheduler gracefully.  Called during app shutdown."""
+    global _scheduler
+
+    if _scheduler is not None:
+        log.info("Stopping RSS ingestion scheduler")
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
+        log.info("RSS ingestion scheduler stopped")

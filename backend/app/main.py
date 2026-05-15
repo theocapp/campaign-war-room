@@ -4,10 +4,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import init_db
 from app.routes import (
-    dashboard, sources, issues, opponents, canvassing,
-    talking_points, campaign, setup, rss_feeds, review_queue, source_templates,
-    admin, source_packs, source_reminders, race_import, monitors,
-    manual_captures, narratives, message_library, races, kg,
+    dashboard, sources, opponents,
+    campaign, setup, rss_feeds, review_queue, source_templates,
+    admin, source_packs, source_reminders, race_import,
+    narratives, races, narrative_frames,
 )
 
 
@@ -16,12 +16,17 @@ async def lifespan(app: FastAPI):
     init_db()
     from app.db import SessionLocal
     from app.seed import seed
+    from app.services.scheduler import start_scheduler, stop_scheduler
     with SessionLocal() as db:
         seed(db)
-    yield
+    start_scheduler()
+    try:
+        yield
+    finally:
+        stop_scheduler()
 
 
-app = FastAPI(title="Campaign War Room AI", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Campaign War Room AI", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,10 +38,7 @@ app.add_middleware(
 for router in [
     dashboard.router,
     sources.router,
-    issues.router,
     opponents.router,
-    canvassing.router,
-    talking_points.router,
     campaign.router,
     setup.router,
     rss_feeds.router,
@@ -47,17 +49,17 @@ for router in [
     source_reminders.router,
     race_import.router,
     races.router,
-    monitors.router,
-    manual_captures.router,
     narratives.router,
-    message_library.router,
-    kg.router,
+    narrative_frames.router,
 ]:
     app.include_router(router, prefix="/api")
 
-app.version = "0.3.0"
-
-
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "Campaign War Room AI", "version": "0.2.0"}
+    return {"status": "ok", "service": "Campaign War Room AI", "version": "0.3.0"}
+
+
+@app.get("/api/system/llm-status")
+def llm_status():
+    from app.services.llm_provider import get_provider_status
+    return get_provider_status()

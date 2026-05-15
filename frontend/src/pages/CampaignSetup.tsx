@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import type { CampaignProfile, CampaignInitializeResult, CampaignInitializeStep, RaceDirectory, RaceImportResult } from '../api/types'
 
@@ -950,6 +950,92 @@ export default function CampaignSetup() {
               {initResult.message}
             </div>
           </div>
+        )}
+      </div>
+
+      <RescorePanel />
+    </div>
+  )
+}
+
+function RescorePanel() {
+  type RescoreStatus = { running: boolean; total: number; processed: number; updated: number; errors: number; current_title: string | null; started_at: string | null; finished_at: string | null }
+  const [status, setStatus] = React.useState<RescoreStatus | null>(null)
+  const [starting, setStarting] = React.useState(false)
+  const [msg, setMsg] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    api.getRescoreStatus().then(setStatus).catch(() => {})
+    const id = setInterval(() => {
+      api.getRescoreStatus().then(setStatus).catch(() => {})
+    }, 3000)
+    return () => clearInterval(id)
+  }, [])
+
+  async function start() {
+    setStarting(true)
+    setMsg(null)
+    try {
+      const r = await api.startRescore()
+      if (r.started) {
+        setMsg(`Rescoring ${r.total} articles in the background (~${r.estimated_minutes} min). Progress updates every few seconds.`)
+      } else {
+        setMsg(r.reason || 'Could not start.')
+      }
+    } catch (e: any) {
+      setMsg(e.message)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const pct = status && status.total > 0 ? Math.round((status.processed / status.total) * 100) : 0
+
+  return (
+    <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="section-title" style={{ marginBottom: 4 }}>Rescore Existing Articles</div>
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 12 }}>
+        Run the AI relevance pipeline on all existing articles to replace old keyword-based scores.
+        Takes ~70 minutes in the background — you can close this page and come back.
+      </div>
+
+      {status?.running && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: 4 }}>
+            <span>{status.processed} / {status.total} articles ({pct}%)</span>
+            <span>{status.updated} updated · {status.errors} errors</span>
+          </div>
+          <div style={{ height: 6, background: 'var(--border)', borderRadius: 3, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${pct}%`, background: '#3b82f6', transition: 'width 0.5s', borderRadius: 3 }} />
+          </div>
+          {status.current_title && (
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4, fontStyle: 'italic' }}>
+              {status.current_title}
+            </div>
+          )}
+        </div>
+      )}
+
+      {status && !status.running && status.finished_at && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--ok-light)', marginBottom: 12 }}>
+          ✓ Complete — {status.updated} of {status.total} articles updated.
+        </div>
+      )}
+
+      {msg && <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: 10 }}>{msg}</div>}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          className="btn btn-primary btn-sm"
+          onClick={start}
+          disabled={starting || status?.running}
+        >
+          {status?.running ? `Running… (${pct}%)` : starting ? 'Starting…' : 'Start Rescore'}
+        </button>
+        {status?.running && (
+          <button className="btn btn-ghost btn-sm" onClick={() => api.stopRescore().then(() => setMsg('Stopped.'))}>
+            Stop
+          </button>
         )}
       </div>
     </div>

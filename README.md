@@ -130,6 +130,8 @@ cp .env.example .env
 | `ANTHROPIC_MODEL` | `claude-opus-4-7` | Anthropic model ID |
 | `SEARCH_PROVIDER` | `mock` | `mock` or `tavily` |
 | `TAVILY_API_KEY` | — | Required when `SEARCH_PROVIDER=tavily` |
+| `RSS_AUTO_INGEST_ENABLED` | `true` | Set to `false` to disable the background RSS scheduler entirely |
+| `RSS_AUTO_INGEST_INTERVAL_MINUTES` | `60` | How often (in minutes) the scheduler ingests all active RSS feeds |
 
 **Fallback behavior:** If a provider is selected but the API key is missing or the API call fails, the system automatically falls back to `MockLLMProvider` with a warning log. The app never crashes due to LLM failures.
 
@@ -285,6 +287,30 @@ The Dashboard shows today's top issues, opponent attacks, suggested actions, and
 The `POST /api/rss-feeds` endpoint saves a feed configuration. Use `POST /api/rss-feeds/{id}/ingest` or `POST /api/rss-feeds/ingest-all` to pull new items on demand. All items are deduplicated by `source_url` — re-ingesting the same feed never creates duplicates.
 
 Deleting a feed removes the feed record but does **not** delete any source items already ingested from it.
+
+## Automated RSS ingestion (background scheduler)
+
+The app runs a background scheduler that automatically ingests all active RSS feeds on a configurable interval. This means the Review Queue and Dashboard stay fresh without requiring manual clicks.
+
+**How it works:**
+- At startup, `AsyncIOScheduler` (APScheduler 3.x) registers a recurring job.
+- Every `RSS_AUTO_INGEST_INTERVAL_MINUTES` minutes (default: 60), it calls the same ingestion code used by the manual "Ingest All" button.
+- A shared threading lock prevents the scheduled run from overlapping with a manual run. If you click "Ingest All" while the scheduler is mid-run, the endpoint returns `409 Conflict` and asks you to try again shortly. If the scheduler fires while a manual run is in progress, it logs a warning and skips that cycle.
+- All items are deduplicated by URL — scheduled ingestion never creates duplicates.
+
+**Configure in your `.env`:**
+
+```bash
+RSS_AUTO_INGEST_ENABLED=true           # Set to false to disable entirely
+RSS_AUTO_INGEST_INTERVAL_MINUTES=60    # Check every hour (minimum: 1)
+```
+
+**Useful intervals by use case:**
+- Active campaign day / debate prep: `15`
+- Normal daily monitoring: `60` (default)
+- Low-activity period / development: `240`
+
+To disable the scheduler entirely (e.g. in test environments), set `RSS_AUTO_INGEST_ENABLED=false` before starting the server. The scheduler logs its activity to the uvicorn log at INFO level.
 
 ## How the Review Queue works
 

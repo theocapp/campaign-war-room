@@ -60,6 +60,20 @@ class BaseLLMProvider(ABC):
         """
         ...
 
+    @abstractmethod
+    def complete(self, prompt: str) -> str:
+        """Send a single freeform prompt and return the raw text response."""
+        ...
+
+    @abstractmethod
+    def verify_opponent_subject(self, sentence: str, opponent_name: str, candidate_name: str) -> str:
+        """
+        Determine who is the grammatical agent (actor) in this sentence.
+        Returns one of: "opponent", "candidate", "both", "unclear".
+        Used to catch passive-voice misclassifications the heuristic misses.
+        """
+        ...
+
 
 # ── Shared prompt helpers ─────────────────────────────────────────────────────
 
@@ -499,6 +513,13 @@ class MockLLMProvider(BaseLLMProvider):
         payload = high_recall_extract(text)
         return payload.model_dump_json()
 
+    def complete(self, prompt: str) -> str:
+        return "[]"
+
+    def verify_opponent_subject(self, sentence: str, opponent_name: str, candidate_name: str) -> str:
+        # Mock can't reason about grammar — pass through so heuristic result stands.
+        return "opponent"
+
 
 # ── OpenAI provider ───────────────────────────────────────────────────────────
 
@@ -547,10 +568,53 @@ class OpenAIProvider(BaseLLMProvider):
         return MockLLMProvider().classify_urgency(text)
 
     def extract_issues(self, text: str) -> list[str]:
+        prompt = (
+            "You are analyzing political campaign intelligence. "
+            "Identify which of these issue categories are mentioned in the text: "
+            "Healthcare, Economy & Jobs, Education, Housing, Infrastructure, "
+            "Taxes & Budget, Immigration, Environment, Public Safety, "
+            "Corruption & Ethics, Veterans, Social Issues.\n"
+            "Return a JSON array of matching category names only. "
+            "Return an empty array if none match clearly.\n\n"
+            f"Text: {text[:2000]}"
+        )
+        try:
+            raw = self._chat(prompt, json_mode=True)
+            parsed = _parse_json_response(raw)
+            if isinstance(parsed, list):
+                return [s for s in parsed if isinstance(s, str)] or MockLLMProvider().extract_issues(text)
+            if isinstance(parsed, dict):
+                for v in parsed.values():
+                    if isinstance(v, list):
+                        return [s for s in v if isinstance(s, str)] or MockLLMProvider().extract_issues(text)
+        except Exception as e:
+            log.warning("LLM extract_issues failed: %s", e)
         return MockLLMProvider().extract_issues(text)
 
     def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
-        return MockLLMProvider().detect_opponent_activity(text, opponent_name)
+        result: dict = {"claim": None, "attack": None, "promise": None, "contradiction_note": None, "repeated_theme": None}
+        if not opponent_name or opponent_name.lower() not in text.lower():
+            return result
+        prompt = (
+            f"Analyze this political text for activity by {opponent_name}. "
+            "Return a JSON object with these keys (use null if not present):\n"
+            '- "claim": a factual claim they made (1 sentence)\n'
+            '- "attack": an attack or criticism they made (1 sentence)\n'
+            '- "promise": a promise or pledge they made (1 sentence)\n'
+            '- "contradiction_note": any contradiction with their past positions (1 sentence)\n'
+            '- "repeated_theme": a recurring theme or talking point (3-5 words)\n\n'
+            f"Text: {text[:2000]}"
+        )
+        try:
+            raw = self._chat(prompt, json_mode=True)
+            parsed = _parse_json_response(raw)
+            if isinstance(parsed, dict):
+                for key in result:
+                    if parsed.get(key):
+                        result[key] = str(parsed[key])
+        except Exception as e:
+            log.warning("LLM detect_opponent_activity failed: %s", e)
+        return result
 
     def generate_talking_points(
         self,
@@ -577,7 +641,22 @@ class OpenAIProvider(BaseLLMProvider):
         return MockLLMProvider().generate_talking_points(issue, tone, context, campaign_profile, sources, opponent_activities)
 
     def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
-        return MockLLMProvider().generate_risk_warning(text, credibility_note)
+        prompt = (
+            "You are a political campaign risk analyst. "
+            "Review this content and identify any risks: unverified claims, "
+            "misleading framing, legal exposure, or backfire potential. "
+            "If there is a meaningful risk, return one concise sentence describing it. "
+            "If the content is low-risk, return null.\n\n"
+            f"Credibility note: {credibility_note or 'none'}\n"
+            f"Content: {text[:1500]}"
+        )
+        try:
+            raw = self._chat(prompt).strip()
+            if raw and raw.lower() not in ("null", "none", "no risk", "low risk", ""):
+                return raw
+        except Exception as e:
+            log.warning("LLM generate_risk_warning failed: %s", e)
+        return None
 
     def extract_knowledge_graph(self, text: str) -> str:
         from app.knowledge_graph.extractor import SYSTEM_PROMPT, build_user_prompt
@@ -591,6 +670,29 @@ class OpenAIProvider(BaseLLMProvider):
             log.warning("OpenAI extract_knowledge_graph failed: %s", e)
             from app.knowledge_graph.extractor import mock_extract
             return mock_extract(text).model_dump_json()
+
+    def complete(self, prompt: str) -> str:
+        try:
+            return self._chat(prompt)
+        except Exception as e:
+            log.warning("OpenAI complete failed: %s", e)
+            return "[]"
+
+    def verify_opponent_subject(self, sentence: str, opponent_name: str, candidate_name: str) -> str:
+        prompt = (
+            f"In the following political news sentence, who is the ACTOR performing the action?\n\n"
+            f"Sentence: \"{sentence}\"\n\n"
+            f'Candidate: "{candidate_name}"\n'
+            f'Opponent: "{opponent_name}"\n\n'
+            "Reply with exactly one word: opponent, candidate, both, or unclear."
+        )
+        try:
+            raw = self._chat(prompt).strip().lower()
+            if raw in ("opponent", "candidate", "both", "unclear"):
+                return raw
+        except Exception as e:
+            log.warning("OpenAI verify_opponent_subject failed: %s", e)
+        return "unclear"
 
 
 # ── Anthropic provider ────────────────────────────────────────────────────────
@@ -633,10 +735,42 @@ class AnthropicProvider(BaseLLMProvider):
         return MockLLMProvider().classify_urgency(text)
 
     def extract_issues(self, text: str) -> list[str]:
+        prompt = (
+            "Identify which of these issue categories are mentioned in the political text: "
+            "Healthcare, Economy & Jobs, Education, Housing, Infrastructure, "
+            "Taxes & Budget, Immigration, Environment, Public Safety, "
+            "Corruption & Ethics, Veterans, Social Issues.\n"
+            "Return only a JSON array of matching category names.\n\n"
+            f"Text: {text[:2000]}"
+        )
+        try:
+            raw = self._message(prompt, max_tokens=200).strip()
+            parsed = _parse_json_response(raw)
+            if isinstance(parsed, list):
+                return [s for s in parsed if isinstance(s, str)] or MockLLMProvider().extract_issues(text)
+        except Exception as e:
+            log.warning("Anthropic extract_issues failed: %s", e)
         return MockLLMProvider().extract_issues(text)
 
     def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
-        return MockLLMProvider().detect_opponent_activity(text, opponent_name)
+        result: dict = {"claim": None, "attack": None, "promise": None, "contradiction_note": None, "repeated_theme": None}
+        if not opponent_name or opponent_name.lower() not in text.lower():
+            return result
+        prompt = (
+            f"Analyze this text for activity by {opponent_name}. "
+            'Return JSON with keys: "claim", "attack", "promise", "contradiction_note", "repeated_theme" (null if absent).\n\n'
+            f"Text: {text[:2000]}"
+        )
+        try:
+            raw = self._message(prompt, max_tokens=400)
+            parsed = _parse_json_response(raw)
+            if isinstance(parsed, dict):
+                for key in result:
+                    if parsed.get(key):
+                        result[key] = str(parsed[key])
+        except Exception as e:
+            log.warning("Anthropic detect_opponent_activity failed: %s", e)
+        return result
 
     def generate_talking_points(
         self,
@@ -663,7 +797,20 @@ class AnthropicProvider(BaseLLMProvider):
         return MockLLMProvider().generate_talking_points(issue, tone, context, campaign_profile, sources, opponent_activities)
 
     def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
-        return MockLLMProvider().generate_risk_warning(text, credibility_note)
+        prompt = (
+            "Review this political content for campaign risks: unverified claims, "
+            "misleading framing, legal exposure, or backfire potential. "
+            "If there is a meaningful risk, return one sentence describing it. "
+            "If low-risk, return only the word null.\n\n"
+            f"Credibility note: {credibility_note or 'none'}\nContent: {text[:1500]}"
+        )
+        try:
+            raw = self._message(prompt, max_tokens=150).strip()
+            if raw and raw.lower() not in ("null", "none", "no risk", "low risk", ""):
+                return raw
+        except Exception as e:
+            log.warning("Anthropic generate_risk_warning failed: %s", e)
+        return None
 
     def extract_knowledge_graph(self, text: str) -> str:
         from app.knowledge_graph.extractor import SYSTEM_PROMPT, build_user_prompt
@@ -678,34 +825,108 @@ class AnthropicProvider(BaseLLMProvider):
             from app.knowledge_graph.extractor import mock_extract
             return mock_extract(text).model_dump_json()
 
+    def complete(self, prompt: str) -> str:
+        try:
+            return self._message(prompt, max_tokens=1000)
+        except Exception as e:
+            log.warning("Anthropic complete failed: %s", e)
+            return "[]"
+
+    def verify_opponent_subject(self, sentence: str, opponent_name: str, candidate_name: str) -> str:
+        prompt = (
+            f"In the following political news sentence, who is the ACTOR performing the action?\n\n"
+            f"Sentence: \"{sentence}\"\n\n"
+            f'Candidate: "{candidate_name}"\n'
+            f'Opponent: "{opponent_name}"\n\n'
+            "Reply with exactly one word: opponent, candidate, both, or unclear."
+        )
+        try:
+            raw = self._message(prompt, max_tokens=10).strip().lower()
+            if raw in ("opponent", "candidate", "both", "unclear"):
+                return raw
+        except Exception as e:
+            log.warning("Anthropic verify_opponent_subject failed: %s", e)
+        return "unclear"
+
 
 # ── Provider factory ──────────────────────────────────────────────────────────
 
+class GroqProvider(OpenAIProvider):
+    """Groq — OpenAI-compatible API with free tier. Sign up at console.groq.com."""
+
+    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile"):
+        try:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+            self._model = model
+        except ImportError as e:
+            raise RuntimeError("openai package not installed. Run: pip install openai") from e
+
+
+_MOCK_FALLBACK_BANNER = (
+    "================================================================\n"
+    "  LLM FALLBACK TO MOCK PROVIDER — AI SCORING IS DISABLED\n"
+    "  Articles will be marked irrelevant and the UI will look empty.\n"
+    "  Reason: %s\n"
+    "  Fix: set LLM_PROVIDER=groq and GROQ_API_KEY in backend/.env\n"
+    "================================================================"
+)
+
+
+def _fallback_to_mock(reason: str) -> "MockLLMProvider":
+    log.warning(_MOCK_FALLBACK_BANNER, reason)
+    return MockLLMProvider()
+
+
+def get_provider_status() -> dict:
+    """Return which LLM provider is active and whether it's the mock fallback."""
+    provider = get_provider()
+    is_mock = isinstance(provider, MockLLMProvider)
+    configured = os.environ.get("LLM_PROVIDER", "").lower().strip() or "unset"
+    return {
+        "configured_provider": configured,
+        "active_provider": "mock" if is_mock else configured,
+        "is_mock": is_mock,
+    }
+
+
 def get_provider() -> BaseLLMProvider:
-    provider_name = os.environ.get("LLM_PROVIDER", "mock").lower().strip()
+    provider_name = os.environ.get("LLM_PROVIDER", "").lower().strip()
+
+    if not provider_name:
+        return _fallback_to_mock("LLM_PROVIDER env var is not set")
+
+    if provider_name == "mock":
+        return MockLLMProvider()
 
     if provider_name == "openai":
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
-            log.warning("LLM_PROVIDER=openai but OPENAI_API_KEY not set — falling back to mock")
-            return MockLLMProvider()
+            return _fallback_to_mock("LLM_PROVIDER=openai but OPENAI_API_KEY not set")
         model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         try:
             return OpenAIProvider(api_key=api_key, model=model)
         except RuntimeError as e:
-            log.warning("OpenAI provider unavailable: %s — falling back to mock", e)
-            return MockLLMProvider()
+            return _fallback_to_mock(f"OpenAI provider unavailable: {e}")
 
     if provider_name == "anthropic":
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
-            log.warning("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set — falling back to mock")
-            return MockLLMProvider()
+            return _fallback_to_mock("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set")
         model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
         try:
             return AnthropicProvider(api_key=api_key, model=model)
         except RuntimeError as e:
-            log.warning("Anthropic provider unavailable: %s — falling back to mock", e)
-            return MockLLMProvider()
+            return _fallback_to_mock(f"Anthropic provider unavailable: {e}")
 
-    return MockLLMProvider()
+    if provider_name == "groq":
+        api_key = os.environ.get("GROQ_API_KEY", "")
+        if not api_key:
+            return _fallback_to_mock("LLM_PROVIDER=groq but GROQ_API_KEY not set")
+        model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        try:
+            return GroqProvider(api_key=api_key, model=model)
+        except RuntimeError as e:
+            return _fallback_to_mock(f"Groq provider unavailable: {e}")
+
+    return _fallback_to_mock(f"Unknown LLM_PROVIDER value: {provider_name!r}")

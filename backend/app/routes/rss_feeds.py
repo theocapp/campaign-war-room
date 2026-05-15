@@ -7,6 +7,7 @@ from app.db import get_db
 from app.models import RssFeed
 from app.schemas import RssFeedOut, RssFeedCreate, RssFeedUpdate, RssFeedIngestResult, SourceItemOut
 from app.services import ingestion
+from app.services.rss_ingestion import ingest_lock
 from app.services.snapshots import source_out
 
 router = APIRouter()
@@ -15,6 +16,17 @@ router = APIRouter()
 @router.get("/rss-feeds", response_model=list[RssFeedOut])
 def list_feeds(db: Session = Depends(get_db)):
     return db.query(RssFeed).order_by(RssFeed.created_at.desc()).all()
+
+
+@router.get("/rss-feeds/last-synced")
+def last_synced(db: Session = Depends(get_db)):
+    latest = (
+        db.query(RssFeed.last_fetched_at)
+        .filter(RssFeed.last_fetched_at.isnot(None))
+        .order_by(RssFeed.last_fetched_at.desc())
+        .first()
+    )
+    return {"last_synced_at": latest[0].isoformat() if latest and latest[0] else None}
 
 
 @router.post("/rss-feeds", response_model=RssFeedOut, status_code=201)
@@ -30,29 +42,42 @@ def create_feed(body: RssFeedCreate, db: Session = Depends(get_db)):
 
 @router.post("/rss-feeds/ingest-all")
 def ingest_all_feeds(db: Session = Depends(get_db)):
-    feeds = db.query(RssFeed).filter_by(active=True).all()
-    results = []
-    for feed in feeds:
+    if not ingest_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="Ingestion already running (scheduled job active) — try again shortly",
+        )
+    try:
+        feeds = db.query(RssFeed).filter_by(active=True).all()
+        results = []
+        for feed in feeds:
+            try:
+                r = ingestion.ingest_rss(db, feed.url, feed.name)
+                feed.last_fetched_at = datetime.utcnow()
+                results.append({
+                    "feed_id": feed.id,
+                    "feed_name": feed.name,
+                    "added_count": r.added,
+                    "skipped_count": r.skipped,
+                    "error_count": 0,
+                })
+            except Exception:
+                results.append({
+                    "feed_id": feed.id,
+                    "feed_name": feed.name,
+                    "added_count": 0,
+                    "skipped_count": 0,
+                    "error_count": 1,
+                })
+        db.commit()
         try:
-            r = ingestion.ingest_rss(db, feed.url, feed.name)
-            feed.last_fetched_at = datetime.utcnow()
-            results.append({
-                "feed_id": feed.id,
-                "feed_name": feed.name,
-                "added_count": r.added,
-                "skipped_count": r.skipped,
-                "error_count": 0,
-            })
+            from app.services import briefing_summary
+            briefing_summary.invalidate()
         except Exception:
-            results.append({
-                "feed_id": feed.id,
-                "feed_name": feed.name,
-                "added_count": 0,
-                "skipped_count": 0,
-                "error_count": 1,
-            })
-    db.commit()
-    return {"feeds_processed": len(feeds), "results": results}
+            pass
+        return {"feeds_processed": len(feeds), "results": results}
+    finally:
+        ingest_lock.release()
 
 
 @router.put("/rss-feeds/{feed_id}", response_model=RssFeedOut)

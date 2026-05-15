@@ -355,6 +355,7 @@ export interface DashboardNarrativeCard {
   stance?: string
   source_platform?: string | null
   source_author_name?: string | null
+  last_seen_at?: string | null
 }
 
 export interface NarrativeComparisonItem {
@@ -808,4 +809,112 @@ export interface KGAlert {
   message: string
   created_at: string
   resolved_at: string | null
+}
+
+export interface BriefingBullet {
+  type: 'threat' | 'opportunity' | 'watchlist'
+  headline: string
+  detail: string
+  action_label: string
+  action_url: string
+}
+
+export interface DailyBriefing {
+  generated_at: string
+  bullets: BriefingBullet[]
+}
+
+export interface NarrativeCoverageWeek {
+  week_start: string
+  count: number
+}
+
+export interface NarrativeRecentSource {
+  title: string
+  source_name: string
+  published_at: string | null
+  source_url: string | null
+}
+
+export interface NarrativeOverviewCard {
+  id: number
+  label: string
+  owner_type: string
+  direction: string
+  status: string
+  traction_score: number
+  source_count: number
+  first_seen_at: string | null
+  last_seen_at: string | null
+  outlets: string[]
+  coverage_by_week: NarrativeCoverageWeek[]
+  recent_sources: NarrativeRecentSource[]
+}
+
+export interface NarrativeOverview {
+  top: NarrativeOverviewCard[]
+  rising: NarrativeOverviewCard[]
+}
+
+
+export interface NarrativeFrameArticle {
+  id: number
+  title: string | null
+  summary: string | null
+  source_name: string | null
+  source_url: string | null
+  published_at: string | null
+}
+
+export interface NarrativeFrameWithCounts {
+  id: number
+  name: string
+  description: string | null
+  owner_type: 'candidate' | 'opponent' | 'media'
+  source: 'human' | 'llm'
+  created_at: string | null
+  mentions_this_week: number
+  mentions_last_week: number
+  mentions_total: number
+  trend: 'up' | 'down' | 'flat'
+  recent_articles: NarrativeFrameArticle[]
+}
+
+export interface NarrativeFrameSuggestion {
+  id: number
+  name: string
+  description: string | null
+  owner_type: string
+}
+
+export interface BriefingArticle {
+  id: number
+  title: string | null
+  summary: string | null
+  source_name: string | null
+  source_url: string | null
+  published_at: string | null
+  race_relevance_score: number | null
+  actionability_label: string | null
+}
+
+export interface NarrativePulseItem {
+  id: number
+  name: string
+  owner_type: string
+  this_week: number
+  last_week: number
+  trend: 'up' | 'down' | 'flat'
+}
+
+export interface MorningBriefing {
+  generated_at: string
+  meta: {
+    total_articles_today: number
+    relevant_articles_today: number
+  }
+  race_memo: string | null
+  needs_response: BriefingArticle[]
+  new_articles: BriefingArticle[]
+  narrative_pulse: NarrativePulseItem[]
 }

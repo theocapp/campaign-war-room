@@ -225,7 +225,6 @@ def reanalyze_source(db: Session, item: SourceItem, dry_run: bool = False) -> di
     item.credibility_score = scoring.compute_credibility_score(item)
     item.priority_score = _compute_priority_score(db, item)
     db.commit()
-    narratives.refresh_narratives(db)
     db.refresh(item)
 
     after = _snapshot(item)

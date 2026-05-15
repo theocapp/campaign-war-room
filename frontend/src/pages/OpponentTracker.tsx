@@ -191,10 +191,10 @@ export default function OpponentTracker() {
 
                     {act.contradiction_note && (
                       <div style={{ background: 'rgba(192,132,252,0.08)', border: '1px solid rgba(192,132,252,0.2)', borderRadius: 'var(--radius-sm)', padding: '0.5rem 0.75rem', marginBottom: 8 }}>
-                        <div style={{ fontSize: '0.6rem', fontFamily: 'JetBrains Mono', color: '#c084fc', letterSpacing: '0.06em', marginBottom: 4, textTransform: 'uppercase' }}>
+                        <div style={{ fontSize: '0.6rem', fontFamily: 'JetBrains Mono', color: '#a855f7', letterSpacing: '0.06em', marginBottom: 4, textTransform: 'uppercase' }}>
                           Contradiction
                         </div>
-                        <p style={{ margin: 0, fontSize: '0.78rem', color: '#e9d5ff', lineHeight: 1.5 }}>{act.contradiction_note}</p>
+                        <p style={{ margin: 0, fontSize: '0.78rem', color: 'var(--text-primary)', lineHeight: 1.5 }}>{act.contradiction_note}</p>
                       </div>
                     )}
 

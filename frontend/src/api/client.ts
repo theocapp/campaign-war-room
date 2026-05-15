@@ -13,6 +13,9 @@ import type {
   CandidateMessageLibrary, CandidateNarrative,
   NarrativeDetail, NarrativeComparisonOut,
   KGNarrativeSummary, KGNarrativeDetail, KGAlert, KGEntity,
+  DailyBriefing, NarrativeOverview,
+  NarrativeFrameWithCounts, NarrativeFrameSuggestion,
+  MorningBriefing,
 } from './types'
 
 const BASE = '/api'
@@ -73,7 +76,16 @@ async function del(path: string): Promise<void> {
   await throwIfNotOk(res)
 }
 
+export interface LLMStatus {
+  configured_provider: string
+  active_provider: string
+  is_mock: boolean
+}
+
 export const api = {
+  // System
+  getLLMStatus: () => get<LLMStatus>('/system/llm-status'),
+
   // Campaign
   getCampaign: () => get<CampaignProfile>('/campaign'),
   updateCampaign: (body: Partial<CampaignProfile>) => put<CampaignProfile>('/campaign', body),
@@ -96,6 +108,8 @@ export const api = {
   // Dashboard
   getDashboard: () => get<DashboardData>('/dashboard'),
   getDashboardChanges: (hours = 24) => get<DashboardChanges>(`/dashboard/changes?hours=${hours}`),
+  getDailyBriefing: () => get<DailyBriefing>('/briefing/today'),
+  getNarrativeOverview: () => get<NarrativeOverview>('/narratives/overview'),
 
   // Candidate message library
   getMessageLibrary: () => get<CandidateMessageLibrary>('/message-library'),
@@ -154,6 +168,9 @@ export const api = {
   ingestRssFeed: (id: number) => post<RssFeedIngestResult>(`/rss-feeds/${id}/ingest`, {}),
   ingestAllFeeds: () =>
     post<{ feeds_processed: number; results: unknown[] }>('/rss-feeds/ingest-all', {}),
+  getLastSynced: () =>
+    get<{ last_synced_at: string | null }>('/rss-feeds/last-synced')
+      .then(r => r.last_synced_at),
 
   // Review Queue
   getReviewQueue: () => get<ReviewQueueItem[]>('/review-queue'),
@@ -248,4 +265,23 @@ export const api = {
     get<GeneratedTalkingPoint[]>(`/talking-points/history?limit=${limit}`),
   getTalkingPointById: (id: number) =>
     get<GeneratedTalkingPoint>(`/talking-points/history/${id}`),
+
+  getMorningBriefing: () => get<MorningBriefing>('/briefing/morning'),
+  markRelevant: (id: number) => post<{ ok: boolean }>(`/review-queue/${id}/mark-relevant`, {}),
+  markIrrelevant: (id: number) => post<{ ok: boolean }>(`/review-queue/${id}/mark-irrelevant`, {}),
+  startRescore: () => post<{ started: boolean; total?: number; estimated_minutes?: number; reason?: string }>('/admin/rescore-articles', {}),
+  getRescoreStatus: () => get<{ running: boolean; total: number; processed: number; updated: number; errors: number; current_title: string | null; started_at: string | null; finished_at: string | null }>('/admin/rescore-status'),
+  stopRescore: () => post<{ stopped: boolean }>('/admin/rescore-stop', {}),
+
+  // Narrative frames
+  getNarrativeFrames: () => get<NarrativeFrameWithCounts[]>('/narrative-frames'),
+  createNarrativeFrame: (body: { name: string; description?: string; owner_type: string }) =>
+    post<{ id: number; name: string }>('/narrative-frames', body),
+  updateNarrativeFrame: (id: number, body: { name?: string; description?: string; owner_type?: string; active?: boolean }) =>
+    put<{ ok: boolean }>(`/narrative-frames/${id}`, body),
+  deleteNarrativeFrame: (id: number) => del(`/narrative-frames/${id}`),
+  suggestNarrativeFrames: (daysBack = 14) =>
+    post<{ suggested: number; frames: NarrativeFrameSuggestion[] }>(`/narrative-frames/suggest?days_back=${daysBack}`, {}),
+  rematchNarrativeFrames: (daysBack = 30) =>
+    post<{ matched_mentions: number }>(`/narrative-frames/rematch?days_back=${daysBack}`, {}),
 }

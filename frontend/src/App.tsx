@@ -4,23 +4,12 @@ import Layout from './components/Layout'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ToastProvider, useToast } from './components/Toast'
 import { registerToast } from './api/client'
-import Dashboard from './pages/Dashboard'
-import IssueTracker from './pages/IssueTracker'
-import OpponentTracker from './pages/OpponentTracker'
-import CanvassingInsights from './pages/CanvassingInsights'
-import TalkingPoints from './pages/TalkingPoints'
-import Sources from './pages/Sources'
-import CampaignSetup from './pages/CampaignSetup'
-import ReviewQueue from './pages/ReviewQueue'
-import RssFeeds from './pages/RssFeeds'
-import Monitors from './pages/Monitors'
-import MessageLibrary from './pages/MessageLibrary'
+import MorningBriefing from './pages/MorningBriefing'
 import Narratives from './pages/Narratives'
-import NarrativeDetail from './pages/NarrativeDetail'
-import MessageBattle from './pages/MessageBattle'
-import KGNarratives from './pages/KGNarratives'
-import KGNarrativeDetail from './pages/KGNarrativeDetail'
-import KGAlerts from './pages/KGAlerts'
+import ReviewQueue from './pages/ReviewQueue'
+import OpponentTracker from './pages/OpponentTracker'
+import RssFeeds from './pages/RssFeeds'
+import CampaignSetup from './pages/CampaignSetup'
 
 function ToastRegistrar() {
   const { addToast } = useToast()
@@ -33,23 +22,13 @@ function AppRoutes() {
     <Layout>
       <ErrorBoundary>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<MorningBriefing />} />
+          <Route path="/briefing" element={<MorningBriefing />} />
           <Route path="/narratives" element={<Narratives />} />
-          <Route path="/battle" element={<MessageBattle />} />
-          <Route path="/issues" element={<IssueTracker />} />
-          <Route path="/opponents" element={<OpponentTracker />} />
           <Route path="/review" element={<ReviewQueue />} />
-          <Route path="/canvassing" element={<CanvassingInsights />} />
-          <Route path="/talking" element={<TalkingPoints />} />
-          <Route path="/sources" element={<Sources />} />
-          <Route path="/monitors" element={<Monitors />} />
-          <Route path="/message-library" element={<MessageLibrary />} />
+          <Route path="/opponents" element={<OpponentTracker />} />
           <Route path="/feeds" element={<RssFeeds />} />
           <Route path="/campaign" element={<CampaignSetup />} />
-          <Route path="/narratives/:id" element={<NarrativeDetail />} />
-          <Route path="/kg/narratives" element={<KGNarratives />} />
-          <Route path="/kg/narratives/:id" element={<KGNarrativeDetail />} />
-          <Route path="/kg/alerts" element={<KGAlerts />} />
         </Routes>
       </ErrorBoundary>
     </Layout>

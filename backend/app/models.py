@@ -385,6 +385,36 @@ class ManualCapture(Base):
     source_item = relationship("SourceItem")
 
 
+class NarrativeFrame(Base):
+    __tablename__ = "narrative_frames"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    description = Column(Text)
+    owner_type = Column(String, default="candidate")  # candidate | opponent | media
+    active = Column(Boolean, default=True)
+    source = Column(String, default="human")  # human | llm
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    mentions = relationship("NarrativeFrameMention", back_populates="frame", cascade="all, delete-orphan")
+
+
+class NarrativeFrameMention(Base):
+    __tablename__ = "narrative_frame_mentions"
+    __table_args__ = (
+        UniqueConstraint("frame_id", "source_item_id", name="uq_nfm_frame_source"),
+    )
+    id = Column(Integer, primary_key=True)
+    frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=False)
+    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
+    confidence = Column(Integer, default=70)
+    matched_by = Column(String, default="llm")  # llm | human
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    frame = relationship("NarrativeFrame", back_populates="mentions")
+    source_item = relationship("SourceItem")
+
+
 class GeneratedTalkingPoint(Base):
     __tablename__ = "generated_talking_points"
     id = Column(Integer, primary_key=True)

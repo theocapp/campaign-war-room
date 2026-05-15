@@ -58,6 +58,28 @@ def _norm(value: str | None) -> str:
     return re.sub(r"\s+", " ", value or "").strip().lower()
 
 
+def _name_tokens(name: str | None) -> list[str]:
+    """Extract searchable tokens from a name, handling FEC 'LAST, FIRST' format.
+
+    'COGNETTI, PAIGE' → ['cognetti', 'paige']
+    'Rob Bresnahan'   → ['rob', 'bresnahan']
+    """
+    if not name:
+        return []
+    # Strip punctuation, lowercase, split
+    tokens = [re.sub(r'[^a-z]', '', t) for t in name.lower().split()]
+    skip = {'jr', 'sr', 'mr', 'ms', 'dr', 'rep', 'sen', 'hon', 'ii', 'iii'}
+    return [t for t in tokens if len(t) > 2 and t not in skip]
+
+
+def _contains_name(text: str, name: str | None) -> bool:
+    """Return True if any meaningful token of name appears as a whole word in text."""
+    for token in _name_tokens(name):
+        if re.search(rf"\b{re.escape(token)}\b", text):
+            return True
+    return False
+
+
 def _contains_phrase(text: str, phrase: str | None) -> bool:
     phrase = _norm(phrase)
     if not phrase or len(phrase) < 3:
@@ -146,12 +168,12 @@ def analyze_source_item(db: Session, item: SourceItem) -> RelevanceResult:
     score = 0
     reasons: list[str] = []
 
-    candidate_mentioned = _contains_phrase(text, campaign.candidate_name if campaign else None)
+    candidate_mentioned = _contains_name(text, campaign.candidate_name if campaign else None)
     if candidate_mentioned:
         score += 35
         reasons.append("Candidate mentioned")
 
-    opponent_mentioned = any(_contains_phrase(text, o.name) for o in opponents)
+    opponent_mentioned = any(_contains_name(text, o.name) for o in opponents)
     if opponent_mentioned:
         score += 35
         reasons.append("Opponent mentioned")
