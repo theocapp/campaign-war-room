@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -37,6 +38,35 @@ def list_sources(
     elif source_filter == "archived":
         q = q.filter(SourceItem.archived_as_irrelevant == True)  # noqa: E712
     return [source_out(item) for item in q.limit(min(limit, 200)).all()]
+
+
+@router.get("/search", response_model=list[SourceItemOut])
+def search_sources(
+    q: str = Query(..., min_length=1, description="Full-text search query"),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """FTS5 full-text search over article titles and body text."""
+    # Sanitize: FTS5 MATCH syntax uses special chars; escape double-quotes and
+    # wrap the raw query in double-quotes so it's treated as a phrase/prefix search.
+    safe_q = q.replace('"', '""')
+    rows = db.execute(
+        text(
+            "SELECT rowid FROM source_items_fts "
+            "WHERE source_items_fts MATCH :q "
+            "ORDER BY rank "
+            "LIMIT :lim"
+        ),
+        {"q": f'"{safe_q}"', "lim": limit},
+    ).fetchall()
+    ids = [r[0] for r in rows]
+    if not ids:
+        return []
+    items = db.query(SourceItem).filter(SourceItem.id.in_(ids)).all()
+    # Re-order to match FTS5 rank order
+    order = {row_id: idx for idx, row_id in enumerate(ids)}
+    items.sort(key=lambda it: order.get(it.id, 9999))
+    return [source_out(item) for item in items]
 
 
 @router.get("/sources/{source_id}", response_model=SourceItemDetail)
