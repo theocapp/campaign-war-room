@@ -27,8 +27,6 @@ class CampaignConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    message_library = relationship("CandidateMessageLibrary", back_populates="campaign", uselist=False)
-
 
 class RaceDirectory(Base):
     __tablename__ = "race_directory"
@@ -116,7 +114,6 @@ class SourceItem(Base):
 
     issue_mentions = relationship("IssueMention", back_populates="source_item", cascade="all, delete-orphan")
     opponent_activities = relationship("OpponentActivity", back_populates="source_item", cascade="all, delete-orphan")
-    narrative_mentions = relationship("NarrativeMention", back_populates="source_item", cascade="all, delete-orphan")
 
 
 class Issue(Base):
@@ -177,128 +174,6 @@ class OpponentActivity(Base):
 
     opponent = relationship("Opponent", back_populates="activities")
     source_item = relationship("SourceItem", back_populates="opponent_activities")
-    narrative_mentions = relationship("NarrativeMention", back_populates="opponent_activity", cascade="all, delete-orphan")
-
-
-class Narrative(Base):
-    __tablename__ = "narratives"
-    id = Column(Integer, primary_key=True)
-    canonical_text = Column(Text, nullable=False)
-    short_label = Column(String, nullable=False)
-    narrative_type = Column(String, nullable=False)
-    owner_type = Column(String, default="unknown")
-    direction = Column(String, default="neutral")
-    status = Column(String, default="emerging")
-    first_seen_at = Column(DateTime)
-    last_seen_at = Column(DateTime)
-    source_cluster_count = Column(Integer, default=0)
-    source_count = Column(Integer, default=0)
-    messenger_diversity_count = Column(Integer, default=0)
-    geography_count = Column(Integer, default=0)
-    traction_score = Column(Integer, default=0)
-    evidence_strength = Column(String, default="weak")
-    response_status = Column(String, default="no_response")
-    owner_confidence = Column(String, default="low")
-    attribution_type = Column(String, default="unclear")
-    target_confidence = Column(String, default="low")
-    candidate_narrative_id = Column(Integer, ForeignKey("candidate_narratives.id"), nullable=True)
-    # Who/what this narrative targets (set from campaign metadata, never inferred from text).
-    target_person = Column(String, nullable=True)
-    # attack | support | neutral — human-readable stance derived from direction at creation.
-    stance = Column(String, default="neutral")
-    # Primary source provenance (from the seed NarrativeCandidate's SourceItem).
-    source_platform = Column(String, nullable=True)
-    source_url = Column(String, nullable=True)
-    source_author_name = Column(String, nullable=True)
-    notes = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    mentions = relationship("NarrativeMention", back_populates="narrative", cascade="all, delete-orphan")
-    candidate_narrative = relationship("CandidateNarrative")
-
-
-class NarrativeMention(Base):
-    __tablename__ = "narrative_mentions"
-    __table_args__ = (
-        # One source per narrative: prevents the same URL appearing twice as
-        # evidence.  SQLite treats NULL as distinct in UNIQUE, so activity-only
-        # mentions (source_item_id=NULL) are allowed to repeat.
-        UniqueConstraint("narrative_id", "source_item_id", name="uq_nm_narrative_source"),
-    )
-    id = Column(Integer, primary_key=True)
-    narrative_id = Column(Integer, ForeignKey("narratives.id"), nullable=False)
-    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=True)
-    opponent_activity_id = Column(Integer, ForeignKey("opponent_activities.id"), nullable=True)
-    source_cluster_id = Column(String, nullable=True)
-    matched_text = Column(Text, nullable=True)
-    mention_role = Column(String, default="repeat")
-    confidence_score = Column(Integer, default=50)
-    owner_confidence = Column(String, default="low")
-    attribution_type = Column(String, default="unclear")
-    target_confidence = Column(String, default="low")
-    candidate_narrative_id = Column(Integer, ForeignKey("candidate_narratives.id"), nullable=True)
-    # Per-mention provenance — denormalized for fast API access without joining SourceItem.
-    source_platform = Column(String, nullable=True)
-    source_author_name = Column(String, nullable=True)
-    target_person = Column(String, nullable=True)
-    stance = Column(String, default="neutral")
-    published_at = Column(DateTime, nullable=True)
-    ingested_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    narrative = relationship("Narrative", back_populates="mentions")
-    source_item = relationship("SourceItem", back_populates="narrative_mentions")
-    opponent_activity = relationship("OpponentActivity", back_populates="narrative_mentions")
-    candidate_narrative = relationship("CandidateNarrative")
-
-
-class CandidateMessageLibrary(Base):
-    __tablename__ = "candidate_message_libraries"
-    id = Column(Integer, primary_key=True)
-    campaign_config_id = Column(Integer, ForeignKey("campaign_config.id"), nullable=True)
-    core_message = Column(Text)
-    short_bio_frame = Column(Text)
-    tone_guidance = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    campaign = relationship("CampaignConfig", back_populates="message_library")
-    narratives = relationship("CandidateNarrative", back_populates="library", cascade="all, delete-orphan")
-
-
-class CandidateNarrative(Base):
-    __tablename__ = "candidate_narratives"
-    id = Column(Integer, primary_key=True)
-    library_id = Column(Integer, ForeignKey("candidate_message_libraries.id"), nullable=False)
-    short_label = Column(String, nullable=False)
-    canonical_text = Column(Text, nullable=False)
-    narrative_kind = Column(String, nullable=False)
-    issue_name = Column(String)
-    preferred_phrases = Column(Text)
-    avoid_phrases = Column(Text)
-    must_mention_points = Column(Text)
-    red_lines = Column(Text)
-    priority = Column(Integer, default=0)
-    active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    library = relationship("CandidateMessageLibrary", back_populates="narratives")
-
-
-class CanvassingNote(Base):
-    __tablename__ = "canvassing_notes"
-    id = Column(Integer, primary_key=True)
-    voter_name = Column(String)   # optional — privacy
-    address = Column(String)      # optional — privacy
-    precinct = Column(String, nullable=False)
-    issue = Column(String)
-    # positive | negative | neutral | mixed
-    sentiment = Column(String)
-    notes = Column(Text)
-    date = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class RssFeed(Base):
@@ -370,26 +245,6 @@ class ManualSourceReminder(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-class ManualCapture(Base):
-    __tablename__ = "manual_captures"
-    id = Column(Integer, primary_key=True)
-    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
-    title = Column(String, nullable=False)
-    source_name = Column(String)
-    source_type = Column(String, default="campaign_note")
-    source_url = Column(String)
-    capture_type = Column(String, default="pasted_text")
-    raw_text = Column(Text, nullable=False)
-    geography_tags = Column(Text, nullable=True)  # JSON array stored as text
-    issue_tags = Column(Text, nullable=True)      # JSON array stored as text
-    candidate_related = Column(Boolean, default=False)
-    opponent_related = Column(Boolean, default=False)
-    notes = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    source_item = relationship("SourceItem")
-
-
 class NarrativeFrame(Base):
     __tablename__ = "narrative_frames"
     id = Column(Integer, primary_key=True)
@@ -418,21 +273,3 @@ class NarrativeFrameMention(Base):
 
     frame = relationship("NarrativeFrame", back_populates="mentions")
     source_item = relationship("SourceItem")
-
-
-class GeneratedTalkingPoint(Base):
-    __tablename__ = "generated_talking_points"
-    id = Column(Integer, primary_key=True)
-    issue_id = Column(Integer, ForeignKey("issues.id"), nullable=True)
-    custom_issue_text = Column(String)
-    issue_name = Column(String, nullable=False)
-    tone = Column(String, nullable=False)
-    short_answer = Column(Text)
-    long_answer = Column(Text)
-    debate_answer = Column(Text)
-    social_post = Column(Text)
-    risk_warning = Column(Text)
-    evidence_notes = Column(Text)
-    source_titles_used = Column(Text)  # JSON array
-    source_urls_used = Column(Text)    # JSON array
-    created_at = Column(DateTime, default=datetime.utcnow)

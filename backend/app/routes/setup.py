@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import CampaignConfig, Opponent, SourceItem, Issue, GeneratedTalkingPoint
+from app.models import CampaignConfig, Opponent, SourceItem, NarrativeFrame
 from app.schemas import SetupStatusOut, SetupChecklistItem
 
 router = APIRouter()
@@ -13,8 +13,7 @@ def get_setup_status(db: Session = Depends(get_db)):
     campaign = db.query(CampaignConfig).first()
     opponent_count = db.query(Opponent).count()
     source_count = db.query(SourceItem).count()
-    issue_count = db.query(Issue).count()
-    tp_count = db.query(GeneratedTalkingPoint).count()
+    frame_count = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).count()  # noqa: E712
 
     profile_complete = bool(
         campaign
@@ -47,18 +46,11 @@ def get_setup_status(db: Session = Depends(get_db)):
             action_path="/sources",
         ),
         SetupChecklistItem(
-            id="issue_detected",
-            label="At least one issue detected",
-            complete=issue_count > 0,
-            helper_text="Issues are detected automatically when sources are added.",
-            action_path="/issues",
-        ),
-        SetupChecklistItem(
-            id="talking_point_generated",
-            label="At least one talking point generated",
-            complete=tp_count > 0,
-            helper_text="Generate your first talking point from the Talking Points page.",
-            action_path="/talking",
+            id="narrative_frame_added",
+            label="At least one narrative frame defined",
+            complete=frame_count > 0,
+            helper_text="Define the narrative frames your campaign cares about — your message and the opponent's attacks.",
+            action_path="/narratives",
         ),
     ]
 

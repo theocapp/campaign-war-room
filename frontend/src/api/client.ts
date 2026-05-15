@@ -2,15 +2,12 @@ import type {
   CampaignProfile, CampaignInitializeResult,
   Issue, IssueDetail,
   SourceItem, SourceItemDetail, SourceTemplate,
-  Opponent, OpponentActivity, CanvassingInsights, TalkingPointResponse,
-  RssFeed, RssFeedIngestResult, SetupStatus, ReviewQueueItem, GeneratedTalkingPoint,
+  Opponent, OpponentActivity,
+  RssFeed, RssFeedIngestResult, SetupStatus, ReviewQueueItem,
   ResetWorkspaceRequest, ResetWorkspaceResult,
   RaceDirectory, RaceSelectResult,
   SourcePack, SourcePackApplyResult,
-  ManualSourceReminder, RaceImportResult, SourceMonitor, GenerateMonitorsResult,
-  MonitorIngestResult, IngestSearchMonitorsResult,
-  ManualCapture, ManualCaptureResult,
-  CandidateMessageLibrary, CandidateNarrative,
+  ManualSourceReminder, RaceImportResult,
   NarrativeFrameWithCounts, NarrativeFrameSuggestion,
   MorningBriefing,
 } from './types'
@@ -38,6 +35,10 @@ async function extractError(res: Response): Promise<string> {
 async function throwIfNotOk(res: Response): Promise<void> {
   if (!res.ok) {
     const msg = await extractError(res)
+    // Surface the error to the user via toast before throwing — callers
+    // typically `.catch(() => {})` to keep UI flow intact, so without this
+    // every non-2xx response would fail silently.
+    apiToast(msg, 'error')
     throw new Error(msg)
   }
 }
@@ -102,17 +103,6 @@ export const api = {
   selectRace: (id: number, body?: { candidate_id?: number; candidate_name?: string }) =>
     post<RaceSelectResult>(`/races/${id}/select`, body || {}),
 
-  // Candidate message library
-  getMessageLibrary: () => get<CandidateMessageLibrary>('/message-library'),
-  updateMessageLibrary: (body: Partial<CandidateMessageLibrary>) =>
-    put<CandidateMessageLibrary>('/message-library', body),
-  getCandidateNarratives: () => get<CandidateNarrative[]>('/message-library/narratives'),
-  createCandidateNarrative: (body: Partial<CandidateNarrative>) =>
-    post<CandidateNarrative>('/message-library/narratives', body),
-  updateCandidateNarrative: (id: number, body: Partial<CandidateNarrative>) =>
-    put<CandidateNarrative>(`/message-library/narratives/${id}`, body),
-  deleteCandidateNarrative: (id: number) => del(`/message-library/narratives/${id}`),
-
   // Setup checklist
   getSetupStatus: () => get<SetupStatus>('/setup/status'),
 
@@ -134,20 +124,6 @@ export const api = {
     post<SourceItem[]>('/sources/rss', { url, label }),
   addUrlSource: (url: string, source_type?: string) =>
     post<SourceItem>('/sources/url', { url, source_type: source_type || 'news' }),
-  getManualCaptures: () => get<ManualCapture[]>('/manual-captures'),
-  createManualCapture: (body: {
-    title: string
-    raw_text: string
-    source_name?: string
-    source_type?: string
-    source_url?: string
-    capture_type?: string
-    geography_tags?: string[]
-    issue_tags?: string[]
-    candidate_related?: boolean
-    opponent_related?: boolean
-    notes?: string
-  }) => post<ManualCaptureResult>('/manual-captures', body),
 
   // RSS Feeds (persistent)
   getRssFeeds: () => get<RssFeed[]>('/rss-feeds'),
@@ -201,18 +177,6 @@ export const api = {
   markReminderChecked: (id: number) =>
     post<ManualSourceReminder>(`/source-reminders/${id}/mark-checked`, {}),
 
-  // Monitors
-  getMonitors: (monitor_type?: string) =>
-    get<SourceMonitor[]>(`/monitors${monitor_type && monitor_type !== 'all' ? `?monitor_type=${monitor_type}` : ''}`),
-  createMonitor: (body: Partial<SourceMonitor>) => post<SourceMonitor>('/monitors', body),
-  updateMonitor: (id: number, body: Partial<SourceMonitor>) => put<SourceMonitor>(`/monitors/${id}`, body),
-  deleteMonitor: (id: number) => del(`/monitors/${id}`),
-  generateMonitors: (body: { apply?: boolean; replace_existing?: boolean }) =>
-    post<GenerateMonitorsResult>('/monitors/generate', body),
-  markMonitorChecked: (id: number) => post<SourceMonitor>(`/monitors/${id}/mark-checked`, {}),
-  ingestMonitor: (id: number) => post<MonitorIngestResult>(`/monitors/${id}/ingest`, {}),
-  ingestSearchMonitors: () => post<IngestSearchMonitorsResult>('/monitors/ingest-search', {}),
-
   // Race CSV import
   importRaceCSV: async (file: File): Promise<RaceImportResult> => {
     const form = new FormData()
@@ -228,28 +192,12 @@ export const api = {
   addOpponent: (body: { name: string; office?: string; party?: string; notes?: string }) =>
     post<Opponent>('/opponents', body),
 
-  // Canvassing
-  getCanvassingInsights: () => get<CanvassingInsights>('/canvassing/insights'),
-  uploadCanvassing: async (file: File): Promise<{ imported: number; message: string }> => {
-    const form = new FormData()
-    form.append('file', file)
-    const res = await fetch(`${BASE}/canvassing/upload`, { method: 'POST', body: form })
-    await throwIfNotOk(res)
-    return res.json()
-  },
-
-  // Talking Points
-  generateTalkingPoints: (body: {
-    issue_id?: number; custom_issue_text?: string; tone: string; output_format: string
-  }) => post<TalkingPointResponse>('/talking-points', body),
-  getTalkingPointsHistory: (limit = 20) =>
-    get<GeneratedTalkingPoint[]>(`/talking-points/history?limit=${limit}`),
-  getTalkingPointById: (id: number) =>
-    get<GeneratedTalkingPoint>(`/talking-points/history/${id}`),
-
+  // Briefing + review queue actions
   getMorningBriefing: () => get<MorningBriefing>('/briefing/morning'),
   markRelevant: (id: number) => post<{ ok: boolean }>(`/review-queue/${id}/mark-relevant`, {}),
   markIrrelevant: (id: number) => post<{ ok: boolean }>(`/review-queue/${id}/mark-irrelevant`, {}),
+
+  // Background rescore job (used by Campaign Setup)
   startRescore: () => post<{ started: boolean; total?: number; estimated_minutes?: number; reason?: string }>('/admin/rescore-articles', {}),
   getRescoreStatus: () => get<{ running: boolean; total: number; processed: number; updated: number; errors: number; current_title: string | null; started_at: string | null; finished_at: string | null }>('/admin/rescore-status'),
   stopRescore: () => post<{ stopped: boolean }>('/admin/rescore-stop', {}),

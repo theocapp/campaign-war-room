@@ -8,9 +8,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import (
     CampaignConfig, SourceItem, Issue, IssueMention,
-    Opponent, OpponentActivity, CanvassingNote,
-    GeneratedTalkingPoint, RssFeed, SourceMonitor,
-    ManualCapture,
+    Opponent, OpponentActivity, RssFeed, SourceMonitor,
+    NarrativeFrame, NarrativeFrameMention,
 )
 from app.schemas import (
     ReanalyzeSourcesRequest,
@@ -35,19 +34,19 @@ def reset_workspace(body: ResetWorkspaceRequest, db: Session = Depends(get_db)):
     n_sources = db.query(SourceItem).count()
     n_issues = db.query(Issue).count()
     n_opponents = db.query(Opponent).count()
-    n_canvassing = db.query(CanvassingNote).count()
-    n_tp = db.query(GeneratedTalkingPoint).count()
+    n_frames = db.query(NarrativeFrame).count()
     n_feeds = db.query(RssFeed).count()
 
-    # Delete in dependency order
+    # Delete in dependency order. NarrativeFrameMention is cascaded by the
+    # NarrativeFrame delete, but we also explicitly delete in case the source
+    # items get torn down before the frames.
     db.query(IssueMention).delete()
     db.query(OpponentActivity).delete()
-    db.query(ManualCapture).delete()
+    db.query(NarrativeFrameMention).delete()
     db.query(SourceItem).delete()
     db.query(Issue).delete()
     db.query(Opponent).delete()
-    db.query(CanvassingNote).delete()
-    db.query(GeneratedTalkingPoint).delete()
+    db.query(NarrativeFrame).delete()
     db.query(SourceMonitor).delete()
 
     preserved_feeds = 0
@@ -80,8 +79,7 @@ def reset_workspace(body: ResetWorkspaceRequest, db: Session = Depends(get_db)):
         cleared_sources=n_sources,
         cleared_issues=n_issues,
         cleared_opponents=n_opponents,
-        cleared_canvassing=n_canvassing,
-        cleared_talking_points=n_tp,
+        cleared_narrative_frames=n_frames,
         cleared_feeds=cleared_feeds,
         preserved_feeds=preserved_feeds,
         candidate_name=body.candidate_name,

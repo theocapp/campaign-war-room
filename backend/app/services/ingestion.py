@@ -1,7 +1,5 @@
-"""Ingestion helpers for RSS, URL, text, and CSV sources."""
-import csv
+"""Ingestion helpers for RSS, URL, and text sources."""
 import html as _html
-import io
 import json
 import logging
 import os
@@ -15,7 +13,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.models import CanvassingNote, Opponent, OpponentActivity, SourceItem
+from app.models import Opponent, OpponentActivity, SourceItem
 from app.services import campaign_analysis, intelligence, narrative_frames, race_relevance, scoring, story_clustering
 from app.services.campaign_analysis import framing_to_action
 from app.services.opponent_analysis import _activity_fingerprint
@@ -597,34 +595,3 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
         added_items.append(created)
 
     return RSSIngestResult(added=len(added_items), skipped=skipped, items=added_items)
-
-
-def ingest_canvassing_csv(db: Session, csv_content: str) -> int:
-    reader = csv.DictReader(io.StringIO(csv_content))
-    count = 0
-    for row in reader:
-        precinct = (row.get("precinct") or "").strip()
-        if not precinct:
-            continue
-        date: Optional[datetime] = None
-        date_str = (row.get("date") or "").strip()
-        if date_str:
-            try:
-                from dateutil import parser as dp
-                date = dp.parse(date_str)
-            except Exception as exc:
-                logger.warning("Could not parse canvassing date %r: %s", date_str, exc)
-                date = datetime.utcnow()
-        note = CanvassingNote(
-            voter_name=(row.get("voter_name") or "").strip() or None,
-            address=(row.get("address") or "").strip() or None,
-            precinct=precinct,
-            issue=(row.get("issue") or "").strip() or None,
-            sentiment=(row.get("sentiment") or "neutral").strip(),
-            notes=(row.get("notes") or "").strip() or None,
-            date=date or datetime.utcnow(),
-        )
-        db.add(note)
-        count += 1
-    db.commit()
-    return count
