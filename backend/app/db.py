@@ -80,6 +80,7 @@ def _migrate(conn) -> None:
         "extraction_quality_reasons": "TEXT",
         "ingested_at": "DATETIME",
         "source_author": "TEXT",
+        "sentiment": "TEXT",
     }.items():
         if col not in existing_si:
             conn.execute(text(f"ALTER TABLE source_items ADD COLUMN {col} {col_type}"))
@@ -87,6 +88,43 @@ def _migrate(conn) -> None:
     conn.execute(text(
         "UPDATE source_items SET ingested_at = created_at WHERE ingested_at IS NULL"
     ))
+
+    # FTS5 full-text search over source_items(title, raw_text).
+    # Guarded by sqlite_master check — idempotent on subsequent startups.
+    fts_exists = conn.execute(text(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='source_items_fts'"
+    )).scalar()
+    if not fts_exists:
+        conn.execute(text(
+            "CREATE VIRTUAL TABLE source_items_fts "
+            "USING fts5(title, raw_text, content='source_items', content_rowid='id')"
+        ))
+        # Populate FTS5 with all existing rows.
+        conn.execute(text(
+            "INSERT INTO source_items_fts(rowid, title, raw_text) "
+            "SELECT id, COALESCE(title,''), COALESCE(raw_text,'') FROM source_items"
+        ))
+        # Triggers to keep FTS5 in sync with source_items.
+        conn.execute(text(
+            "CREATE TRIGGER source_items_ai AFTER INSERT ON source_items BEGIN "
+            "  INSERT INTO source_items_fts(rowid, title, raw_text) "
+            "  VALUES (new.id, COALESCE(new.title,''), COALESCE(new.raw_text,'')); "
+            "END"
+        ))
+        conn.execute(text(
+            "CREATE TRIGGER source_items_ad AFTER DELETE ON source_items BEGIN "
+            "  INSERT INTO source_items_fts(source_items_fts, rowid, title, raw_text) "
+            "  VALUES ('delete', old.id, COALESCE(old.title,''), COALESCE(old.raw_text,'')); "
+            "END"
+        ))
+        conn.execute(text(
+            "CREATE TRIGGER source_items_au AFTER UPDATE ON source_items BEGIN "
+            "  INSERT INTO source_items_fts(source_items_fts, rowid, title, raw_text) "
+            "  VALUES ('delete', old.id, COALESCE(old.title,''), COALESCE(old.raw_text,'')); "
+            "  INSERT INTO source_items_fts(rowid, title, raw_text) "
+            "  VALUES (new.id, COALESCE(new.title,''), COALESCE(new.raw_text,'')); "
+            "END"
+        ))
 
     # opponents: FEC candidate ID for dedup against re-imports + name-format drift
     existing_opp = {row[1] for row in conn.execute(text("PRAGMA table_info(opponents)"))}

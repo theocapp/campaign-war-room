@@ -111,6 +111,8 @@ class SourceItem(Base):
     extraction_quality_score = Column(Integer, default=100)
     extraction_quality_label = Column(String, default="good")
     extraction_quality_reasons = Column(Text, nullable=True)  # JSON array stored as text
+    # positive | negative | neutral | mixed — how the article's tone affects the candidate
+    sentiment = Column(String, nullable=True)
 
     issue_mentions = relationship("IssueMention", back_populates="source_item", cascade="all, delete-orphan")
     opponent_activities = relationship("OpponentActivity", back_populates="source_item", cascade="all, delete-orphan")
