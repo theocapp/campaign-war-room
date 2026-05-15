@@ -153,6 +153,11 @@ class Opponent(Base):
     office = Column(String)
     party = Column(String)
     notes = Column(Text)
+    # FEC candidate ID (e.g. "H8PA08123") when the opponent was loaded from
+    # the FEC race directory. Used as the primary dedup key so re-imports and
+    # name-format changes don't create duplicate rows. Nullable for
+    # manually-created opponents.
+    fec_candidate_id = Column(String, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     activities = relationship("OpponentActivity", back_populates="opponent", cascade="all, delete-orphan")

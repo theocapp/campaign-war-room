@@ -87,6 +87,15 @@ def _migrate(conn) -> None:
         "UPDATE source_items SET ingested_at = created_at WHERE ingested_at IS NULL"
     ))
 
+    # opponents: FEC candidate ID for dedup against re-imports + name-format drift
+    existing_opp = {row[1] for row in conn.execute(text("PRAGMA table_info(opponents)"))}
+    if "fec_candidate_id" not in existing_opp:
+        conn.execute(text("ALTER TABLE opponents ADD COLUMN fec_candidate_id TEXT"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_opponents_fec_candidate_id "
+            "ON opponents(fec_candidate_id) WHERE fec_candidate_id IS NOT NULL"
+        ))
+
     # manual_source_reminders table is created by metadata.create_all; no ALTER needed
     # source_packs / source_pack_items are created by metadata.create_all
     existing_im = {row[1] for row in conn.execute(text("PRAGMA table_info(issue_mentions)"))}

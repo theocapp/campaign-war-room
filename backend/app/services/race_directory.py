@@ -1,5 +1,6 @@
 import json
 import csv
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -434,7 +435,21 @@ def _pick_candidate(
 
 
 def _upsert_opponent(db: Session, race: RaceDirectory, candidate: RaceCandidate) -> bool:
-    existing = _find_opponent_by_name(db, candidate.candidate_name)
+    """Insert or update an Opponent row from a RaceCandidate.
+
+    Dedup precedence:
+      1. FEC candidate ID extracted from the candidate's campaign_url. This is
+         the only stable identifier across re-imports and name-format changes
+         (FEC uses "LAST, FIRST"; users type "First Last").
+      2. Normalized name match — same person, different casing or "LAST, FIRST"
+         vs "First Last" formatting. Catches opponents created manually before
+         the race was loaded from the directory.
+
+    Returns True when a new row was inserted, False when an existing row was
+    matched and updated.
+    """
+    fec_candidate_id = _fec_candidate_id_from_url(candidate.campaign_url)
+    existing = _find_opponent(db, fec_candidate_id, candidate.candidate_name)
     notes = _opponent_notes(race, candidate)
     office = _opponent_office(race)
     if existing:
@@ -442,6 +457,8 @@ def _upsert_opponent(db: Session, race: RaceDirectory, candidate: RaceCandidate)
         existing.party = candidate.party or existing.party
         if not existing.notes:
             existing.notes = notes
+        if fec_candidate_id and not existing.fec_candidate_id:
+            existing.fec_candidate_id = fec_candidate_id
         return False
 
     db.add(
@@ -450,15 +467,46 @@ def _upsert_opponent(db: Session, race: RaceDirectory, candidate: RaceCandidate)
             office=office,
             party=candidate.party,
             notes=notes,
+            fec_candidate_id=fec_candidate_id,
             created_at=datetime.utcnow(),
         )
     )
     return True
 
 
-def _find_opponent_by_name(db: Session, name: str) -> Opponent | None:
+def _fec_candidate_id_from_url(url: str | None) -> str | None:
+    """Extract the FEC candidate ID from a fec.gov candidate page URL."""
+    if not url:
+        return None
+    match = re.search(r"/candidate/([A-Z0-9]+)/?", url)
+    return match.group(1) if match else None
+
+
+def _normalize_candidate_name(name: str | None) -> str:
+    """Canonicalize a candidate name for dedup. "BRESNAHAN, ROB" → "rob bresnahan"."""
+    if not name:
+        return ""
+    raw = name.strip().lower()
+    if "," in raw:
+        last, _, first = raw.partition(",")
+        raw = f"{first.strip()} {last.strip()}"
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _find_opponent(db: Session, fec_candidate_id: str | None, name: str) -> Opponent | None:
+    if fec_candidate_id:
+        match = (
+            db.query(Opponent)
+            .filter(Opponent.fec_candidate_id == fec_candidate_id)
+            .first()
+        )
+        if match:
+            return match
+    target = _normalize_candidate_name(name)
+    if not target:
+        return None
     for opponent in db.query(Opponent).all():
-        if opponent.name.strip().lower() == name.strip().lower():
+        if _normalize_candidate_name(opponent.name) == target:
             return opponent
     return None
 
