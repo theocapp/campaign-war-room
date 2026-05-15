@@ -165,6 +165,8 @@ export const api = {
 
   // Review Queue
   getReviewQueue: () => get<ReviewQueueItem[]>('/review-queue'),
+  getReviewQueueCount: () =>
+    get<{ count: number }>('/review-queue/count').then(r => r.count),
   reviewSource: (id: number, review_note?: string) =>
     post<ReviewQueueItem>(`/review-queue/${id}/review`, { review_note: review_note ?? null }),
   dismissSource: (id: number, review_note?: string) =>
