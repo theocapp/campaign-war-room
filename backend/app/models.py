@@ -113,6 +113,7 @@ class SourceItem(Base):
     extraction_quality_reasons = Column(Text, nullable=True)  # JSON array stored as text
     # positive | negative | neutral | mixed — how the article's tone affects the candidate
     sentiment = Column(String, nullable=True)
+    outlet_id = Column(Integer, ForeignKey("outlets.id"), nullable=True)
 
     issue_mentions = relationship("IssueMention", back_populates="source_item", cascade="all, delete-orphan")
     opponent_activities = relationship("OpponentActivity", back_populates="source_item", cascade="all, delete-orphan")
@@ -245,6 +246,23 @@ class ManualSourceReminder(Base):
     active = Column(Boolean, default=True)
     last_checked_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Outlet(Base):
+    __tablename__ = "outlets"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    domain = Column(String, nullable=False, unique=True)
+    # local_news | regional_news | national | blog | social | broadcast
+    outlet_type = Column(String, nullable=False, default="local_news")
+    state = Column(String, nullable=True)   # e.g. "PA"
+    city = Column(String, nullable=True)    # e.g. "Scranton"
+    # 1 (blog with no editorial staff) to 10 (major regional daily)
+    authority_score = Column(Integer, nullable=False, default=5)
+    active = Column(Boolean, default=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class NarrativeFrame(Base):

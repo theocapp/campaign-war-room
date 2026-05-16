@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     CampaignConfig, SourceItem, Issue, IssueMention,
     Opponent, OpponentActivity,
+    Outlet,
     SourcePack, SourcePackItem,
 )
 from app.services.race_directory import seed_race_directory
@@ -26,6 +27,7 @@ def _d(days_ago: int) -> datetime:
 def seed(db: Session) -> None:
     # Always ensure product-layer setup data is seeded (idempotent)
     _seed_source_packs(db)
+    _seed_pa08_outlets(db)
     seed_race_directory(db)
     db.commit()
 
@@ -257,6 +259,47 @@ def seed(db: Session) -> None:
     # Canvassing demo data removed with the CanvassingNote schema (Phase 0).
     db.commit()
     print("[seed] Database seeded with Lakeview City District 7 demo scenario.")
+
+
+def _seed_pa08_outlets(db: Session) -> None:
+    """Seed known NEPA / PA-08 outlets with geo + authority scores (idempotent)."""
+    PA08_OUTLETS = [
+        dict(name="The Times-Tribune", domain="thetimes-tribune.com",
+             outlet_type="local_news", state="PA", city="Scranton", authority_score=9,
+             notes="Scranton's main daily paper; primary source for Lackawanna County coverage"),
+        dict(name="Citizens' Voice", domain="citizensvoice.com",
+             outlet_type="local_news", state="PA", city="Wilkes-Barre", authority_score=8,
+             notes="Luzerne County daily; covers NEPA broadly including Scranton politics"),
+        dict(name="WNEP-TV", domain="wnep.com",
+             outlet_type="broadcast", state="PA", city="Scranton", authority_score=9,
+             notes="ABC affiliate, market-leading TV news in Scranton/Wilkes-Barre DMA"),
+        dict(name="PAHomepage (WBRE/WYOU)", domain="pahomepage.com",
+             outlet_type="broadcast", state="PA", city="Wilkes-Barre", authority_score=7,
+             notes="NBC/CBS affiliate combo; second-largest TV news operation in the market"),
+        dict(name="Pocono Record", domain="poconorecord.com",
+             outlet_type="local_news", state="PA", city="Stroudsburg", authority_score=6,
+             notes="Monroe County daily; covers Pike and Monroe counties in PA-08 district"),
+        dict(name="Pennsylvania Capital-Star", domain="penncapital-star.com",
+             outlet_type="regional_news", state="PA", city="Harrisburg", authority_score=8,
+             notes="Nonprofit statewide political coverage; strong on PA congressional races"),
+        dict(name="WVIA News", domain="wvia.org",
+             outlet_type="broadcast", state="PA", city="Scranton", authority_score=7,
+             notes="PBS/NPR affiliate; credible local reporting, smaller reach"),
+        dict(name="Wayne Independent", domain="wayneindependent.com",
+             outlet_type="local_news", state="PA", city="Honesdale", authority_score=5,
+             notes="Wayne County weekly; covers Wayne County portion of PA-08"),
+        dict(name="Standard-Speaker", domain="standardspeaker.com",
+             outlet_type="local_news", state="PA", city="Hazleton", authority_score=6,
+             notes="Hazleton/Luzerne County daily; southeastern edge of PA-08 media market"),
+        dict(name="LuLac Political Letter", domain="lulacpoliticalletter.com",
+             outlet_type="blog", state="PA", city="Scranton", authority_score=4,
+             notes="Long-running NEPA political blog; useful for insider commentary, lower credibility weight"),
+    ]
+    existing_domains = {o.domain for o in db.query(Outlet.domain).all()}
+    for row in PA08_OUTLETS:
+        if row["domain"] not in existing_domains:
+            db.add(Outlet(**row))
+    db.flush()
 
 
 def _seed_source_packs(db: Session) -> None:

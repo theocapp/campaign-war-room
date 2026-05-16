@@ -135,6 +135,11 @@ def _migrate(conn) -> None:
             "ON opponents(fec_candidate_id) WHERE fec_candidate_id IS NOT NULL"
         ))
 
+    # outlets table is created by metadata.create_all; add outlet_id FK to source_items
+    existing_si2 = {row[1] for row in conn.execute(text("PRAGMA table_info(source_items)"))}
+    if "outlet_id" not in existing_si2:
+        conn.execute(text("ALTER TABLE source_items ADD COLUMN outlet_id INTEGER REFERENCES outlets(id)"))
+
     # manual_source_reminders table is created by metadata.create_all; no ALTER needed
     # source_packs / source_pack_items are created by metadata.create_all
     existing_im = {row[1] for row in conn.execute(text("PRAGMA table_info(issue_mentions)"))}
