@@ -10,6 +10,7 @@ import type {
   ManualSourceReminder, RaceImportResult,
   NarrativeFrameWithCounts, NarrativeFrameSuggestion,
   MorningBriefing,
+  SourceMonitor, Outlet,
 } from './types'
 
 const BASE = '/api'
@@ -201,6 +202,35 @@ export const api = {
   startRescore: () => post<{ started: boolean; total?: number; estimated_minutes?: number; reason?: string }>('/admin/rescore-articles', {}),
   getRescoreStatus: () => get<{ running: boolean; total: number; processed: number; updated: number; errors: number; current_title: string | null; started_at: string | null; finished_at: string | null }>('/admin/rescore-status'),
   stopRescore: () => post<{ stopped: boolean }>('/admin/rescore-stop', {}),
+
+  // Source Monitors
+  getSourceMonitors: () => get<SourceMonitor[]>('/source-monitors'),
+  createSourceMonitor: (body: {
+    name: string; monitor_type: string; query?: string; url?: string;
+    source_type?: string; category?: string; relevance_hint?: string;
+    required_terms?: string[]; excluded_terms?: string[];
+  }) => post<SourceMonitor>('/source-monitors', body),
+  updateSourceMonitor: (id: number, body: Partial<{
+    name: string; query: string; url: string; source_type: string;
+    category: string; active: boolean; relevance_hint: string;
+  }>) => put<SourceMonitor>(`/source-monitors/${id}`, body),
+  deleteSourceMonitor: (id: number) => del(`/source-monitors/${id}`),
+
+  // Outlets
+  getOutlets: () => get<Outlet[]>('/outlets'),
+  updateOutlet: (id: number, body: Partial<{
+    name: string; outlet_type: string; state: string; city: string;
+    authority_score: number; active: boolean; notes: string;
+  }>) => put<Outlet>(`/outlets/${id}`, body),
+  createOutlet: (body: {
+    name: string; domain: string; outlet_type?: string; state?: string;
+    city?: string; authority_score?: number; notes?: string;
+  }) => post<Outlet>('/outlets', body),
+  deleteOutlet: (id: number) => del(`/outlets/${id}`),
+
+  // Manual ingest triggers
+  triggerCrawl: () => post<{ monitors_crawled: number; total_added: number; total_skipped: number; total_errors: number }>('/ingest/crawl', {}),
+  triggerReddit: () => post<{ subreddits_searched: number; posts_found: number; added: number; skipped: number; errors: number }>('/ingest/reddit', {}),
 
   // Narrative frames
   getNarrativeFrames: () => get<NarrativeFrameWithCounts[]>('/narrative-frames'),

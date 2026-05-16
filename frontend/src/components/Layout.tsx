@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { to: '/review',     label: 'AI Audit',         end: false, badge: true  },
   { to: '/opponents',  label: 'Opponent Tracker', end: false, badge: false },
   { to: '/feeds',      label: 'RSS Feeds',        end: false, badge: false },
+  { to: '/monitors',   label: 'Source Monitors',  end: false, badge: false },
   { to: '/campaign',   label: 'Campaign Setup',   end: false, badge: false },
 ]
 

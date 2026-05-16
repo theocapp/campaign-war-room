@@ -668,3 +668,32 @@ export interface MorningBriefing {
   new_articles: BriefingArticle[]
   narrative_pulse: NarrativePulseItem[]
 }
+
+export interface SourceMonitor {
+  id: number
+  name: string
+  monitor_type: 'rss' | 'search_query' | 'manual' | 'webpage' | string
+  query: string | null
+  url: string | null
+  source_type: string
+  category: string | null
+  active: boolean
+  required_terms: string[] | null
+  excluded_terms: string[] | null
+  relevance_hint: string | null
+  last_checked_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface Outlet {
+  id: number
+  name: string
+  domain: string
+  outlet_type: 'local_news' | 'regional_news' | 'national' | 'blog' | 'social' | 'broadcast' | string
+  state: string | null
+  city: string | null
+  authority_score: number
+  active: boolean
+  notes: string | null
+}

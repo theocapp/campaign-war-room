@@ -11,6 +11,7 @@ import OpponentTracker from './pages/OpponentTracker'
 import RssFeeds from './pages/RssFeeds'
 import CampaignSetup from './pages/CampaignSetup'
 import SourceDetail from './pages/SourceDetail'
+import SourceMonitors from './pages/SourceMonitors'
 
 function ToastRegistrar() {
   const { addToast } = useToast()
@@ -31,6 +32,7 @@ function AppRoutes() {
           <Route path="/feeds" element={<RssFeeds />} />
           <Route path="/campaign" element={<CampaignSetup />} />
           <Route path="/sources/:id" element={<SourceDetail />} />
+          <Route path="/monitors" element={<SourceMonitors />} />
         </Routes>
       </ErrorBoundary>
     </Layout>
