@@ -614,6 +614,7 @@ export interface NarrativeFrameArticle {
   source_name: string | null
   source_url: string | null
   published_at: string | null
+  extracted_text: string | null
 }
 
 export interface NarrativeFrameWithCounts {
@@ -657,6 +658,15 @@ export interface NarrativePulseItem {
   trend: 'up' | 'down' | 'flat'
 }
 
+export interface SpikeAlert {
+  frame_id: number
+  frame_name: string
+  owner_type: string
+  count_24h: number
+  daily_avg_7d: number
+  ratio: number
+}
+
 export interface MorningBriefing {
   generated_at: string
   meta: {
@@ -667,6 +677,7 @@ export interface MorningBriefing {
   needs_response: BriefingArticle[]
   new_articles: BriefingArticle[]
   narrative_pulse: NarrativePulseItem[]
+  spike_alerts: SpikeAlert[]
 }
 
 export interface SourceMonitor {

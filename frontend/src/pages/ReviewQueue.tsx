@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { api } from '../api/client'
 import type { ReviewQueueItem } from '../api/types'
+import FilterChips from '../components/FilterChips'
 
 function timeAgo(iso: string | null): string {
   if (!iso) return ''
@@ -37,6 +38,8 @@ export default function ReviewQueue() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [acting, setActing] = useState<number | null>(null)
+  const [filterAction, setFilterAction] = useState('all')
+  const [filterScore, setFilterScore] = useState('all')
 
   const load = useCallback(() => {
     setLoading(true)
@@ -47,6 +50,16 @@ export default function ReviewQueue() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  const filtered = useMemo(() => {
+    return items.filter(item => {
+      if (filterAction !== 'all' && item.actionability_label !== filterAction) return false
+      if (filterScore === '40' && (item.race_relevance_score ?? 0) < 40) return false
+      if (filterScore === '60' && (item.race_relevance_score ?? 0) < 60) return false
+      if (filterScore === '80' && (item.race_relevance_score ?? 0) < 80) return false
+      return true
+    })
+  }, [items, filterAction, filterScore])
 
   async function markRelevant(id: number) {
     setActing(id)
@@ -71,7 +84,7 @@ export default function ReviewQueue() {
     <div className="page">
 
       {/* Header */}
-      <div style={{ marginBottom: 24 }}>
+      <div style={{ marginBottom: 16 }}>
         <h1 style={{ margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: 'var(--text, #f1f5f9)' }}>
           AI Audit
         </h1>
@@ -82,6 +95,43 @@ export default function ReviewQueue() {
         </p>
       </div>
 
+      {/* Filters */}
+      <div style={{ display: 'flex', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
+        <FilterChips
+          label="Action"
+          value={filterAction}
+          onChange={setFilterAction}
+          options={[
+            { label: 'All', value: 'all' },
+            { label: 'Respond', value: 'respond' },
+            { label: 'Review', value: 'review' },
+            { label: 'Monitor', value: 'monitor' },
+          ]}
+        />
+        <FilterChips
+          label="Min score"
+          value={filterScore}
+          onChange={setFilterScore}
+          options={[
+            { label: 'Any', value: 'all' },
+            { label: '40+', value: '40' },
+            { label: '60+', value: '60' },
+            { label: '80+', value: '80' },
+          ]}
+        />
+        {filtered.length !== items.length && (
+          <span style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', alignSelf: 'center' }}>
+            Showing {filtered.length} of {items.length}
+          </span>
+        )}
+      </div>
+
+      {filtered.length === 0 && items.length > 0 && (
+        <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-muted, #94a3b8)', fontSize: 13 }}>
+          No items match these filters.
+        </div>
+      )}
+
       {items.length === 0 && (
         <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted, #94a3b8)' }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>✓</div>
@@ -91,7 +141,7 @@ export default function ReviewQueue() {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {items.map(item => {
+        {filtered.map(item => {
           const framing = FRAMING_LABEL[item.actionability_label] ?? FRAMING_LABEL.monitor
           const isRelevant = !item.archived_as_irrelevant
           const busy = acting === item.id

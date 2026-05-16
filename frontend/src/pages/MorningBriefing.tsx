@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api/client'
-import type { MorningBriefing, BriefingArticle, NarrativePulseItem } from '../api/types'
+import type { MorningBriefing, BriefingArticle, NarrativePulseItem, SpikeAlert } from '../api/types'
+import FilterChips from '../components/FilterChips'
 
 const OWNER_COLOR: Record<string, string> = {
   candidate: '#22c55e',
@@ -100,6 +102,45 @@ function PulseRow({ item }: { item: NarrativePulseItem }) {
   )
 }
 
+const OWNER_COLOR_SPIKE: Record<string, string> = { candidate: '#22c55e', opponent: '#ef4444', media: '#64748b' }
+
+function SpikeCallout({ spikes }: { spikes: SpikeAlert[] }) {
+  if (spikes.length === 0) return null
+  return (
+    <div style={{
+      background: 'rgba(251, 191, 36, 0.08)',
+      border: '1px solid #f59e0b',
+      borderLeft: '4px solid #f59e0b',
+      borderRadius: 8,
+      padding: '14px 18px',
+      marginBottom: 24,
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#f59e0b', marginBottom: 10 }}>
+        Trending — volume spike detected
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {spikes.map(s => (
+          <div key={s.frame_id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: OWNER_COLOR_SPIKE[s.owner_type] || '#64748b', flexShrink: 0 }} />
+            <Link
+              to={`/frames/${s.frame_id}`}
+              style={{ fontSize: 13, fontWeight: 600, color: 'var(--text, #f1f5f9)', textDecoration: 'none', flex: 1 }}
+            >
+              {s.frame_name}
+            </Link>
+            <span style={{ fontSize: 12, color: '#f59e0b', fontWeight: 700, flexShrink: 0 }}>
+              {s.count_24h} mentions in 24h
+            </span>
+            <span style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', flexShrink: 0 }}>
+              ({s.ratio}× avg)
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function SectionHeader({ title, count, color }: { title: string; count?: number; color?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
@@ -119,6 +160,7 @@ export default function MorningBriefing() {
   const [data, setData] = useState<MorningBriefing | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [pulseFilter, setPulseFilter] = useState('all')
 
   useEffect(() => {
     api.getMorningBriefing()
@@ -181,6 +223,9 @@ export default function MorningBriefing() {
         </div>
       )}
 
+      {/* Spike callout */}
+      {data.spike_alerts?.length > 0 && <SpikeCallout spikes={data.spike_alerts} />}
+
       {/* Needs Response */}
       {hasRespond && (
         <div style={{ marginBottom: 32 }}>
@@ -207,7 +252,23 @@ export default function MorningBriefing() {
 
       {/* Narrative Pulse — full width row */}
       <div style={{ marginBottom: 32 }}>
-        <SectionHeader title="Narrative Pulse" />
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+          <h2 style={{ margin: 0, fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted, #94a3b8)' }}>
+            Narrative Pulse
+          </h2>
+          {hasPulse && (
+            <FilterChips
+              value={pulseFilter}
+              onChange={setPulseFilter}
+              options={[
+                { label: 'All', value: 'all' },
+                { label: 'Our message', value: 'candidate' },
+                { label: 'Opponent', value: 'opponent' },
+                { label: 'Media', value: 'media' },
+              ]}
+            />
+          )}
+        </div>
         {hasPulse ? (
           <>
             <div style={{
@@ -216,7 +277,7 @@ export default function MorningBriefing() {
               gap: 10,
               marginBottom: 12,
             }}>
-              {data.narrative_pulse.slice(0, 6).map(item => {
+              {data.narrative_pulse.filter(item => pulseFilter === 'all' || item.owner_type === pulseFilter).slice(0, 6).map(item => {
                 const dotColor = OWNER_COLOR[item.owner_type] || '#64748b'
                 const trendColor = TREND_COLOR[item.trend]
                 const trendIcon = TREND_ICON[item.trend]

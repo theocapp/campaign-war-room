@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import type { NarrativeFrameWithCounts } from '../api/types'
+import Sparkline from '../components/Sparkline'
+import FilterChips from '../components/FilterChips'
 
 function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
@@ -39,6 +42,15 @@ function FrameCard({
   onDelete: (id: number) => void
   onEdit: (frame: NarrativeFrameWithCounts) => void
 }) {
+  const [series, setSeries] = useState<{ date: string; count: number }[] | null>(null)
+
+  useEffect(() => {
+    fetch(`/api/frames/${frame.id}/timeseries?bucket=day&days=0`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.series) setSeries(data.series) })
+      .catch(() => {/* sparkline is non-critical */})
+  }, [frame.id])
+
   return (
     <div style={{
       background: 'var(--surface, #1e293b)',
@@ -80,7 +92,7 @@ function FrameCard({
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 20 }}>
+      <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end' }}>
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text, #f1f5f9)', display: 'flex', alignItems: 'center', gap: 4 }}>
             {frame.mentions_this_week}
@@ -96,40 +108,58 @@ function FrameCard({
           <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted, #94a3b8)' }}>{frame.mentions_total}</div>
           <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>total</div>
         </div>
+        <div style={{ flex: 1, minWidth: 80 }}>
+          {series && <Sparkline data={series} color={OWNER_COLORS[frame.owner_type] || '#3b82f6'} height={36} />}
+        </div>
+        <Link
+          to={`/frames/${frame.id}`}
+          style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', textDecoration: 'none', whiteSpace: 'nowrap', paddingBottom: 2 }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'var(--text, #f1f5f9)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted, #94a3b8)')}
+        >
+          View detail →
+        </Link>
       </div>
 
       {frame.recent_articles.length > 0 && (
         <div>
           <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted, #94a3b8)', marginBottom: 6 }}>Recent</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {frame.recent_articles.map(a => {
               const title = stripHtml(a.title || '(no title)')
-              const summary = a.summary ? stripHtml(a.summary).slice(0, 140) : null
+              const claim = a.extracted_text ? stripHtml(a.extracted_text) : null
               return (
                 <div key={a.id} style={{
                   fontSize: 12, color: 'var(--text, #f1f5f9)',
                   borderLeft: '2px solid var(--border, #334155)', paddingLeft: 8,
                   overflow: 'hidden', minWidth: 0,
                 }}>
-                  <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {a.source_url
-                      ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{title}</a>
-                      : title}
-                  </div>
-                  {summary && (
-                    <div style={{
-                      color: 'var(--text-muted, #94a3b8)', marginTop: 2,
-                      display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
-                      overflow: 'hidden',
-                    }}>
-                      {summary}{a.summary && stripHtml(a.summary).length > 140 ? '…' : ''}
-                    </div>
-                  )}
-                  {a.source_name && (
-                    <div style={{
-                      color: 'var(--text-muted, #94a3b8)', fontSize: 11, marginTop: 2,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{a.source_name}</div>
+                  {claim ? (
+                    <>
+                      <div style={{
+                        fontStyle: 'italic', color: 'var(--text, #f1f5f9)', lineHeight: 1.4,
+                        display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                      }}>
+                        &ldquo;{claim}&rdquo;
+                      </div>
+                      <div style={{ marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {a.source_url
+                          ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted, #94a3b8)', textDecoration: 'none', fontSize: 11 }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{a.source_name ? `${a.source_name} · ` : ''}{title}</a>
+                          : <span style={{ color: 'var(--text-muted, #94a3b8)', fontSize: 11 }}>{a.source_name ? `${a.source_name} · ` : ''}{title}</span>}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {a.source_url
+                          ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{title}</a>
+                          : title}
+                      </div>
+                      {a.source_name && (
+                        <div style={{ color: 'var(--text-muted, #94a3b8)', fontSize: 11, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.source_name}</div>
+                      )}
+                    </>
                   )}
                 </div>
               )
@@ -258,7 +288,9 @@ export default function Narratives() {
   const [editFrame, setEditFrame] = useState<NarrativeFrameWithCounts | null>(null)
   const [suggesting, setSuggesting] = useState(false)
   const [rematching, setRematching] = useState(false)
+  const [rematchProgress, setRematchProgress] = useState<{ done: number; total: number } | null>(null)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
+  const [filterOwner, setFilterOwner] = useState('all')
 
   function load() {
     return api.getNarrativeFrames()
@@ -303,21 +335,44 @@ export default function Narratives() {
 
   async function handleRematch() {
     setRematching(true)
+    setRematchProgress(null)
     setStatusMsg(null)
     try {
-      await api.rematchNarrativeFrames(30)
-      setStatusMsg('Rematch queued — results will appear shortly.')
-      load()
+      await api.rematchNarrativeFrames(365)
+      // Start polling progress every 3 seconds
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch('/api/narrative-frames/rematch-progress')
+          const data = await res.json()
+          if (data.total > 0) {
+            setRematchProgress({ done: data.done, total: data.total })
+          }
+          if (!data.running && data.total > 0) {
+            clearInterval(interval)
+            setRematching(false)
+            setRematchProgress(null)
+            setStatusMsg(`Rematch complete — processed ${data.total} articles.`)
+            load()
+          }
+        } catch {
+          clearInterval(interval)
+          setRematching(false)
+        }
+      }, 3000)
     } catch (e: any) {
       setStatusMsg('Rematch failed: ' + e.message)
-    } finally {
       setRematching(false)
     }
   }
 
-  const candidateFrames = frames.filter(f => f.owner_type === 'candidate')
-  const opponentFrames = frames.filter(f => f.owner_type === 'opponent')
-  const mediaFrames = frames.filter(f => f.owner_type === 'media')
+  const visibleFrames = useMemo(
+    () => filterOwner === 'all' ? frames : frames.filter(f => f.owner_type === filterOwner),
+    [frames, filterOwner]
+  )
+
+  const candidateFrames = visibleFrames.filter(f => f.owner_type === 'candidate')
+  const opponentFrames = visibleFrames.filter(f => f.owner_type === 'opponent')
+  const mediaFrames = visibleFrames.filter(f => f.owner_type === 'media')
 
   return (
     <div className="page">
@@ -353,6 +408,44 @@ export default function Narratives() {
           </button>
         </div>
       </div>
+
+      {/* Filter chips */}
+      {frames.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <FilterChips
+            label="Show"
+            value={filterOwner}
+            onChange={setFilterOwner}
+            options={[
+              { label: 'All frames', value: 'all' },
+              { label: 'Our message', value: 'candidate' },
+              { label: 'Opponent attacks', value: 'opponent' },
+              { label: 'Media themes', value: 'media' },
+            ]}
+          />
+        </div>
+      )}
+
+      {rematchProgress && (
+        <div style={{ marginBottom: 16, padding: '12px 14px', background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 6 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--text, #f1f5f9)', marginBottom: 8 }}>
+            <span>Matching articles to narratives…</span>
+            <span style={{ color: 'var(--text-muted, #94a3b8)' }}>{rematchProgress.done} / {rematchProgress.total}</span>
+          </div>
+          <div style={{ background: 'var(--bg, #0f172a)', borderRadius: 4, height: 6, overflow: 'hidden' }}>
+            <div style={{
+              height: '100%',
+              width: `${Math.round((rematchProgress.done / rematchProgress.total) * 100)}%`,
+              background: '#3b82f6',
+              borderRadius: 4,
+              transition: 'width 0.5s ease',
+            }} />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', marginTop: 6 }}>
+            {Math.round((rematchProgress.done / rematchProgress.total) * 100)}% — this takes ~25 min, results update when done
+          </div>
+        </div>
+      )}
 
       {statusMsg && (
         <div style={{ marginBottom: 16, padding: '10px 14px', background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 6, fontSize: 13, color: 'var(--text, #f1f5f9)' }}>

@@ -232,6 +232,16 @@ export const api = {
   triggerCrawl: () => post<{ monitors_crawled: number; total_added: number; total_skipped: number; total_errors: number }>('/ingest/crawl', {}),
   triggerReddit: () => post<{ subreddits_searched: number; posts_found: number; added: number; skipped: number; errors: number }>('/ingest/reddit', {}),
 
+  // Analytics
+  getMonitoringStartDate: () =>
+    get<{ monitoring_start: string | null; has_backfill: boolean }>('/monitoring/start-date'),
+  getFrameTimeseries: (frameId: number, days = 14) =>
+    get<{ frame_id: number; series: { date: string; count: number }[] }>(`/frames/${frameId}/timeseries?bucket=day&days=${days}`),
+  getFrameShareOfVoice: (frameId: number, days = 7) =>
+    get<{ frame_id: number; days: number; total: number; candidate: number; opponent: number; neutral: number }>(`/frames/${frameId}/share-of-voice?days=${days}`),
+  getSpikes: () =>
+    get<{ spikes: { frame_id: number; frame_name: string; owner_type: string; count_24h: number; daily_avg_7d: number; ratio: number }[] }>('/analytics/spikes'),
+
   // Narrative frames
   getNarrativeFrames: () => get<NarrativeFrameWithCounts[]>('/narrative-frames'),
   createNarrativeFrame: (body: { name: string; description?: string; owner_type: string }) =>
@@ -241,6 +251,6 @@ export const api = {
   deleteNarrativeFrame: (id: number) => del(`/narrative-frames/${id}`),
   suggestNarrativeFrames: (daysBack = 14) =>
     post<{ suggested: number; frames: NarrativeFrameSuggestion[] }>(`/narrative-frames/suggest?days_back=${daysBack}`, {}),
-  rematchNarrativeFrames: (daysBack = 30) =>
+  rematchNarrativeFrames: (daysBack = 365) =>
     post<{ status: string; days_back: number }>(`/narrative-frames/rematch?days_back=${daysBack}`, {}),
 }
