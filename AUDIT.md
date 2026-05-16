@@ -175,15 +175,15 @@ Tasks:
 
 **Goal**: charts, trends, filters.
 
-**Status**: not started
+**Status**: done (2026-05-16, branch `main`)
 
 Tasks:
-- [ ] Time-series API: `GET /api/frames/{id}/timeseries?bucket=day&days=30`.
-- [ ] Sparkline on every frame card.
-- [ ] Per-frame detail page with day-by-day chart, top sources, top mentions.
-- [ ] Share-of-voice donut: candidate vs opponent vs neutral, per frame, per week.
-- [ ] Velocity / spike detection: rolling 24h vs 7d baseline; surface on Briefing.
-- [ ] Filter chips on Review Queue, Briefing, Narratives (source, date range, score, owner type, mentions).
+- [x] Time-series API: `GET /api/frames/{id}/timeseries?bucket=day&days=30`.
+- [x] Sparkline on every frame card.
+- [x] Per-frame detail page with day-by-day chart, top sources, top mentions.
+- [x] Share-of-voice donut: candidate vs opponent vs neutral, per frame, per week.
+- [x] Velocity / spike detection: rolling 24h vs 7d baseline; surface on Briefing.
+- [x] Filter chips on Review Queue, Briefing, Narratives (source, date range, score, owner type, mentions).
 
 **Acceptance**: at least one chart on each list page; filtering works.
 
