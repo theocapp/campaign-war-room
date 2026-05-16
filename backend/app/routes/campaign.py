@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import CampaignConfig
 from app.schemas import CampaignProfileOut, CampaignProfileIn, CampaignInitializeResult
-from app.services.monitors import auto_setup_monitors
+from app.services.monitors import auto_setup_monitors, run_historical_backfill
 from app.services.campaign_setup import infer_election_date, initialize_campaign
 
 router = APIRouter()
@@ -30,6 +30,10 @@ def _config_to_profile(config: CampaignConfig) -> CampaignProfileOut:
 @router.post("/campaign/initialize", response_model=CampaignInitializeResult)
 def campaign_initialize(db: Session = Depends(get_db)):
     """Run the full initialization sequence: monitors → ingestion → narrative refresh."""
+    try:
+        run_historical_backfill(db)
+    except Exception as exc:
+        logger.warning("historical_backfill failed: %s", exc)
     result = initialize_campaign(db)
     return CampaignInitializeResult(**result)
 

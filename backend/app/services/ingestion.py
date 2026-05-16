@@ -581,8 +581,30 @@ class RSSIngestResult:
         self.items = items
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _fetch_rss_content(feed_url: str) -> str | None:
+    """Fetch RSS feed content using httpx with browser headers (handles Reddit blocks)."""
+    try:
+        resp = httpx.get(feed_url, headers=_BROWSER_HEADERS, timeout=15, follow_redirects=True)
+        if resp.status_code == 200:
+            return resp.text
+    except Exception:
+        pass
+    return None
+
+
 def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIngestResult:
-    feed = feedparser.parse(feed_url)
+    raw = _fetch_rss_content(feed_url)
+    feed = feedparser.parse(raw if raw else feed_url)
     added_items: list[SourceItem] = []
     skipped = 0
 

@@ -4,6 +4,7 @@ match articles to frames.
 """
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Optional
@@ -13,6 +14,37 @@ from sqlalchemy.orm import Session
 from app.models import NarrativeFrame, NarrativeFrameMention, SourceItem, CampaignConfig, Opponent
 
 logger = logging.getLogger(__name__)
+
+# In-memory progress tracker for the current rematch run.
+# Safe for single-server use — reset each time rematch_all starts.
+_rematch_progress: dict = {"running": False, "done": 0, "total": 0}
+_rematch_lock = False  # guard against concurrent runs
+
+
+def get_rematch_progress() -> dict:
+    return dict(_rematch_progress)
+
+
+def _normalize_frame_name(name: str) -> str:
+    """Reduce a frame name to a canonical form for fuzzy dedup.
+
+    Strips noise words so near-duplicates like "Bresnahan's Stock Trades" and
+    "Bresnahan's Stock Trading Scandal" collapse to the same key.
+    """
+    noise = {"the", "a", "an", "and", "or", "of", "in", "on", "at", "to",
+             "issue", "issues", "scandal", "problem", "crisis", "controversy",
+             "attack", "attacks", "narrative", "message", "story", "stories"}
+    tokens = re.sub(r"[^a-z0-9\s]", "", name.lower()).split()
+    # Also collapse "trading" → "trade" style variants by stripping common suffixes
+    stemmed = []
+    for t in tokens:
+        if t not in noise:
+            for suffix in ("ing", "ion", "ions", "ed", "s"):
+                if t.endswith(suffix) and len(t) - len(suffix) >= 4:
+                    t = t[: -len(suffix)]
+                    break
+            stemmed.append(t)
+    return " ".join(sorted(stemmed))
 
 
 def _name_tokens(full_name: str) -> list[str]:
@@ -62,10 +94,37 @@ def _campaign_context(db: Session) -> dict:
     }
 
 
-def suggest_frames(db: Session, days_back: int = 14, max_summaries: int = 25) -> list[dict]:
+def _revalidate_all_frames(db: Session, ctx: dict) -> int:
+    """Scan every active frame and correct any owner_type that fails the name-mention check.
+
+    Returns the number of frames corrected.
     """
-    Read recent relevant article summaries and ask Groq to identify 3-5 narrative
-    frames the campaign should track.
+    frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+    fixed = 0
+    for frame in frames:
+        frame_text = f"{frame.name} {frame.description or ''}"
+        corrected = _validate_owner_type(
+            owner_type=frame.owner_type,
+            frame_text=frame_text,
+            candidate=ctx["candidate"],
+            opponents=ctx["opponents"],
+        )
+        if corrected != frame.owner_type:
+            logger.info(
+                "narrative_frames: revalidate corrected frame %d '%s' %s → %s",
+                frame.id, frame.name, frame.owner_type, corrected,
+            )
+            frame.owner_type = corrected
+            fixed += 1
+    if fixed:
+        db.commit()
+    return fixed
+
+
+def suggest_frames(db: Session, days_back: int = 60, max_summaries: int = 60) -> list[dict]:
+    """
+    Read recent relevant article titles/snippets and ask the LLM to identify 8-12 specific
+    narratives (recurring claims and attacks) the campaign should track.
 
     Returns a list of dicts: [{name, description, owner_type}]
     Each is also written to the narrative_frames table with source='llm'.
@@ -76,9 +135,9 @@ def suggest_frames(db: Session, days_back: int = 14, max_summaries: int = 25) ->
         .filter(
             SourceItem.archived_as_irrelevant == False,
             SourceItem.created_at >= cutoff,
-            SourceItem.summary.isnot(None),
+            SourceItem.race_relevance_score >= 40,
         )
-        .order_by(SourceItem.created_at.desc())
+        .order_by(SourceItem.race_relevance_score.desc(), SourceItem.created_at.desc())
         .limit(max_summaries)
         .all()
     )
@@ -87,43 +146,67 @@ def suggest_frames(db: Session, days_back: int = 14, max_summaries: int = 25) ->
         return []
 
     ctx = _campaign_context(db)
+    # Use title + first 80 chars of summary to keep token usage low (~1500 tokens total)
     summaries_text = "\n".join(
-        f"- {(item.summary or '')[:200]}" for item in items if item.summary
+        f"- {item.title or ''}: {(item.summary or '')[:80]}"
+        for item in items
     )
     opponent_str = " and ".join(ctx["opponents"]) if ctx["opponents"] else "the opponent"
 
-    prompt = f"""You are helping a political campaign identify the key narrative frames developing in the news.
+    # Pass existing frames so the LLM doesn't create near-duplicates
+    existing_frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+    existing_names_str = ""
+    if existing_frames:
+        existing_names_str = "\nEXISTING FRAMES (do NOT create duplicates or near-duplicates of these):\n" + \
+            "\n".join(f"- {f.name}" for f in existing_frames) + "\n"
+
+    prompt = f"""You are a political intelligence analyst helping a campaign identify the specific narratives playing out in the news.
 
 CAMPAIGN:
-- Candidate: {ctx["candidate"]}
+- Our candidate: {ctx["candidate"]}
 - Race: {ctx["race"]}
 - Location: {ctx["location"]}
 - Opponent: {opponent_str}
-
-RECENT RELEVANT ARTICLE SUMMARIES:
+{existing_names_str}
+RECENT ARTICLE SUMMARIES:
 {summaries_text}
 
-Based on these summaries, identify 3 to 5 distinct narrative frames this campaign should track.
+Identify 8 to 12 NEW specific NARRATIVES developing in this race that are NOT already covered by the existing frames above.
 
-CRITICAL: A frame is a recurring CATEGORY of story, not one specific event.
-- Good description: "Public-safety coverage tying the opponent to rising crime statistics."
-- Bad description: "A March 12 press conference where Smith blamed Jones for a shooting."
-Describe the category. Do not name specific dates or articles in the description.
+A NARRATIVE is a specific recurring claim, attack, or story — something someone is actively saying or that keeps getting repeated.
+A NARRATIVE is NOT a broad topic bucket.
 
-owner_type rules — be strict:
-- "candidate": ONLY if the frame is one {ctx["candidate"]} is actively pushing, or that clearly helps them. The name "{ctx["candidate"]}" should appear in the frame.
-- "opponent": ONLY if the frame is one the opponent is pushing, or that clearly helps them. An opponent's name from this list ({opponent_str}) should appear in the frame.
-- "media": Neutral or contested coverage where no campaign clearly owns it. Use this when in doubt — generic local-news coverage of an issue is "media", not "opponent".
+EXAMPLES of GOOD narratives (specific, recurring claims):
+- "{opponent_str}'s Stock Trading Scandal" — repeated coverage of the opponent's stock trades while in office
+- "{ctx["candidate"]}'s Anti-Corruption Message" — the candidate running on cleaning up Congress and attacking insider trading
+- "{opponent_str} Not From Here" — the opponent attacking {ctx["candidate"]} as an outsider who doesn't represent NEPA
+- "{ctx["candidate"]}'s Hidden Second Home" — attacks on the candidate for owning property outside the district
 
-Each frame should be:
-- Specific to this race (not generic national politics)
-- Something that appears in multiple articles or is strategically important
+EXAMPLES of BAD narratives (too generic — do NOT generate these):
+- "Community Events" ← this is a topic, not a narrative
+- "Economic Development" ← too broad
+- "Education Support" ← topic bucket, not a recurring claim
+- "Cognetti's Momentum" ← vague, not a specific claim anyone is making
+
+owner_type — who is PUSHING or BENEFITING from this narrative:
+- "candidate": {ctx["candidate"]} is actively promoting this, or it clearly helps her.
+  → Only use if {ctx["candidate"]}'s name appears naturally in the narrative.
+  → A POSITIVE story about her OR an attack she is making against the opponent.
+  → NEVER use for attacks AGAINST {ctx["candidate"]} — those help the opponent.
+- "opponent": {opponent_str} is actively promoting this, or it clearly helps them.
+  → Only use if an opponent name appears naturally in the narrative.
+  → A POSITIVE story about the opponent OR an attack the opponent is making against {ctx["candidate"]}.
+  → Attacks ON {opponent_str} that {ctx["candidate"]} is running on = "candidate", not "opponent".
+- "media": Neither side clearly owns it. Neutral coverage. Use when in doubt.
+
+KEY RULE: An attack story about {ctx["candidate"]} (e.g. "secret home", "hypocrisy") is owner_type="opponent" because it helps the opponent — NOT "candidate".
+An attack story about {opponent_str} (e.g. "stock trades", "lies") is owner_type="candidate" because {ctx["candidate"]} is pushing it — NOT "opponent".
 
 Return ONLY a JSON array, no other text:
 [
   {{
-    "name": "Short frame name (5 words max)",
-    "description": "One sentence: what category this frame covers and why it matters.",
+    "name": "Specific narrative name (5 words max)",
+    "description": "One sentence: the specific claim or attack being made, and who is making it.",
     "owner_type": "candidate" or "opponent" or "media"
   }}
 ]"""
@@ -139,14 +222,39 @@ Return ONLY a JSON array, no other text:
             return []
 
         text = raw.strip()
+        # Strip markdown fences
         if text.startswith("```"):
             lines = text.splitlines()
             inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
             text = "\n".join(inner).strip()
 
-        frames_data = json.loads(text)
+        # Extract the JSON array even if the model added surrounding text.
+        # Find the first '[' and the matching ']' to be robust against
+        # thinking models (Gemini 2.5) that add prose before or after the array.
+        bracket_start = text.find("[")
+        bracket_end = text.rfind("]")
+        if bracket_start != -1 and bracket_end != -1:
+            text = text[bracket_start:bracket_end + 1]
+
+        try:
+            frames_data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("narrative_frames.suggest_frames: JSON parse error: %s", exc)
+            return []
         if not isinstance(frames_data, list):
             return []
+
+        # Build a map of normalized name → existing frame for fuzzy dedup.
+        # This catches near-duplicates like "Bresnahan's Stock Trades" vs
+        # "Bresnahan's Stock Trading Scandal" that share the same key after
+        # noise/suffix stripping.
+        all_existing = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+        existing_by_norm: dict[str, NarrativeFrame] = {
+            _normalize_frame_name(f.name): f for f in all_existing
+        }
+        # Also track normalized keys of frames suggested in this batch so we
+        # don't create two new frames that are near-duplicates of each other.
+        seen_this_batch: dict[str, str] = {}  # norm_key → canonical name
 
         created = []
         for f in frames_data:
@@ -158,10 +266,17 @@ Return ONLY a JSON array, no other text:
             if not name:
                 continue
 
-            # Validate owner_type — the LLM tends to over-assign "opponent" to
-            # generic news. Downgrade to "media" unless the frame text actually
-            # mentions the relevant party. Names are compared case-insensitively
-            # against the frame's name + description.
+            norm_key = _normalize_frame_name(name)
+
+            # Skip if this batch already produced a near-duplicate
+            if norm_key in seen_this_batch:
+                logger.info(
+                    "narrative_frames: dropping near-duplicate '%s' (matches '%s' in this batch)",
+                    name, seen_this_batch[norm_key],
+                )
+                continue
+            seen_this_batch[norm_key] = name
+
             owner_type = _validate_owner_type(
                 owner_type=owner_type,
                 frame_text=f"{name} {description}",
@@ -169,10 +284,19 @@ Return ONLY a JSON array, no other text:
                 opponents=ctx["opponents"],
             )
 
-            # Don't duplicate if a frame with this name already exists
-            existing = db.query(NarrativeFrame).filter(NarrativeFrame.name == name).first()
+            # Check DB for near-duplicate (exact name OR same normalized key)
+            existing = (
+                db.query(NarrativeFrame).filter(NarrativeFrame.name == name).first()
+                or existing_by_norm.get(norm_key)
+            )
             if existing:
-                created.append({"id": existing.id, "name": name, "description": description, "owner_type": owner_type})
+                if existing.owner_type != owner_type:
+                    logger.info(
+                        "narrative_frames: correcting frame %d owner_type %s → %s",
+                        existing.id, existing.owner_type, owner_type,
+                    )
+                    existing.owner_type = owner_type
+                created.append({"id": existing.id, "name": existing.name, "description": existing.description, "owner_type": owner_type})
                 continue
 
             frame = NarrativeFrame(
@@ -189,9 +313,13 @@ Return ONLY a JSON array, no other text:
         db.commit()
         logger.info("narrative_frames: suggested %d frames", len(created))
 
-        # Immediately match recent articles so counts are populated right away
+        # Revalidate ALL existing frames — catches any that were mislabeled in
+        # earlier runs and never re-surfaced by the LLM suggestion prompt.
+        _revalidate_all_frames(db, ctx)
+
+        # Match all articles in the archive so counts are fully populated
         if created:
-            matched = rematch_all(db, days_back=30)
+            matched = rematch_all(db, days_back=365)
             logger.info("narrative_frames: auto-matched %d mentions after suggestion", matched)
 
         return created
@@ -206,7 +334,8 @@ Return ONLY a JSON array, no other text:
 
 def match_article_to_frames(db: Session, item: SourceItem) -> list[int]:
     """
-    Ask Groq which active narrative frames this article belongs to.
+    Ask Groq which active narrative frames this article belongs to, and extract
+    the specific claim/quote from the article for each matched frame.
     Writes NarrativeFrameMention rows. Returns list of matched frame IDs.
     """
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
@@ -216,22 +345,41 @@ def match_article_to_frames(db: Session, item: SourceItem) -> list[int]:
     if not item.summary and not item.title:
         return []
 
+    # Skip articles that are not relevant to this specific race — this prevents
+    # debates or news from unrelated races from polluting frame mentions.
+    relevance = getattr(item, "race_relevance_score", None) or 0
+    if relevance < 35:
+        logger.debug("narrative_frames.match_article: skipping item=%d (relevance=%d)", item.id, relevance)
+        return []
+
     frames_list = "\n".join(
-        f"{i+1}. [{f.owner_type}] {f.name}: {f.description or ''}"
+        f"{i+1}. {f.name}: {f.description or ''}"
         for i, f in enumerate(frames)
     )
     article_text = item.summary or item.title or ""
 
-    prompt = f"""You are matching a news article to narrative frames for a political campaign.
+    prompt = f"""You are a political research assistant tagging news articles with the campaign narratives they cover.
 
-FRAMES:
+NARRATIVES:
 {frames_list}
 
 ARTICLE:
 Title: {item.title or "No title"}
 Summary: {article_text}
 
-Which frames (by number) does this article clearly relate to? Return ONLY a JSON array of frame numbers (e.g. [1, 3]). Return [] if none apply."""
+TASK:
+For each narrative above, decide: does this article discuss or mention this topic, regardless of how it is framed or which side it favors?
+
+Rules:
+- Match based on TOPIC, not on tone or who benefits. An investigative piece about Bresnahan's stock trades counts the same as a Cognetti press release about it.
+- One article can match MULTIPLE narratives if it contains distinct information about each.
+- Do NOT match vague thematic overlap — only match when the article has specific information about that narrative topic.
+- For each match, extract the 1-2 most relevant sentences verbatim from the article. Do not paraphrase.
+
+Return ONLY a JSON array. Each element: {{"frame": <number>, "snippet": "<exact quote from article>"}}
+Return [] if no narratives apply.
+
+Example: [{{"frame": 2, "snippet": "Bresnahan bought and sold stocks in healthcare companies while sitting on committees overseeing those industries."}}, {{"frame": 4, "snippet": "Cognetti pointed to her record cutting city contracts as evidence of her anti-corruption stance."}}]"""
 
     try:
         from app.services.llm_provider import get_provider, MockLLMProvider
@@ -249,27 +397,50 @@ Which frames (by number) does this article clearly relate to? Return ONLY a JSON
             inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
             text = "\n".join(inner).strip()
 
-        matched_indices = json.loads(text)
-        if not isinstance(matched_indices, list):
+        bracket_start = text.find("[")
+        bracket_end = text.rfind("]")
+        if bracket_start != -1 and bracket_end != -1:
+            text = text[bracket_start:bracket_end + 1]
+
+        try:
+            matched_items = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(matched_items, list):
             return []
 
         matched_frame_ids = []
-        for idx in matched_indices:
+        for entry in matched_items:
+            # Support both old format (plain int) and new format (dict with frame + snippet)
+            if isinstance(entry, int):
+                idx = entry
+                snippet = None
+            elif isinstance(entry, dict):
+                idx = entry.get("frame")
+                snippet = (entry.get("snippet") or "").strip() or None
+            else:
+                continue
+
             if not isinstance(idx, int) or idx < 1 or idx > len(frames):
                 continue
             frame = frames[idx - 1]
-            # Upsert: skip if mention already exists
+
             existing = (
                 db.query(NarrativeFrameMention)
                 .filter_by(frame_id=frame.id, source_item_id=item.id)
                 .first()
             )
-            if not existing:
+            if existing:
+                # Update snippet if we now have one and didn't before
+                if snippet and not existing.extracted_text:
+                    existing.extracted_text = snippet
+            else:
                 db.add(NarrativeFrameMention(
                     frame_id=frame.id,
                     source_item_id=item.id,
                     confidence=75,
                     matched_by="llm",
+                    extracted_text=snippet,
                 ))
             matched_frame_ids.append(frame.id)
 
@@ -281,22 +452,93 @@ Which frames (by number) does this article clearly relate to? Return ONLY a JSON
         return []
 
 
-def rematch_all(db: Session, days_back: int = 30) -> int:
-    """Rematch all recent relevant articles to current active frames. Returns count matched."""
-    cutoff = datetime.utcnow() - timedelta(days=days_back)
-    items = (
-        db.query(SourceItem)
-        .filter(
-            SourceItem.archived_as_irrelevant == False,
-            SourceItem.created_at >= cutoff,
+def rematch_all(db: Session, days_back: int = 365) -> int:
+    """Rematch all relevant articles to current active frames.
+
+    Inserts a small delay between each article to stay within Groq's per-minute
+    token limits. With 4 keys round-robining and ~800 tokens per call, 2.5 s
+    between calls keeps each key well under its 6,000 TPM ceiling.
+
+    After matching, auto-prunes any frame that still has zero total mentions —
+    it means the LLM couldn't find a single example in the entire archive, so
+    the frame isn't grounded in real coverage.
+
+    Returns total mention count created.
+    """
+    global _rematch_lock
+    if _rematch_lock:
+        logger.warning("rematch_all: already running — ignoring concurrent request")
+        return 0
+    _rematch_lock = True
+
+    import time
+    from sqlalchemy import func
+
+    # Configurable via env — increase if still hitting limits, decrease if fast enough
+    delay = float(os.environ.get("REMATCH_DELAY_SECONDS", "2.5"))
+
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=days_back)
+
+        # Only process articles that have never been matched — articles already
+        # carrying at least one mention were processed in a previous run and
+        # don't need to be re-sent to the LLM (saves tokens).
+        already_matched_ids = {
+            row[0]
+            for row in db.query(NarrativeFrameMention.source_item_id).distinct().all()
+        }
+        all_items = (
+            db.query(SourceItem)
+            .filter(
+                SourceItem.archived_as_irrelevant == False,
+                SourceItem.created_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
-    total = 0
-    for item in items:
-        matched = match_article_to_frames(db, item)
-        total += len(matched)
-    return total
+        items = [i for i in all_items if i.id not in already_matched_ids]
+        logger.info(
+            "rematch_all: %d total articles, %d already matched, processing %d new",
+            len(all_items), len(already_matched_ids), len(items),
+        )
+
+        _rematch_progress["running"] = True
+        _rematch_progress["done"] = 0
+        _rematch_progress["total"] = len(items)
+
+        total = 0
+        for i, item in enumerate(items):
+            matched = match_article_to_frames(db, item)
+            total += len(matched)
+            _rematch_progress["done"] = i + 1
+            if i < len(items) - 1:
+                time.sleep(delay)
+
+        _rematch_progress["running"] = False
+
+        # Prune frames with zero mentions across all time (not just the window)
+        frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+        pruned = 0
+        for frame in frames:
+            mention_count = (
+                db.query(func.count(NarrativeFrameMention.id))
+                .filter(NarrativeFrameMention.frame_id == frame.id)
+                .scalar()
+            )
+            if mention_count == 0:
+                logger.info(
+                    "narrative_frames: pruning empty frame %d '%s' (0 mentions in archive)",
+                    frame.id, frame.name,
+                )
+                db.delete(frame)
+                pruned += 1
+        if pruned:
+            db.commit()
+            logger.info("narrative_frames: pruned %d empty frames", pruned)
+
+        return total
+    finally:
+        _rematch_lock = False
+        _rematch_progress["running"] = False
 
 
 def get_frames_with_counts(db: Session) -> list[dict]:
@@ -311,18 +553,22 @@ def get_frames_with_counts(db: Session) -> list[dict]:
     for frame in frames:
         this_week = (
             db.query(func.count(NarrativeFrameMention.id))
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
             .filter(
                 NarrativeFrameMention.frame_id == frame.id,
-                NarrativeFrameMention.created_at >= week_start,
+                SourceItem.published_at >= week_start,
+                SourceItem.published_at.isnot(None),
             )
             .scalar()
         )
         last_week = (
             db.query(func.count(NarrativeFrameMention.id))
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
             .filter(
                 NarrativeFrameMention.frame_id == frame.id,
-                NarrativeFrameMention.created_at >= prev_week_start,
-                NarrativeFrameMention.created_at < week_start,
+                SourceItem.published_at >= prev_week_start,
+                SourceItem.published_at < week_start,
+                SourceItem.published_at.isnot(None),
             )
             .scalar()
         )
@@ -332,9 +578,10 @@ def get_frames_with_counts(db: Session) -> list[dict]:
             .scalar()
         )
 
-        recent_articles = (
-            db.query(SourceItem)
-            .join(NarrativeFrameMention, NarrativeFrameMention.source_item_id == SourceItem.id)
+        # Fetch the mention alongside the article so we can include extracted_text
+        recent_pairs = (
+            db.query(NarrativeFrameMention, SourceItem)
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
             .filter(NarrativeFrameMention.frame_id == frame.id)
             .order_by(SourceItem.published_at.desc())
             .limit(3)
@@ -362,8 +609,9 @@ def get_frames_with_counts(db: Session) -> list[dict]:
                     "source_name": a.source_name,
                     "source_url": a.source_url,
                     "published_at": a.published_at.isoformat() if a.published_at else None,
+                    "extracted_text": mention.extracted_text,
                 }
-                for a in recent_articles
+                for mention, a in recent_pairs
             ],
         })
 

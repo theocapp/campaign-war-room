@@ -24,6 +24,7 @@ class CampaignConfig(Base):
     relevance_keywords = Column(Text)  # JSON array stored as text
     excluded_keywords = Column(Text)   # JSON array stored as text
     geography_keywords = Column(Text)  # JSON array stored as text
+    historical_backfill_completed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -289,6 +290,7 @@ class NarrativeFrameMention(Base):
     source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
     confidence = Column(Integer, default=70)
     matched_by = Column(String, default="llm")  # llm | human
+    extracted_text = Column(Text, nullable=True)  # specific claim/quote from article for this frame
     created_at = Column(DateTime, default=datetime.utcnow)
 
     frame = relationship("NarrativeFrame", back_populates="mentions")

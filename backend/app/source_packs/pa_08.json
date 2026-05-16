@@ -5,11 +5,11 @@
   "geography": "us_house",
   "items": [
     {
-      "name": "WBRE/WYOU 28/22 News — NEPA Live Feed",
+      "name": "WBRE/WYOU 28/22 News — NEPA Feed",
       "category": "local_news",
       "source_type": "news",
-      "url": "https://www.pahomepage.com/feed/",
-      "setup_note": "Nexstar duopoly covering the Scranton/Wilkes-Barre TV market (DMA 53). Primary NEPA broadcast source."
+      "url": "https://www.2822news.com/feed/",
+      "setup_note": "Nexstar duopoly covering the Scranton/Wilkes-Barre TV market (DMA 53). Rebranded from pahomepage.com to 2822news.com in 2024."
     },
     {
       "name": "Times Leader — Wilkes-Barre RSS",
@@ -17,6 +17,48 @@
       "source_type": "news",
       "url": "https://www.timesleader.com/feed",
       "setup_note": "Daily newspaper for Luzerne County. Covers local government, courts, and politics."
+    },
+    {
+      "name": "WNEP 16 — Google News Feed",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=site%3Awnep.com+politics+Pennsylvania&hl=en-US&gl=US&ceid=US%3Aen",
+      "setup_note": "WNEP (ABC Scranton) no longer publishes a usable RSS feed. This Google News site: search surfaces all WNEP stories indexed by Google."
+    },
+    {
+      "name": "WVIA — YouTube News Feed",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCMXHwsyBEY2-cL5rMVUuKXA",
+      "setup_note": "WVIA public media (Scranton/Wilkes-Barre PBS). YouTube RSS — confirmed active with NEPA political content."
+    },
+    {
+      "name": "Scranton Times-Tribune — Google News Feed",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=site%3Athetimes-tribune.com&hl=en-US&gl=US&ceid=US%3Aen",
+      "setup_note": "Times-Tribune (Gannett) blocks direct RSS access. Google News site: search returns all indexed Times-Tribune stories."
+    },
+    {
+      "name": "Citizens Voice — Google News Feed",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=site%3Acitizenvoice.com&hl=en-US&gl=US&ceid=US%3Aen",
+      "setup_note": "Citizens Voice (Gannett, Wilkes-Barre) blocks direct RSS. Google News site: search returns indexed stories."
+    },
+    {
+      "name": "Pocono Record — Google News Feed",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://news.google.com/rss/search?q=site%3Apoconorecord.com&hl=en-US&gl=US&ceid=US%3Aen",
+      "setup_note": "Pocono Record (Gannett, Monroe County) blocks direct RSS. Google News site: search returns indexed stories."
+    },
+    {
+      "name": "Spotlight PA — RSS",
+      "category": "local_news",
+      "source_type": "news",
+      "url": "https://www.spotlightpa.org/feeds/full.xml",
+      "setup_note": "Nonprofit investigative newsroom covering Pennsylvania government. Strong on campaign finance and accountability."
     },
     {
       "name": "Google News — Scranton Pennsylvania Politics",

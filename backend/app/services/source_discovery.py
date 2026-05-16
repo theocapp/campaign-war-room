@@ -1,5 +1,6 @@
 """Generate campaign-specific source monitor suggestions."""
 import json
+import re
 from typing import Any
 from urllib.parse import urlencode
 
@@ -10,6 +11,95 @@ def _gnews_url(query: str) -> str:
     """Build a Google News RSS search URL for the given query string."""
     params = urlencode({"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"})
     return f"https://news.google.com/rss/search?{params}"
+
+
+def _gnews_url_with_dates(query: str, after: str, before: str) -> str:
+    """Google News RSS with date range operators. after/before format: 'YYYY-MM-DD'"""
+    dated_query = f"{query} after:{after} before:{before}"
+    params = urlencode({"q": dated_query, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    return f"https://news.google.com/rss/search?{params}"
+
+
+# Maps US state abbreviations to the subreddit name for that state.
+# Verified against actual Reddit subreddit names (case-sensitive matters for display,
+# but Reddit URLs are case-insensitive).
+_STATE_SUBREDDITS: dict[str, str] = {
+    "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas",
+    "CA": "california", "CO": "colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "florida", "GA": "georgia", "HI": "hawaii", "ID": "Idaho",
+    "IL": "illinois", "IN": "indiana", "IA": "iowa", "KS": "kansas",
+    "KY": "Kentucky", "LA": "louisiana", "ME": "Maine", "MD": "maryland",
+    "MA": "massachusetts", "MI": "michigan", "MN": "minnesota", "MS": "mississippi",
+    "MO": "missouri", "MT": "Montana", "NE": "Nebraska", "NV": "nevada",
+    "NH": "newhampshire", "NJ": "newjersey", "NM": "newmexico", "NY": "newyork",
+    "NC": "NorthCarolina", "ND": "northdakota", "OH": "ohio", "OK": "oklahoma",
+    "OR": "oregon", "PA": "pennsylvania", "RI": "RhodeIsland", "SC": "southcarolina",
+    "SD": "southdakota", "TN": "Tennessee", "TX": "texas", "UT": "utah",
+    "VT": "vermont", "VA": "virginia", "WA": "washington", "WV": "WestVirginia",
+    "WI": "wisconsin", "WY": "wyoming",
+}
+
+
+def _reddit_search_url(query: str, subreddit: str | None = None) -> str:
+    """Build a Reddit RSS search URL. subreddit=None searches all of Reddit."""
+    params = urlencode({"q": query, "sort": "new", "limit": "25", "t": "all"})
+    if subreddit:
+        return f"https://www.reddit.com/r/{subreddit}/search.rss?{params}&restrict_sr=1"
+    return f"https://www.reddit.com/search.rss?{params}"
+
+
+def _reddit_subreddit_url(subreddit: str) -> str:
+    """RSS feed for all posts in a subreddit (no search filter)."""
+    return f"https://www.reddit.com/r/{subreddit}/.rss?limit=25"
+
+
+def _parse_state_code(district: str | None, location: str | None) -> str | None:
+    """Extract a two-letter state code from district ('PA-08') or location ('Scranton, PA')."""
+    if district:
+        m = re.match(r'^([A-Z]{2})-?\d', district.upper())
+        if m:
+            return m.group(1)
+    if location:
+        m = re.search(r',\s*([A-Z]{2})\b', location.upper())
+        if m:
+            return m.group(1)
+    return None
+
+
+_STATE_NAMES: dict[str, str] = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming",
+}
+
+
+def _candidate_last_name(full_name: str | None) -> str | None:
+    """Return a titlecased last name suitable for a Reddit search query.
+
+    Handles both FEC format ('COGNETTI, PAIGE' → 'Cognetti') and
+    natural order ('Rob Bresnahan' → 'Bresnahan').
+    """
+    if not full_name:
+        return None
+    name = full_name.strip()
+    if "," in name:
+        # FEC last-first format
+        last = name.split(",")[0].strip()
+    else:
+        # Natural first-last format — take the last token
+        parts = name.split()
+        last = parts[-1] if parts else name
+    return last.title() if last else None
 
 
 def _terms(value: str | list[str] | None) -> list[str]:
@@ -122,6 +212,63 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
              category="race",
              relevance_hint="Google News feed for the race location and office.")
     # ── End Google News RSS feeds ─────────────────────────────────────────────
+
+    # ── Reddit RSS feeds (no credentials required) ────────────────────────────
+    state_code = _parse_state_code(district, location)
+    state_sub = _STATE_SUBREDDITS.get(state_code or "") if state_code else None
+    state_name = _STATE_NAMES.get(state_code or "") if state_code else None
+    cand_last = _candidate_last_name(candidate)
+
+    if cand_last:
+        # Global Reddit search for candidate
+        _add(monitors, seen,
+             name=f"Reddit: {cand_last}",
+             monitor_type="rss",
+             url=_reddit_search_url(f"{cand_last} {state_name or state_code or ''}".strip()),
+             category="candidate",
+             relevance_hint="Reddit-wide search for candidate mentions.")
+
+        if state_sub:
+            # State subreddit search for candidate
+            _add(monitors, seen,
+                 name=f"Reddit r/{state_sub}: {cand_last}",
+                 monitor_type="rss",
+                 url=_reddit_search_url(cand_last, subreddit=state_sub),
+                 category="candidate",
+                 relevance_hint=f"Candidate mentions within r/{state_sub}.")
+
+    for opponent in opponents:
+        opp_last = _candidate_last_name(opponent.name)
+        if not opp_last:
+            continue
+        _add(monitors, seen,
+             name=f"Reddit: {opp_last}",
+             monitor_type="rss",
+             url=_reddit_search_url(f"{opp_last} {state_name or state_code or ''}".strip()),
+             category="opponent",
+             source_type="opponent_statement",
+             relevance_hint="Reddit-wide search for opponent mentions.")
+        if state_sub:
+            _add(monitors, seen,
+                 name=f"Reddit r/{state_sub}: {opp_last}",
+                 monitor_type="rss",
+                 url=_reddit_search_url(opp_last, subreddit=state_sub),
+                 category="opponent",
+                 source_type="opponent_statement",
+                 relevance_hint=f"Opponent mentions within r/{state_sub}.")
+
+    # Local subreddit feeds from neighborhood_keywords (e.g. "Scranton", "nepa")
+    # Only use keywords that are plausible subreddit names (single word, <20 chars).
+    for kw in neighborhoods:
+        slug = kw.strip().replace(" ", "").replace("-", "")
+        if slug and len(slug) <= 20:
+            _add(monitors, seen,
+                 name=f"Reddit r/{slug} (local feed)",
+                 monitor_type="rss",
+                 url=_reddit_subreddit_url(slug),
+                 category="race",
+                 relevance_hint=f"All posts in r/{slug} — local community discussion.")
+    # ── End Reddit RSS feeds ──────────────────────────────────────────────────
 
     if candidate:
         _add(monitors, seen, name=f"{candidate} news search", monitor_type="search_query",

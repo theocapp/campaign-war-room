@@ -14,6 +14,40 @@ from app.models import (
 )
 from app.services import briefing_summary as briefing_svc
 
+
+def _compute_spikes(db: Session) -> list[dict]:
+    """Frames where last-24h mentions >= 3 and >= 2× the 7d daily average."""
+    now = datetime.utcnow()
+    cutoff_24h = now - timedelta(hours=24)
+    cutoff_7d = now - timedelta(days=7)
+    frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()  # noqa: E712
+    spikes = []
+    for frame in frames:
+        c24 = (
+            db.query(func.count(NarrativeFrameMention.id))
+            .filter(NarrativeFrameMention.frame_id == frame.id,
+                    NarrativeFrameMention.created_at >= cutoff_24h)
+            .scalar()
+        )
+        c7d = (
+            db.query(func.count(NarrativeFrameMention.id))
+            .filter(NarrativeFrameMention.frame_id == frame.id,
+                    NarrativeFrameMention.created_at >= cutoff_7d)
+            .scalar()
+        )
+        avg = c7d / 7.0
+        if c24 >= 3 and avg > 0 and c24 >= avg * 2:
+            spikes.append({
+                "frame_id": frame.id,
+                "frame_name": frame.name,
+                "owner_type": frame.owner_type,
+                "count_24h": c24,
+                "daily_avg_7d": round(avg, 1),
+                "ratio": round(c24 / avg, 1),
+            })
+    spikes.sort(key=lambda x: x["ratio"], reverse=True)
+    return spikes
+
 router = APIRouter()
 
 
@@ -91,15 +125,19 @@ def get_morning_briefing(db: Session = Depends(get_db)):
     for frame in frames:
         this_week = (
             db.query(func.count(NarrativeFrameMention.id))
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
             .filter(NarrativeFrameMention.frame_id == frame.id,
-                    NarrativeFrameMention.created_at >= cutoff_7d)
+                    SourceItem.published_at >= cutoff_7d,
+                    SourceItem.published_at.isnot(None))
             .scalar()
         )
         last_week = (
             db.query(func.count(NarrativeFrameMention.id))
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
             .filter(NarrativeFrameMention.frame_id == frame.id,
-                    NarrativeFrameMention.created_at >= cutoff_14d,
-                    NarrativeFrameMention.created_at < cutoff_7d)
+                    SourceItem.published_at >= cutoff_14d,
+                    SourceItem.published_at < cutoff_7d,
+                    SourceItem.published_at.isnot(None))
             .scalar()
         )
         trend = "up" if this_week > last_week else ("down" if this_week < last_week else "flat")
@@ -144,4 +182,5 @@ def get_morning_briefing(db: Session = Depends(get_db)):
         "needs_response": [_item_dict(i) for i in respond],
         "new_articles": [_item_dict(i) for i in new_articles],
         "narrative_pulse": pulse,
+        "spike_alerts": _compute_spikes(db),
     }

@@ -22,6 +22,13 @@ except ImportError:
     pass
 
 
+# ── Exceptions ────────────────────────────────────────────────────────────────
+
+class ProviderRateLimitError(Exception):
+    """Raised when an LLM provider hits its rate or daily token limit (HTTP 429)."""
+    pass
+
+
 # ── Abstract interface ────────────────────────────────────────────────────────
 
 class BaseLLMProvider(ABC):
@@ -526,8 +533,14 @@ class OpenAIProvider(BaseLLMProvider):
         kwargs: dict = {"model": self._model, "messages": messages}
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        response = self._client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate_limit_exceeded" in err or "Rate limit" in err or "tokens per day" in err:
+                raise ProviderRateLimitError(err) from e
+            raise
 
     def summarize(self, text: str, max_words: int = 80) -> str:
         prompt = f"Summarize the following in at most {max_words} words. Return only the summary, no preamble.\n\n{text[:3000]}"
@@ -622,6 +635,8 @@ class OpenAIProvider(BaseLLMProvider):
             result = _parse_json_response(raw)
             if result.get("short_answer"):
                 return result
+        except ProviderRateLimitError:
+            raise
         except Exception as e:
             log.warning("OpenAI generate_talking_points failed: %s", e)
         return MockLLMProvider().generate_talking_points(issue, tone, context, campaign_profile, sources, opponent_activities)
@@ -647,6 +662,8 @@ class OpenAIProvider(BaseLLMProvider):
     def complete(self, prompt: str) -> str:
         try:
             return self._chat(prompt)
+        except ProviderRateLimitError:
+            raise
         except Exception as e:
             log.warning("OpenAI complete failed: %s", e)
             return "[]"
@@ -683,8 +700,14 @@ class AnthropicProvider(BaseLLMProvider):
         kwargs: dict = {"model": self._model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]}
         if system:
             kwargs["system"] = system
-        response = self._client.messages.create(**kwargs)
-        return response.content[0].text if response.content else ""
+        try:
+            response = self._client.messages.create(**kwargs)
+            return response.content[0].text if response.content else ""
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate_limit_exceeded" in err or "Rate limit" in err or "overloaded" in err:
+                raise ProviderRateLimitError(err) from e
+            raise
 
     def summarize(self, text: str, max_words: int = 80) -> str:
         prompt = f"Summarize the following in at most {max_words} words. Return only the summary.\n\n{text[:3000]}"
@@ -788,6 +811,8 @@ class AnthropicProvider(BaseLLMProvider):
     def complete(self, prompt: str) -> str:
         try:
             return self._message(prompt, max_tokens=1000)
+        except ProviderRateLimitError:
+            raise
         except Exception as e:
             log.warning("Anthropic complete failed: %s", e)
             return "[]"
@@ -823,6 +848,126 @@ class GroqProvider(OpenAIProvider):
             raise RuntimeError("openai package not installed. Run: pip install openai") from e
 
 
+class GeminiProvider(OpenAIProvider):
+    """Google Gemini — free tier with 1M tokens/day. Get a key at aistudio.google.com."""
+
+    def __init__(self, api_key: str, model: str = "gemini-flash-latest"):
+        try:
+            from openai import OpenAI
+            self._client = OpenAI(
+                api_key=api_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
+            self._model = model
+        except ImportError as e:
+            raise RuntimeError("openai package not installed. Run: pip install openai") from e
+
+
+# ── Fallback provider chain ───────────────────────────────────────────────────
+
+class FallbackProvider(BaseLLMProvider):
+    """Round-robins across a list of providers, rotating on ProviderRateLimitError.
+
+    Starts each call from the next provider in the rotation so load is spread
+    evenly across all keys from the first request — no single key gets hammered
+    until it exhausts its per-minute quota before the others are touched.
+
+    When all providers are exhausted it falls back to Mock so the app stays
+    functional, but logs a clear warning.
+    """
+
+    def __init__(self, providers: list[BaseLLMProvider]):
+        import threading
+        self._providers = providers
+        self._next = 0
+        self._lock = threading.Lock()
+        # Tracks which provider indices are known-exhausted this session.
+        # Cleared after _EXHAUSTED_TTL_SECONDS so daily limits can recover.
+        self._exhausted: set[int] = set()
+        self._exhausted_at: dict[int, float] = {}
+
+    _EXHAUSTED_TTL_SECONDS = 3600  # forget exhausted status after 1 hour
+
+    def _start_index(self) -> int:
+        with self._lock:
+            idx = self._next % len(self._providers)
+            self._next += 1
+            return idx
+
+    def _is_exhausted(self, idx: int) -> bool:
+        import time
+        if idx not in self._exhausted:
+            return False
+        if time.time() - self._exhausted_at.get(idx, 0) > self._EXHAUSTED_TTL_SECONDS:
+            self._exhausted.discard(idx)
+            self._exhausted_at.pop(idx, None)
+            return False
+        return True
+
+    def _call(self, method: str, *args, **kwargs):
+        import time
+        n = len(self._providers)
+        start = self._start_index()
+        for i in range(n):
+            idx = (start + i) % n
+            if self._is_exhausted(idx):
+                continue
+            p = self._providers[idx]
+            try:
+                return getattr(p, method)(*args, **kwargs)
+            except ProviderRateLimitError as e:
+                log.warning(
+                    "FallbackProvider: %s[%d] rate-limited — trying next provider",
+                    type(p).__name__, idx,
+                )
+                self._exhausted.add(idx)
+                self._exhausted_at[idx] = time.time()
+                continue
+        # All known-good providers failed — reset exhausted set and try once more
+        # (limits may have recovered)
+        if self._exhausted:
+            log.info("FallbackProvider: all providers exhausted, resetting for retry")
+            self._exhausted.clear()
+            self._exhausted_at.clear()
+            for i in range(n):
+                idx = (start + i) % n
+                p = self._providers[idx]
+                try:
+                    return getattr(p, method)(*args, **kwargs)
+                except ProviderRateLimitError:
+                    continue
+        log.warning("FallbackProvider: all providers rate-limited for %s — using mock", method)
+        return getattr(MockLLMProvider(), method)(*args, **kwargs)
+
+    def complete(self, prompt: str) -> str:
+        return self._call("complete", prompt)
+
+    def summarize(self, text: str, max_words: int = 80) -> str:
+        return self._call("summarize", text, max_words)
+
+    def classify_urgency(self, text: str) -> str:
+        return self._call("classify_urgency", text)
+
+    def extract_issues(self, text: str) -> list[str]:
+        return self._call("extract_issues", text)
+
+    def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
+        return self._call("detect_opponent_activity", text, opponent_name)
+
+    def generate_talking_points(self, issue: str, tone: str, context: str = "",
+                                campaign_profile: Optional[dict] = None,
+                                sources: Optional[list[dict]] = None,
+                                opponent_activities: Optional[list[dict]] = None) -> dict:
+        return self._call("generate_talking_points", issue, tone, context,
+                          campaign_profile, sources, opponent_activities)
+
+    def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
+        return self._call("generate_risk_warning", text, credibility_note)
+
+    def verify_opponent_subject(self, sentence: str, opponent_name: str, candidate_name: str) -> str:
+        return self._call("verify_opponent_subject", sentence, opponent_name, candidate_name)
+
+
 _MOCK_FALLBACK_BANNER = (
     "================================================================\n"
     "  LLM FALLBACK TO MOCK PROVIDER — AI SCORING IS DISABLED\n"
@@ -850,7 +995,32 @@ def get_provider_status() -> dict:
     }
 
 
+_provider_singleton: "BaseLLMProvider | None" = None
+
+
 def get_provider() -> BaseLLMProvider:
+    """Return the module-level provider singleton, building it once on first call.
+
+    Singleton keeps FallbackProvider's exhausted-key state alive across requests,
+    so once a Groq key hits its daily limit it is skipped for all future calls
+    (for up to 1 hour) without retrying it each time.
+
+    Priority order when LLM_PROVIDER=groq (the default):
+      1. GROQ_API_KEY (primary)
+      2. GROQ_API_KEY_2, GROQ_API_KEY_3, … (additional Groq accounts — each has its own daily quota)
+      3. GEMINI_API_KEY (if set) — 1M tokens/day free via Google AI Studio
+      4. ANTHROPIC_API_KEY (if set) — kicks in when all Groq keys are exhausted
+      5. OPENAI_API_KEY (if set)
+      6. Mock (always last — keeps the app functional with no AI scoring)
+
+    Each provider is only tried when the previous one returns a 429 rate-limit error.
+    Other errors (network, bad response) are handled inside each provider and return
+    safe defaults without triggering the fallback.
+    """
+    global _provider_singleton
+    if _provider_singleton is not None:
+        return _provider_singleton
+
     provider_name = os.environ.get("LLM_PROVIDER", "").lower().strip()
 
     if not provider_name:
@@ -859,34 +1029,88 @@ def get_provider() -> BaseLLMProvider:
     if provider_name == "mock":
         return MockLLMProvider()
 
-    if provider_name == "openai":
+    providers: list[BaseLLMProvider] = []
+
+    # ── Groq keys (primary + any extras) ──────────────────────────────────────
+    if provider_name == "groq":
+        model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        # Collect GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, … (up to 5 extras)
+        groq_keys: list[str] = []
+        primary = os.environ.get("GROQ_API_KEY", "").strip()
+        if primary:
+            groq_keys.append(primary)
+        for n in range(2, 7):
+            extra = os.environ.get(f"GROQ_API_KEY_{n}", "").strip()
+            if extra:
+                groq_keys.append(extra)
+
+        if not groq_keys:
+            return _fallback_to_mock("LLM_PROVIDER=groq but no GROQ_API_KEY set")
+
+        for key in groq_keys:
+            try:
+                providers.append(GroqProvider(api_key=key, model=model))
+            except RuntimeError as e:
+                log.warning("Groq provider init failed: %s", e)
+
+    # ── OpenAI ─────────────────────────────────────────────────────────────────
+    elif provider_name == "openai":
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             return _fallback_to_mock("LLM_PROVIDER=openai but OPENAI_API_KEY not set")
         model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         try:
-            return OpenAIProvider(api_key=api_key, model=model)
+            providers.append(OpenAIProvider(api_key=api_key, model=model))
         except RuntimeError as e:
             return _fallback_to_mock(f"OpenAI provider unavailable: {e}")
 
-    if provider_name == "anthropic":
+    # ── Anthropic ──────────────────────────────────────────────────────────────
+    elif provider_name == "anthropic":
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             return _fallback_to_mock("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY not set")
         model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
         try:
-            return AnthropicProvider(api_key=api_key, model=model)
+            providers.append(AnthropicProvider(api_key=api_key, model=model))
         except RuntimeError as e:
             return _fallback_to_mock(f"Anthropic provider unavailable: {e}")
 
-    if provider_name == "groq":
-        api_key = os.environ.get("GROQ_API_KEY", "")
-        if not api_key:
-            return _fallback_to_mock("LLM_PROVIDER=groq but GROQ_API_KEY not set")
-        model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-        try:
-            return GroqProvider(api_key=api_key, model=model)
-        except RuntimeError as e:
-            return _fallback_to_mock(f"Groq provider unavailable: {e}")
+    else:
+        return _fallback_to_mock(f"Unknown LLM_PROVIDER value: {provider_name!r}")
 
-    return _fallback_to_mock(f"Unknown LLM_PROVIDER value: {provider_name!r}")
+    # ── Append cross-provider fallbacks (always, when primary is Groq) ─────────
+    if provider_name == "groq":
+        # Google Gemini: 1M tokens/day free — add whenever GEMINI_API_KEY is set
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if gemini_key:
+            gemini_model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+            try:
+                providers.append(GeminiProvider(api_key=gemini_key, model=gemini_model))
+                log.info("LLM fallback chain includes Gemini (%s)", gemini_model)
+            except RuntimeError as e:
+                log.warning("Gemini provider init failed: %s", e)
+
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if anthropic_key:
+            anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+            try:
+                providers.append(AnthropicProvider(api_key=anthropic_key, model=anthropic_model))
+                log.info("LLM fallback chain: Groq × %d key(s) → Anthropic", len([p for p in providers if isinstance(p, GroqProvider)]))
+            except RuntimeError:
+                pass
+
+        openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if openai_key and not anthropic_key:
+            openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+            try:
+                providers.append(OpenAIProvider(api_key=openai_key, model=openai_model))
+            except RuntimeError:
+                pass
+
+    if not providers:
+        _provider_singleton = _fallback_to_mock("no providers could be initialized")
+        return _provider_singleton
+
+    result = providers[0] if len(providers) == 1 else FallbackProvider(providers)
+    _provider_singleton = result
+    return result

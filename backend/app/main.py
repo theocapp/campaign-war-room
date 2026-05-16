@@ -9,6 +9,7 @@ from app.routes import (
     campaign, setup, rss_feeds, review_queue, source_templates,
     admin, source_packs, source_reminders, race_import,
     races, narrative_frames, outlets, ingest, source_monitors,
+    analytics,
 )
 
 
@@ -61,6 +62,7 @@ for router in [
     outlets.router,
     ingest.router,
     source_monitors.router,
+    analytics.router,
 ]:
     app.include_router(router, prefix="/api")
 

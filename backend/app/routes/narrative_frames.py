@@ -83,11 +83,17 @@ def suggest_frames(days_back: int = 14, db: Session = Depends(get_db)):
 
 
 @router.post("/rematch")
-def rematch_articles(days_back: int = 30):
+def rematch_articles(days_back: int = 365, db: Session = Depends(get_db)):
     """Enqueue a rematch job and return immediately (<1 s)."""
     from app.services.scheduler import enqueue_rematch
     enqueue_rematch(days_back=days_back)
     return {"status": "queued", "days_back": days_back}
+
+
+@router.get("/rematch-progress")
+def rematch_progress():
+    """Return the current rematch progress (polling-friendly)."""
+    return svc.get_rematch_progress()
 
 
 @router.delete("/{frame_id}/mentions/{source_item_id}")

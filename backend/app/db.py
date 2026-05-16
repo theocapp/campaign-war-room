@@ -150,6 +150,11 @@ def _migrate(conn) -> None:
         if col not in existing_im:
             conn.execute(text(f"ALTER TABLE issue_mentions ADD COLUMN {col} {col_type}"))
 
+    # narrative_frame_mentions: extracted_text stores the specific claim extracted from an article
+    existing_nfm = {row[1] for row in conn.execute(text("PRAGMA table_info(narrative_frame_mentions)"))}
+    if "extracted_text" not in existing_nfm:
+        conn.execute(text("ALTER TABLE narrative_frame_mentions ADD COLUMN extracted_text TEXT"))
+
     # Note: `narratives`, `narrative_mentions`, `candidate_message_libraries`,
     # and `candidate_narratives` tables were created here by earlier migrations.
     # Their model classes were dropped during the narrative-frames pivot, so

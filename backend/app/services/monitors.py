@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models import CampaignConfig, Opponent, RssFeed, SourceItem, SourceMonitor
 from app.services import ingestion
 from app.services.search_provider import get_search_provider
-from app.services.source_discovery import generate_monitors_for_campaign
+from app.services.source_discovery import generate_monitors_for_campaign, _gnews_url_with_dates, _candidate_last_name
 
 
 def _json_list(value: list | None) -> str | None:
@@ -80,6 +80,54 @@ def _run_search_monitor(db: Session, monitor: SourceMonitor) -> int:
     monitor.updated_at = datetime.utcnow()
     db.commit()
     return added
+
+
+def run_historical_backfill(db: Session) -> dict:
+    """One-time 90-day Google News backfill on campaign initialization.
+
+    Breaks 90 days into 3 monthly windows and fetches each key query per window.
+    Marks CampaignConfig.historical_backfill_completed = True when done.
+    Safe to call multiple times — skips if already completed.
+    """
+    campaign = db.query(CampaignConfig).first()
+    if not campaign or campaign.historical_backfill_completed:
+        return {"skipped": True}
+
+    opponents = db.query(Opponent).all()
+    candidate = campaign.candidate_name
+
+    queries = []
+    if candidate:
+        cand_last = _candidate_last_name(candidate)
+        if cand_last:
+            queries.append(cand_last)
+    for opp in opponents:
+        opp_last = _candidate_last_name(opp.name)
+        if opp_last:
+            queries.append(opp_last)
+    if campaign.district:
+        queries.append(campaign.district)
+
+    now = datetime.utcnow()
+    windows = []
+    for i in range(3):
+        before = now - timedelta(days=i * 30)
+        after = now - timedelta(days=(i + 1) * 30)
+        windows.append((after.strftime("%Y-%m-%d"), before.strftime("%Y-%m-%d")))
+
+    total_added = 0
+    for query in queries:
+        for after_date, before_date in windows:
+            url = _gnews_url_with_dates(query, after_date, before_date)
+            try:
+                result = ingestion.ingest_rss(db, url, label=f"Backfill: {query} ({after_date})")
+                total_added += result.added
+            except Exception:
+                pass
+
+    campaign.historical_backfill_completed = True
+    db.commit()
+    return {"added": total_added, "queries": len(queries), "windows": len(windows)}
 
 
 def auto_setup_monitors(db: Session) -> dict:
