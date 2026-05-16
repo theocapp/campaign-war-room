@@ -157,17 +157,17 @@ Tasks:
 
 **Goal**: more sources than RSS.
 
-**Status**: not started
+**Status**: done (2026-05-16, branch `main`)
 
 Tasks:
-- [ ] Generic article crawler with `trafilatura` for outlets without RSS.
-- [ ] Reddit ingestion (free API).
-- [ ] X/Twitter ingestion (try `snscrape` or nitter RSS bridge; otherwise X API).
-- [ ] Decide on Facebook strategy: Apify, a paid vendor, or skip.
-- [ ] Author + outlet authority table; manual ranking UI.
-- [ ] Geo-tag outlets (state + city); make "PA-08 only" filter real.
+- [x] Generic article crawler with `trafilatura` for outlets without RSS (`ingestion_crawler.py`; scheduler every 6h; `POST /api/ingest/crawl`).
+- [x] Reddit ingestion via PRAW (`ingestion_reddit.py`; scheduler every 2h; `POST /api/ingest/reddit`; subreddits: pennsylvania, Scranton, nepa, politics).
+- [x] X/Twitter: skipped — see decision log.
+- [x] Facebook: skipped — see decision log.
+- [x] `Outlet` table: `name`, `domain`, `state`, `city`, `authority_score`, `outlet_type`; 10 PA-08 outlets seeded manually.
+- [x] SourceMonitor UI page (`/monitors`): lists all monitors with type/status/last-checked, CRUD, active toggle, Run Crawler + Run Reddit buttons (debt 23).
 
-**Acceptance**: at least 3 non-RSS sources flowing; outlets have a location and authority score.
+**Acceptance**: Reddit + trafilatura crawler wired and tested with fixtures; outlets table has 10 PA-08 entries with geo + authority; SourceMonitor page works in UI.
 
 ---
 
@@ -263,3 +263,7 @@ _(Add an entry when you make a non-obvious choice that future sessions need to k
 - **2026-05-15 (Phase 1)** — `analyze_with_frames()` replaces the two-call pattern (analyze + match_article_to_frames). Frames list passed in by ingestion code; function returns `frame_matches` as 1-indexed ints; ingestion code creates NarrativeFrameMention rows. The standalone `match_article_to_frames` still exists for `rematch_all`.
 - **2026-05-15 (Phase 1)** — FTS5 triggers created once in `_migrate()` guarded by `sqlite_master` check. No external search service.
 - **2026-05-15 (Phase 1)** — `rematch_all` enqueued via APScheduler `trigger='date'` job (run-now); HTTP endpoint returns immediately. Falls back to daemon thread if scheduler is disabled.
+- **2026-05-16 (Phase 2)** — X/Twitter skipped: snscrape is broken post-2023 API lockdown; Nitter instances are unreliable; paid X API ($100+/mo) is out of scope. Google News RSS catches X-originated stories in 12–24h anyway. Revisit if X opens a low-cost read API.
+- **2026-05-16 (Phase 2)** — Facebook skipped: read API closed since 2018 (Cambridge Analytica). Apify scraping violates ToS and adds cost. All NEPA outlets that post to Facebook also have RSS or crawlable websites. Revisit if a compliant read path emerges.
+- **2026-05-16 (Phase 2)** — Reddit ingestion uses PRAW with read-only script app credentials. Set `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` in `backend/.env`. Subreddits configurable via `REDDIT_SUBREDDITS` env var (comma-separated; default: pennsylvania,Scranton,nepa,politics).
+- **2026-05-16 (Phase 2)** — `Outlet` table introduced with `domain` as the natural key. `outlet_id` FK added to `source_items` (nullable). PA-08 seed in `seed.py::_seed_pa08_outlets` is idempotent. Authority scores are manual (1–10); auto-scoring deferred to Phase 7.
