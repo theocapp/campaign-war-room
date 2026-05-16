@@ -188,6 +188,42 @@ def enqueue_rematch(days_back: int = 30) -> None:
         log.info("enqueue_rematch: scheduler not running, started thread (days_back=%d)", days_back)
 
 
+def _run_crawler() -> None:
+    """Sync: crawl all active webpage monitors. Called by scheduler."""
+    from app.db import SessionLocal
+    from app.services.ingestion_crawler import crawl_all_webpage_monitors
+
+    log.info("Scheduled crawler starting")
+    try:
+        with SessionLocal() as db:
+            results = crawl_all_webpage_monitors(db)
+        total_added = sum(r.added for r in results)
+        total_errors = sum(r.errors for r in results)
+        log.info(
+            "Scheduled crawler complete: monitors=%d added=%d errors=%d",
+            len(results), total_added, total_errors,
+        )
+    except Exception:
+        log.exception("Scheduled crawler failed with an unhandled exception")
+
+
+def _run_reddit() -> None:
+    """Sync: ingest Reddit. Called by scheduler."""
+    from app.db import SessionLocal
+    from app.services.ingestion_reddit import ingest_reddit
+
+    log.info("Scheduled Reddit ingestion starting")
+    try:
+        with SessionLocal() as db:
+            result = ingest_reddit(db)
+        log.info(
+            "Scheduled Reddit ingestion complete: added=%d skipped=%d errors=%d",
+            result.added, result.skipped, result.errors,
+        )
+    except Exception:
+        log.exception("Scheduled Reddit ingestion failed with an unhandled exception")
+
+
 def start_scheduler() -> None:
     """Start the background scheduler.  Called once during app startup."""
     global _scheduler
@@ -210,6 +246,26 @@ def start_scheduler() -> None:
         trigger="interval",
         minutes=interval,
         id="rss_auto_ingest",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Crawler: every 6 hours
+    _scheduler.add_job(
+        lambda: asyncio.ensure_future(asyncio.to_thread(_run_crawler)),
+        trigger="interval",
+        hours=6,
+        id="crawler_auto",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Reddit: every 2 hours
+    _scheduler.add_job(
+        lambda: asyncio.ensure_future(asyncio.to_thread(_run_reddit)),
+        trigger="interval",
+        hours=2,
+        id="reddit_auto",
         max_instances=1,
         coalesce=True,
         replace_existing=True,
