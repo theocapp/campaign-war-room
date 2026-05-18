@@ -105,6 +105,10 @@ def rematch_progress():
 
 @router.delete("/{frame_id}/mentions/{source_item_id}")
 def remove_mention(frame_id: int, source_item_id: int, db: Session = Depends(get_db)):
+    """Remove a frame mention. Deletes both the legacy NarrativeFrameMention
+    row AND the cluster-native FrameClusterMatch row for the article's
+    cluster, so analytics reflects the change immediately."""
+    from app.models import FrameClusterMatch, SourceItem
     mention = (
         db.query(NarrativeFrameMention)
         .filter_by(frame_id=frame_id, source_item_id=source_item_id)
@@ -112,5 +116,16 @@ def remove_mention(frame_id: int, source_item_id: int, db: Session = Depends(get
     )
     if mention:
         db.delete(mention)
-        db.commit()
+
+    # Find the cluster id and drop the cluster-native row too. We delete the
+    # whole frame-cluster pair — there is no per-article granularity at the
+    # cluster level, so the user's intent ("this article shouldn't be tagged
+    # with this frame") expands to "this story shouldn't be tagged."
+    item = db.query(SourceItem).filter_by(id=source_item_id).first()
+    if item and item.story_cluster_id:
+        db.query(FrameClusterMatch).filter_by(
+            frame_id=frame_id, story_cluster_id=item.story_cluster_id
+        ).delete()
+
+    db.commit()
     return {"ok": True}

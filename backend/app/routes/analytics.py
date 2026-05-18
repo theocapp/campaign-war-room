@@ -1,13 +1,44 @@
+"""Analytics endpoints — cluster-native (Phase C).
+
+All queries read from `frame_cluster_matches` and `story_clusters`. The legacy
+`narrative_frame_mentions` table is no longer touched by analytics; one wire
+story syndicated across N outlets contributes one cluster row, not N.
+
+Reach is intentionally NOT cluster-deduped — it is summed across every member
+article's outlet, so a wire story carried by 5 major papers has 5× the reach
+of one blog post. The field names exposed on the API (`mention_count`,
+`mentions_this_week`, etc.) are unchanged so the frontend keeps working; the
+semantics have shifted from "article mention" to "story cluster" but each
+cluster equals one story.
+"""
 from datetime import datetime, timedelta, date
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import String, case, func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import CampaignConfig, NarrativeFrame, NarrativeFrameMention, Outlet, RssFeed, SourceItem
+from app.models import (
+    CampaignConfig,
+    FrameClusterMatch,
+    NarrativeFrame,
+    Outlet,
+    RssFeed,
+    SourceItem,
+    StoryCluster,
+)
 
 router = APIRouter()
+
+
+# Weight used everywhere for "reach":
+#   monthly_visitors × 0.003 (≈ 0.3% of monthly UVs see any single article)
+#   fallback to authority_score / 10 when monthly_visitors is unknown.
+def _reach_weight():
+    return case(
+        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * 0.003),
+        else_=func.coalesce(Outlet.authority_score, 5) / 10.0,
+    )
 
 
 @router.get("/frames/{frame_id}/timeseries")
@@ -17,42 +48,58 @@ def frame_timeseries(
     days: int = Query(0, ge=0, le=1825),
     db: Session = Depends(get_db),
 ):
+    """Day-by-day cluster counts + weighted reach for a frame.
+
+    `count` is the number of clusters first attached to this frame on each day
+    (no double-counting of wire syndication). `weighted_reach` is summed over
+    every member article's outlet — wire syndication intentionally counts here.
     """
-    Day-by-day mention counts bucketed by article publish date.
-    days=0 means all time.
-    """
-    # Count distinct story clusters per day (unique stories) AND sum outlet
-    # authority weights (reach). Unique stories dedup wire coverage; reach does
-    # NOT dedup — a wire story in 5 major papers has 5× the reach of one blog.
-    cluster_key = func.coalesce(SourceItem.story_cluster_id, func.cast(SourceItem.id, String))
-    # Weight: monthly_visitors * 0.003 when available, else authority_score / 10.
-    reach_weight = case(
-        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * 0.003),
-        else_=func.coalesce(Outlet.authority_score, 5) / 10.0,
+    # 1) Clusters per day, bucketed by FrameClusterMatch.first_seen_at — the
+    #    day this frame first attached to the cluster.
+    fcm_q = (
+        db.query(
+            func.date(FrameClusterMatch.first_seen_at).label("day"),
+            func.count(FrameClusterMatch.id).label("count"),
+        )
+        .filter(FrameClusterMatch.frame_id == frame_id)
     )
-    q = (
+    if days > 0:
+        fcm_q = fcm_q.filter(
+            FrameClusterMatch.first_seen_at >= datetime.utcnow() - timedelta(days=days)
+        )
+    cluster_rows = fcm_q.group_by("day").order_by("day").all()
+
+    # 2) Reach per day — sum reach_weight over every SourceItem whose cluster
+    #    matches this frame. Reach is NOT cluster-deduped.
+    reach_q = (
         db.query(
             func.date(SourceItem.published_at).label("day"),
-            func.count(func.distinct(cluster_key)).label("count"),
-            func.round(func.sum(reach_weight), 1).label("weighted_reach"),
+            func.round(func.sum(_reach_weight()), 1).label("weighted_reach"),
         )
-        .select_from(NarrativeFrameMention)
-        .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
         .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
         .filter(
-            NarrativeFrameMention.frame_id == frame_id,
+            FrameClusterMatch.frame_id == frame_id,
             SourceItem.published_at.isnot(None),
         )
     )
     if days > 0:
-        q = q.filter(SourceItem.published_at >= datetime.utcnow() - timedelta(days=days))
-    rows = q.group_by("day").order_by("day").all()
+        reach_q = reach_q.filter(
+            SourceItem.published_at >= datetime.utcnow() - timedelta(days=days)
+        )
+    reach_rows = reach_q.group_by("day").order_by("day").all()
 
-    # Fill in zeros for every day in the range so the chart has no gaps.
-    by_date: dict[str, dict] = {str(r.day): {"count": r.count, "weighted_reach": float(r.weighted_reach or 0)} for r in rows}
+    # Merge into a single series keyed by date.
+    counts_by_date = {str(r.day): r.count for r in cluster_rows}
+    reach_by_date = {str(r.day): float(r.weighted_reach or 0) for r in reach_rows}
+
+    # Fill gaps so the chart has no holes.
     today = date.today()
-    if rows:
-        start = date.fromisoformat(str(rows[0].day))
+    all_dates = set(counts_by_date) | set(reach_by_date)
+    if all_dates:
+        start = min(date.fromisoformat(d) for d in all_dates)
     elif days > 0:
         start = today - timedelta(days=days - 1)
     else:
@@ -61,8 +108,11 @@ def frame_timeseries(
     d = start
     while d <= today:
         day_str = str(d)
-        entry = by_date.get(day_str, {"count": 0, "weighted_reach": 0.0})
-        series.append({"date": day_str, "count": entry["count"], "weighted_reach": entry["weighted_reach"]})
+        series.append({
+            "date": day_str,
+            "count": counts_by_date.get(day_str, 0),
+            "weighted_reach": reach_by_date.get(day_str, 0.0),
+        })
         d += timedelta(days=1)
 
     return {"frame_id": frame_id, "bucket": bucket, "days": days, "series": series}
@@ -74,40 +124,29 @@ def frame_share_of_voice(
     days: int = Query(7, ge=1, le=90),
     db: Session = Depends(get_db),
 ):
-    """Candidate vs opponent vs neutral share of articles mentioning this frame."""
+    """Candidate vs opponent vs neutral share of clusters mentioning this frame.
+
+    Each matched cluster contributes one vote. The cluster's "voice" is the
+    source_owner_type of its representative article. Future work could
+    aggregate across all member articles; for now, representative is the
+    single source of truth and matches the UI's "this cluster is from X" model.
+    """
     cutoff = datetime.utcnow() - timedelta(days=days)
 
-    mentions = (
-        db.query(NarrativeFrameMention)
-        .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+    rows = (
+        db.query(SourceItem.source_owner_type)
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.id == StoryCluster.representative_source_item_id)
         .filter(
-            NarrativeFrameMention.frame_id == frame_id,
-            SourceItem.published_at >= cutoff,
-            SourceItem.published_at.isnot(None),
+            FrameClusterMatch.frame_id == frame_id,
+            FrameClusterMatch.first_seen_at >= cutoff,
         )
         .all()
     )
 
-    if not mentions:
-        return {"frame_id": frame_id, "days": days, "total": 0, "candidate": 0, "opponent": 0, "neutral": 0}
-
-    source_ids = [m.source_item_id for m in mentions]
-    items = (
-        db.query(SourceItem.id, SourceItem.source_owner_type, SourceItem.story_cluster_id)
-        .filter(SourceItem.id.in_(source_ids))
-        .all()
-    )
-
-    # Deduplicate by story cluster — a single wire story across 5 outlets should
-    # contribute one vote, not five. Items without a cluster id fall back to the
-    # source id so each still counts once.
     counts = {"candidate": 0, "opponent": 0, "neutral": 0}
-    seen_clusters: set[str] = set()
-    for sid, owner, cluster in items:
-        key = cluster or f"source-{sid}"
-        if key in seen_clusters:
-            continue
-        seen_clusters.add(key)
+    for (owner,) in rows:
         owner = owner or "unclear"
         if owner in ("candidate", "campaign"):
             counts["candidate"] += 1
@@ -116,7 +155,7 @@ def frame_share_of_voice(
         else:
             counts["neutral"] += 1
 
-    total = len(seen_clusters)
+    total = sum(counts.values())
     if total == 0:
         return {"frame_id": frame_id, "days": days, "total": 0, "candidate": 0, "opponent": 0, "neutral": 0}
     return {
@@ -142,9 +181,11 @@ def get_monitoring_start_date(db: Session = Depends(get_db)):
 
 @router.get("/analytics/spikes")
 def spike_report(db: Session = Depends(get_db)):
-    """
-    Returns frames where the last 24h mention count is at least 2× the 7d daily average
-    and the absolute count is >= 3. Used to surface urgency on the Briefing page.
+    """Frames whose last-24h weighted reach is ≥ 2× the 7-day daily average.
+
+    Reach is summed across all member articles of every matched cluster, so
+    a wire story carried by major papers is correctly weighted against a
+    burst of low-authority blog posts.
     """
     now = datetime.utcnow()
     cutoff_24h = now - timedelta(hours=24)
@@ -152,37 +193,10 @@ def spike_report(db: Session = Depends(get_db)):
 
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()  # noqa: E712
 
-    # Spike detection uses weighted reach: a burst of low-authority blog posts
-    # shouldn't trigger the same alert as equivalent coverage in major papers.
-    reach_weight = func.case(
-        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * 0.003),
-        else_=func.coalesce(Outlet.authority_score, 5) / 10.0,
-    )
-
     spikes = []
     for frame in frames:
-        reach_24h = (
-            db.query(func.round(func.sum(reach_weight), 2))
-            .select_from(NarrativeFrameMention)
-            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
-            .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
-            .filter(
-                NarrativeFrameMention.frame_id == frame.id,
-                NarrativeFrameMention.created_at >= cutoff_24h,
-            )
-            .scalar() or 0
-        )
-        reach_7d = (
-            db.query(func.round(func.sum(reach_weight), 2))
-            .select_from(NarrativeFrameMention)
-            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
-            .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
-            .filter(
-                NarrativeFrameMention.frame_id == frame.id,
-                NarrativeFrameMention.created_at >= cutoff_7d,
-            )
-            .scalar() or 0
-        )
+        reach_24h = _frame_reach_in_window(db, frame.id, cutoff_24h)
+        reach_7d = _frame_reach_in_window(db, frame.id, cutoff_7d)
 
         daily_avg_7d = reach_7d / 7.0
         if reach_24h >= 1.5 and daily_avg_7d > 0 and reach_24h >= daily_avg_7d * 2:
@@ -197,3 +211,23 @@ def spike_report(db: Session = Depends(get_db)):
 
     spikes.sort(key=lambda x: x["ratio"], reverse=True)
     return {"spikes": spikes}
+
+
+def _frame_reach_in_window(db: Session, frame_id: int, cutoff: datetime) -> float:
+    """Sum reach_weight over every member article (any cluster matched to this
+    frame) that arrived after `cutoff`. Bucket by FrameClusterMatch.first_seen_at
+    so a cluster that's been attached to the frame for months doesn't keep
+    re-triggering spikes on new article evidence."""
+    val = (
+        db.query(func.round(func.sum(_reach_weight()), 2))
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
+        .filter(
+            FrameClusterMatch.frame_id == frame_id,
+            FrameClusterMatch.first_seen_at >= cutoff,
+        )
+        .scalar()
+    )
+    return float(val or 0)
