@@ -215,20 +215,50 @@ FROM narrative_frame_mentions m
 JOIN source_items s ON s.id = m.source_item_id
 JOIN story_clusters c
   ON c.id = COALESCE(s.story_cluster_id, 'source-' || s.id)
+WHERE COALESCE(s.published_at, s.ingested_at) >= :cutoff
 GROUP BY m.frame_id, cluster_id
 ON CONFLICT (frame_id, story_cluster_id) DO UPDATE SET
   confidence = MAX(excluded.confidence, frame_cluster_matches.confidence),
   last_seen_at = MAX(excluded.last_seen_at, frame_cluster_matches.last_seen_at)
 """
 
+# Pre-Phase 3.5 LLM runs lacked the keyword gate and JSON repair logic, so
+# matches from articles published before the campaign window are unreliable.
+# This cutoff keeps the backfill to campaign-era articles only.
+_DEFAULT_CAMPAIGN_CUTOFF = "2024-01-01"
+
+
+def _campaign_cutoff(db: Session) -> str:
+    """Return ISO date string for the earliest article we'll backfill matches for.
+
+    Uses CampaignConfig.monitoring_start_date if set; falls back to
+    _DEFAULT_CAMPAIGN_CUTOFF so re-runs stay idempotent even without config.
+    """
+    config = db.query(CampaignConfig).first()
+    if config:
+        # monitoring_start_date may not exist on older configs — guard with getattr
+        start = getattr(config, "monitoring_start_date", None)
+        if start:
+            if isinstance(start, datetime):
+                return start.date().isoformat()
+            return str(start)[:10]
+    return _DEFAULT_CAMPAIGN_CUTOFF
+
 
 def _backfill_frame_matches(db: Session) -> int:
-    """Pre-aggregated SELECT + ON CONFLICT DO UPDATE. Idempotent."""
+    """Pre-aggregated SELECT + ON CONFLICT DO UPDATE. Idempotent.
+
+    Only backfills matches from articles published on or after the campaign
+    cutoff date — articles published before that were analyzed by older LLM
+    runs that lacked quality guards and produced unreliable frame matches.
+    """
+    cutoff = _campaign_cutoff(db)
+    logger.info("pass 3: backfilling frame matches with cutoff=%s", cutoff)
     before = db.query(FrameClusterMatch).count()
-    db.execute(text(_BACKFILL_FCM_SQL))
+    db.execute(text(_BACKFILL_FCM_SQL), {"cutoff": cutoff})
     db.commit()
     after = db.query(FrameClusterMatch).count()
-    logger.info("pass 3 done: frame_cluster_matches rows %d -> %d", before, after)
+    logger.info("pass 3 done: frame_cluster_matches rows %d -> %d (cutoff=%s)", before, after, cutoff)
     return after - before
 
 
@@ -236,8 +266,14 @@ def _backfill_frame_matches(db: Session) -> int:
 
 def _backfill_opponent_activities(db: Session) -> int:
     """Iterate legacy OpponentActivity rows, compute fingerprint, UPSERT into
-    cluster_opponent_activities keyed by (opponent_id, cluster_id, fingerprint)."""
+    cluster_opponent_activities keyed by (opponent_id, cluster_id, fingerprint).
+
+    Applies the same campaign cutoff as Pass 3 to avoid promoting bad matches
+    from pre-campaign articles.
+    """
     before = db.query(ClusterOpponentActivity).count()
+    cutoff = _campaign_cutoff(db)
+    logger.info("pass 4: backfilling opponent activities with cutoff=%s", cutoff)
 
     rows = db.execute(
         text(
@@ -249,8 +285,10 @@ def _backfill_opponent_activities(db: Session) -> int:
             FROM opponent_activities oa
             JOIN source_items s ON s.id = oa.source_item_id
             JOIN story_clusters c ON c.id = COALESCE(s.story_cluster_id, 'source-' || s.id)
+            WHERE COALESCE(s.published_at, s.ingested_at) >= :cutoff
             """
-        )
+        ),
+        {"cutoff": cutoff},
     ).fetchall()
     logger.info("pass 4: %d legacy opponent_activity rows to backfill", len(rows))
 
