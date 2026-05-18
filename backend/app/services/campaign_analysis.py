@@ -195,6 +195,31 @@ def analyze(db: Session, item: SourceItem) -> dict:
     return analyze_with_frames(db, item, frames=None)
 
 
+def analyze_cluster(
+    db: Session,
+    cluster,  # StoryCluster (avoid circular import at module load)
+    frames: list[NarrativeFrame] | None = None,
+) -> dict:
+    """Cluster-level LLM analysis.
+
+    Phase A defines this so Phase D's retrigger path has the entry point ready;
+    ingestion does NOT call this yet (per-article analyze_with_frames is still
+    the per-article LLM call to preserve dual-write parity).
+
+    Resolves the cluster's analysis anchor (or representative on the first
+    run), then delegates to analyze_with_frames on that one article. Future
+    work can enrich the prompt with sibling article snippets; today we keep
+    the contract identical to the per-article path so callers can swap in.
+    """
+    anchor_id = cluster.analysis_anchor_source_item_id or cluster.representative_source_item_id
+    if not anchor_id:
+        return _fallback_result()
+    anchor = db.query(SourceItem).filter_by(id=anchor_id).first()
+    if not anchor:
+        return _fallback_result()
+    return analyze_with_frames(db, anchor, frames=frames)
+
+
 def analyze_with_frames(
     db: Session,
     item: SourceItem,

@@ -165,6 +165,27 @@ def _migrate(conn) -> None:
     if "extracted_text" not in existing_nfm:
         conn.execute(text("ALTER TABLE narrative_frame_mentions ADD COLUMN extracted_text TEXT"))
 
+    # ── Cluster-native tables (Phase A) ───────────────────────────────────────
+    # The tables themselves are created by Base.metadata.create_all (called
+    # before _migrate). This block adds the supporting indexes that aren't
+    # expressed in the ORM definitions.
+    cluster_tables_exist = conn.execute(text(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='story_clusters'"
+    )).scalar()
+    if cluster_tables_exist:
+        for stmt in (
+            "CREATE INDEX IF NOT EXISTS ix_story_clusters_last_seen_at ON story_clusters(last_seen_at)",
+            "CREATE INDEX IF NOT EXISTS ix_story_clusters_first_seen_at ON story_clusters(first_seen_at)",
+            "CREATE INDEX IF NOT EXISTS ix_story_clusters_representative ON story_clusters(representative_source_item_id)",
+            "CREATE INDEX IF NOT EXISTS ix_story_clusters_simhash_lastseen ON story_clusters(simhash_64, last_seen_at)",
+            "CREATE INDEX IF NOT EXISTS ix_fcm_frame_id ON frame_cluster_matches(frame_id)",
+            "CREATE INDEX IF NOT EXISTS ix_fcm_cluster_id ON frame_cluster_matches(story_cluster_id)",
+            "CREATE INDEX IF NOT EXISTS ix_fcm_first_seen ON frame_cluster_matches(first_seen_at)",
+            "CREATE INDEX IF NOT EXISTS ix_coa_opponent_id ON cluster_opponent_activities(opponent_id)",
+            "CREATE INDEX IF NOT EXISTS ix_coa_cluster_id ON cluster_opponent_activities(story_cluster_id)",
+        ):
+            conn.execute(text(stmt))
+
     # Note: `narratives`, `narrative_mentions`, `candidate_message_libraries`,
     # and `candidate_narratives` tables were created here by earlier migrations.
     # Their model classes were dropped during the narrative-frames pivot, so

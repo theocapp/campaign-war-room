@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.db import Base
 
@@ -307,3 +307,81 @@ class NarrativeFrameMention(Base):
 
     frame = relationship("NarrativeFrame", back_populates="mentions")
     source_item = relationship("SourceItem")
+
+
+# ─── Cluster-native tables (Phase A: schema + dual-write) ─────────────────────
+# A StoryCluster is a temporal aggregation unit — "what happened" across N
+# articles. FrameClusterMatch / ClusterOpponentActivity attach interpretation
+# events to the cluster rather than the article. Phase A populates these in
+# parallel with the legacy NarrativeFrameMention / OpponentActivity tables;
+# analytics still reads legacy until Phase C.
+
+class StoryCluster(Base):
+    __tablename__ = "story_clusters"
+    # Matches SourceItem.story_cluster_id format ("source-{N}") so legacy and
+    # cluster-native rows can be joined without translation.
+    id = Column(String, primary_key=True)
+    # Provenance — first article that ever attached to this cluster.
+    seed_source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
+    # UI-facing best representative; recomputed on every attach.
+    representative_source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
+    # Frozen at each LLM run; the article whose text grounded the most recent
+    # cluster-level analysis. Stays put on plain attaches.
+    analysis_anchor_source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=True)
+    analysis_anchor_updated_at = Column(DateTime, nullable=True)
+    last_llm_analysis_at = Column(DateTime, nullable=True)
+    title_representative = Column(String, nullable=True)
+    summary_representative = Column(Text, nullable=True)
+    simhash_64 = Column(String, nullable=True)  # hex-encoded 64-bit SimHash of representative body
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    article_count = Column(Integer, default=1)
+    outlet_count = Column(Integer, default=1)
+    source_diversity_score = Column(Float, default=0.0)
+    known_entities = Column(Text, nullable=True)  # JSON list of normalized entity strings
+    dormant_since = Column(DateTime, nullable=True)
+    # Cached JSON of the most recent cluster-level LLM extraction so rematch
+    # can skip re-reading article text.
+    structured_extraction = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FrameClusterMatch(Base):
+    __tablename__ = "frame_cluster_matches"
+    __table_args__ = (
+        UniqueConstraint("frame_id", "story_cluster_id", name="uq_frame_cluster"),
+    )
+    id = Column(Integer, primary_key=True)
+    frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=False)
+    story_cluster_id = Column(String, ForeignKey("story_clusters.id"), nullable=False)
+    confidence = Column(Integer, default=75)
+    matched_by = Column(String, default="llm")  # llm | human
+    # cluster_runtime | cluster_backfill | cluster_retrigger
+    source_type = Column(String, default="cluster_runtime")
+    # Timestamp of the LLM run that produced this match. The representative
+    # article is resolved dynamically via StoryCluster.representative_source_item_id.
+    representative_snapshot_ts = Column(DateTime, nullable=True)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ClusterOpponentActivity(Base):
+    __tablename__ = "cluster_opponent_activities"
+    __table_args__ = (
+        UniqueConstraint(
+            "opponent_id", "story_cluster_id", "fingerprint",
+            name="uq_cluster_opponent_fp",
+        ),
+    )
+    id = Column(Integer, primary_key=True)
+    opponent_id = Column(Integer, ForeignKey("opponents.id"), nullable=False)
+    story_cluster_id = Column(String, ForeignKey("story_clusters.id"), nullable=False)
+    claim = Column(Text, nullable=True)
+    attack = Column(Text, nullable=True)
+    promise = Column(Text, nullable=True)
+    # Hash of normalized quote text — dedup key within (opponent, cluster).
+    fingerprint = Column(String, nullable=False)
+    source_type = Column(String, default="cluster_runtime")
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

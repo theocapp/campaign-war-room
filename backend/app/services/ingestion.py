@@ -424,13 +424,75 @@ def _persist_frame_matches(
             ))
 
 
+def _persist_cluster_native(
+    db: Session,
+    item: SourceItem,
+    cluster,  # StoryCluster
+    frames: list[NarrativeFrame],
+    attacks: list[dict],
+    matched_indices: list[int],
+) -> None:
+    """Phase A dual-write: mirror legacy NarrativeFrameMention / OpponentActivity
+    inserts into the cluster-native tables. Idempotent via UPSERT helpers.
+
+    Reads its inputs from the same LLM payload the legacy persisters consumed
+    so the two paths cannot disagree on what was extracted from this article.
+    """
+    from app.services import cluster_writes
+
+    # Frame matches → FrameClusterMatch (1-indexed)
+    for idx in matched_indices:
+        if not isinstance(idx, int) or idx < 1 or idx > len(frames):
+            continue
+        frame = frames[idx - 1]
+        cluster_writes.upsert_frame_match(
+            db,
+            frame_id=frame.id,
+            cluster_id=cluster.id,
+            confidence=75,
+            source_type="cluster_runtime",
+            matched_by="llm",
+            representative_snapshot_ts=datetime.utcnow(),
+        )
+
+    # Opponent attacks → ClusterOpponentActivity
+    if attacks:
+        opponents = {o.name.strip().lower(): o for o in db.query(Opponent).all()}
+        for entry in attacks:
+            opp = opponents.get((entry.get("opponent_name") or "").strip().lower())
+            if not opp:
+                continue
+            clean_text = strip_html_to_text(entry.get("text") or "")[:500]
+            if not clean_text:
+                continue
+            atype = entry.get("type")
+            cluster_writes.upsert_opponent_activity(
+                db,
+                opponent_id=opp.id,
+                cluster_id=cluster.id,
+                claim=clean_text if atype == "claim" else None,
+                attack=clean_text if atype == "attack" else None,
+                promise=clean_text[:300] if atype == "promise" else None,
+                source_type="cluster_runtime",
+            )
+
+
 def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     db.add(item)
     db.flush()
     ownership = classify_source_owner(db, item)
     item.source_owner_type = ownership.source_owner_type
     item.source_owner_confidence = ownership.source_owner_confidence
-    story_clustering.assign_story_cluster(db, item)
+    # v2 assigns item.story_cluster_id AND ensures a StoryCluster row exists.
+    # Phase A logs the retrigger reason but does not act on it — per-article
+    # LLM still runs unconditionally below.
+    cluster, _is_new, retrigger = story_clustering.assign_story_cluster_v2(db, item)
+    if retrigger:
+        logger.info(
+            "ingestion: cluster retrigger reason=%s (not acted on in Phase A) "
+            "item=%d cluster=%s",
+            retrigger, item.id, cluster.id,
+        )
 
     # Link to outlet by URL domain so authority-weighted reach is correct.
     from app.services.outlet_linking import build_outlet_index, link_outlet_to_item
@@ -527,6 +589,14 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         if analysis["relevant"]:
             _persist_opponent_attacks(db, item, analysis.get("opponent_attacks") or [])
             _persist_frame_matches(db, item, active_frames, analysis.get("frame_matches") or [])
+            # Dual-write cluster-native rows alongside the legacy mentions.
+            # Analytics still reads legacy until Phase C; this populates the
+            # new tables so Phase B's backfill + Phase C's flip have data.
+            _persist_cluster_native(
+                db, item, cluster, active_frames,
+                analysis.get("opponent_attacks") or [],
+                analysis.get("frame_matches") or [],
+            )
             db.commit()
 
     item.priority_score = _compute_priority_score(db, item)
