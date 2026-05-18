@@ -518,9 +518,9 @@ Return ONLY a JSON array, no other text:
 
 def match_article_to_frames(db: Session, item: SourceItem) -> list[int]:
     """
-    Ask Groq which active narrative frames this article belongs to, and extract
-    the specific claim/quote from the article for each matched frame.
-    Writes NarrativeFrameMention rows. Returns list of matched frame IDs.
+    Ask Groq which active narrative frames this article belongs to. Writes
+    a FrameClusterMatch row (UPSERT) for the article's cluster on every
+    matched frame. Returns the list of matched frame IDs.
     """
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
     if not frames:
@@ -632,13 +632,15 @@ Example: [{{"frame": 2, "snippet": "Bresnahan bought and sold stocks in healthca
         matched_frame_ids = []
         seen_frame_ids: set[int] = set()  # guard against LLM returning same frame twice
         for entry in matched_items:
-            # Support both old format (plain int) and new format (dict with frame + snippet)
+            # Accept either a plain int (old LLM output shape) or a dict with
+            # a "frame" key (newer shape). The dict shape also carries a
+            # "snippet" field that the legacy NarrativeFrameMention used to
+            # store; cluster-native FrameClusterMatch has no per-article
+            # snippet so we just take the frame index.
             if isinstance(entry, int):
                 idx = entry
-                snippet = None
             elif isinstance(entry, dict):
                 idx = entry.get("frame")
-                snippet = (entry.get("snippet") or "").strip() or None
             else:
                 continue
 
@@ -660,30 +662,14 @@ Example: [{{"frame": 2, "snippet": "Bresnahan bought and sold stocks in healthca
                 )
                 continue
 
-            # Only keep the quote if it can be verified against the article body.
-            # Hallucinated quotes are discarded; the frame match itself is kept.
-            verified_snippet = _validate_snippet(snippet, item) if snippet else None
-
-            existing = (
-                db.query(NarrativeFrameMention)
-                .filter_by(frame_id=frame.id, source_item_id=item.id)
-                .first()
-            )
-            if existing:
-                # Update snippet only if we now have a verified one and didn't before
-                if verified_snippet and not existing.extracted_text:
-                    existing.extracted_text = verified_snippet
-            else:
-                db.add(NarrativeFrameMention(
-                    frame_id=frame.id,
-                    source_item_id=item.id,
-                    confidence=75,
-                    matched_by="llm",
-                    extracted_text=verified_snippet,
-                ))
-
-            # Cluster-native dual-write — UPSERT a FrameClusterMatch keyed on
-            # the item's cluster. This is what analytics now reads (Phase C).
+            # Cluster-native only (Phase D). UPSERT a FrameClusterMatch keyed
+            # on the item's cluster. The per-article snippet (extracted_text)
+            # that the legacy NarrativeFrameMention stored has no analogue at
+            # the cluster level — clusters have many articles, and the snippet
+            # was always article-scoped — so it disappears with the legacy
+            # write. The snippet validation logic remains available for
+            # diagnostic logging if future work re-introduces per-article
+            # provenance on a side table.
             if item.story_cluster_id:
                 from app.services import cluster_writes
                 cluster_writes.upsert_frame_match(
@@ -820,13 +806,14 @@ def audit_duplicates(db: Session) -> dict:
     if len(frames) < 2:
         return {"merged": 0, "groups": []}
 
-    # Build frame list with mention counts so the LLM can see what each covers
+    # Build frame list with cluster-match counts so the LLM can see what each covers
+    from app.models import FrameClusterMatch
     frame_lines = []
     counts: dict[int, int] = {}
     for f in frames:
         count = (
-            db.query(func.count(NarrativeFrameMention.id))
-            .filter(NarrativeFrameMention.frame_id == f.id)
+            db.query(func.count(FrameClusterMatch.id))
+            .filter(FrameClusterMatch.frame_id == f.id)
             .scalar()
         )
         counts[f.id] = count
@@ -898,7 +885,10 @@ Each number is a frame ID from the list above. Do not include frames that have n
 
         for dup in to_delete:
             mention_count = counts.get(dup.id, 0)
-            db.query(NarrativeFrameMention).filter(NarrativeFrameMention.frame_id == dup.id).delete()
+            # Cluster-native FrameClusterMatch rows pointing at the merged
+            # frame are the analytics-relevant ones; sweep them up so the
+            # surviving frame is the only carrier post-merge.
+            db.query(FrameClusterMatch).filter(FrameClusterMatch.frame_id == dup.id).delete()
             db.delete(dup)
             group_info["deleted"].append({"id": dup.id, "name": dup.name, "mentions": mention_count})
             merged += 1

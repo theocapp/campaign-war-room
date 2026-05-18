@@ -13,10 +13,9 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.models import NarrativeFrame, NarrativeFrameMention, Opponent, OpponentActivity, SourceItem
+from app.models import NarrativeFrame, Opponent, SourceItem
 from app.services import campaign_analysis, intelligence, narrative_frames, race_relevance, scoring, story_clustering
 from app.services.campaign_analysis import framing_to_action
-from app.services.opponent_analysis import _activity_fingerprint
 from app.services.snapshots import build_source_summary
 from app.services.source_ownership import classify_source_owner
 from app.services.text_utils import strip_html_to_text
@@ -353,77 +352,6 @@ def _compute_priority_score(db: Session, item: SourceItem) -> int:
     return max(0, score)
 
 
-def _persist_opponent_attacks(db: Session, item: SourceItem, attacks: list[dict]) -> int:
-    """Insert OpponentActivity rows for LLM-extracted attacks.
-
-    Matches opponent_name against known Opponent rows by normalized name.
-    Dedupes against existing rows on this source via the same fingerprint
-    helper used by the regex extractor, so re-analysis doesn't double-insert.
-    """
-    if not attacks:
-        return 0
-    opponents = db.query(Opponent).all()
-    by_normalized = {o.name.strip().lower(): o for o in opponents}
-    inserted = 0
-    for entry in attacks:
-        opponent = by_normalized.get(entry["opponent_name"].strip().lower())
-        if not opponent:
-            continue
-        clean_text = strip_html_to_text(entry["text"])[:500]
-        if not clean_text:
-            continue
-        # Build an activity dict matching OpponentActivity columns so the
-        # existing fingerprint helper works against it.
-        attack_type = entry["type"]
-        act_data = {
-            "claim": clean_text if attack_type == "claim" else None,
-            "attack": clean_text if attack_type == "attack" else None,
-            "promise": clean_text[:300] if attack_type == "promise" else None,
-        }
-        fp = _activity_fingerprint(act_data)
-        existing_fps = {
-            _activity_fingerprint({"attack": r.attack, "claim": r.claim, "promise": r.promise})
-            for r in db.query(OpponentActivity).filter(
-                OpponentActivity.opponent_id == opponent.id,
-                OpponentActivity.source_item_id == item.id,
-            )
-        }
-        if fp in existing_fps:
-            continue
-        db.add(OpponentActivity(
-            opponent_id=opponent.id,
-            source_item_id=item.id,
-            **act_data,
-        ))
-        inserted += 1
-    return inserted
-
-
-def _persist_frame_matches(
-    db: Session,
-    item: SourceItem,
-    frames: list[NarrativeFrame],
-    matched_indices: list[int],
-) -> None:
-    """Create NarrativeFrameMention rows for frames the LLM matched (1-indexed)."""
-    for idx in matched_indices:
-        if not isinstance(idx, int) or idx < 1 or idx > len(frames):
-            continue
-        frame = frames[idx - 1]
-        existing = (
-            db.query(NarrativeFrameMention)
-            .filter_by(frame_id=frame.id, source_item_id=item.id)
-            .first()
-        )
-        if not existing:
-            db.add(NarrativeFrameMention(
-                frame_id=frame.id,
-                source_item_id=item.id,
-                confidence=75,
-                matched_by="llm",
-            ))
-
-
 def _persist_cluster_native(
     db: Session,
     item: SourceItem,
@@ -587,11 +515,10 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         db.refresh(item)
 
         if analysis["relevant"]:
-            _persist_opponent_attacks(db, item, analysis.get("opponent_attacks") or [])
-            _persist_frame_matches(db, item, active_frames, analysis.get("frame_matches") or [])
-            # Dual-write cluster-native rows alongside the legacy mentions.
-            # Analytics still reads legacy until Phase C; this populates the
-            # new tables so Phase B's backfill + Phase C's flip have data.
+            # Cluster-native only (Phase D). The legacy NarrativeFrameMention
+            # and OpponentActivity tables are no longer written by ingestion;
+            # historical data remains in place for rollback / drill-down until
+            # a follow-up cleanup PR drops them.
             _persist_cluster_native(
                 db, item, cluster, active_frames,
                 analysis.get("opponent_attacks") or [],

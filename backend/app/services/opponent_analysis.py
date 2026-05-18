@@ -1,13 +1,15 @@
 """
 Opponent analysis service.
 
-Extracts opponent claims, attacks, and promises at the sentence level.
-Deduplicates against existing OpponentActivity rows.
+Extracts opponent claims, attacks, and promises at the sentence level and
+writes them cluster-natively (Phase D). Dedupes against existing
+ClusterOpponentActivity rows via the (opponent_id, story_cluster_id,
+fingerprint) UNIQUE constraint.
 """
 import re
 from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
-from app.models import CampaignConfig, Opponent, OpponentActivity, SourceItem
+from app.models import CampaignConfig, Opponent, SourceItem
 from app.services.text_utils import strip_html_to_text
 
 if TYPE_CHECKING:
@@ -208,52 +210,47 @@ def _extract_activities(
     return unique
 
 
-def analyze_source_for_opponents(db: Session, source_item: SourceItem) -> list[OpponentActivity]:
+def analyze_source_for_opponents(db: Session, source_item: SourceItem) -> int:
+    """Run the regex-based opponent claim/attack/promise extractor against a
+    SourceItem and persist any new findings cluster-natively.
+
+    Phase D: this writes only to ClusterOpponentActivity, keyed by the
+    article's story_cluster_id. The UPSERT helper dedupes against existing
+    fingerprints within (opponent, cluster). Returns the number of rows
+    inserted or refreshed.
+    """
     from app.services.llm_provider import get_provider
+    from app.services import cluster_writes
+
+    cluster_id = source_item.story_cluster_id
+    if not cluster_id:
+        # Without a cluster id we have nowhere cluster-native to put findings.
+        # The cluster assignment happens during ingestion, so this should only
+        # occur if a caller passes in a brand-new, unsaved item.
+        return 0
+
     opponents = db.query(Opponent).all()
     full_text = f"{source_item.title}. {source_item.raw_text or ''}"
-    created: list[OpponentActivity] = []
-
     campaign = db.query(CampaignConfig).first()
     candidate_name = campaign.candidate_name if campaign else ""
     llm = get_provider()
 
+    written = 0
     for opponent in opponents:
         activities = _extract_activities(full_text, opponent.name, candidate_name, llm)
         if not activities:
             continue
-
-        # Load all existing activities for this source+opponent in one query,
-        # then compare by normalized fingerprint.  This avoids the NULL-equality
-        # trap where (col == None) compiles to "col IS NULL" and matches any row
-        # whose column happens to be NULL — causing valid distinct activities to
-        # be incorrectly skipped.
-        existing_rows = (
-            db.query(OpponentActivity)
-            .filter(
-                OpponentActivity.opponent_id == opponent.id,
-                OpponentActivity.source_item_id == source_item.id,
-            )
-            .all()
-        )
-        seen_fingerprints: set[str] = {
-            _activity_fingerprint({"attack": r.attack, "claim": r.claim, "promise": r.promise})
-            for r in existing_rows
-        }
-
         for act_data in activities:
-            fp = _activity_fingerprint(act_data)
-            if fp in seen_fingerprints:
-                continue
-            seen_fingerprints.add(fp)
-
-            activity = OpponentActivity(
+            cluster_writes.upsert_opponent_activity(
+                db,
                 opponent_id=opponent.id,
-                source_item_id=source_item.id,
-                **act_data,
+                cluster_id=cluster_id,
+                claim=act_data.get("claim"),
+                attack=act_data.get("attack"),
+                promise=act_data.get("promise"),
+                source_type="cluster_runtime",
             )
-            db.add(activity)
-            created.append(activity)
+            written += 1
 
     db.commit()
-    return created
+    return written

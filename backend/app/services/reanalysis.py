@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import Issue, IssueMention, OpponentActivity, SourceItem
+from app.models import Issue, IssueMention, SourceItem
 from app.services import intelligence, issue_clustering, opponent_analysis, race_relevance, scoring, story_clustering
 from app.services.ingestion import _assess_extraction_quality, _compute_priority_score
 from app.services.snapshots import build_source_summary
@@ -211,7 +211,11 @@ def reanalyze_source(db: Session, item: SourceItem, dry_run: bool = False) -> di
             item.summary = build_source_summary(item)
     race_relevance.apply_relevance(db, item)
     _unlink_issue_mentions(db, item)
-    db.query(OpponentActivity).filter_by(source_item_id=item.id).delete()
+    # Legacy OpponentActivity is no longer written or cleaned on reanalysis
+    # (Phase D — legacy tables frozen for rollback). New opponent extractions
+    # land cluster-natively via opponent_analysis.analyze_source_for_opponents,
+    # which uses UPSERT semantics on (opponent, cluster, fingerprint) so
+    # reprocessing the same article doesn't create duplicates.
     db.flush()
 
     issue_names: list[str] = []
