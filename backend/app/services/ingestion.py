@@ -432,6 +432,40 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     item.source_owner_confidence = ownership.source_owner_confidence
     story_clustering.assign_story_cluster(db, item)
 
+    # Link to outlet by URL domain so authority-weighted reach is correct.
+    from app.services.outlet_linking import build_outlet_index, link_outlet_to_item
+    link_outlet_to_item(item, build_outlet_index(db))
+
+    # Cheap keyword pre-filter: drop obvious noise (no candidate/opponent/district
+    # mention AND very low keyword score) before paying for the LLM call.
+    prefilter = race_relevance.analyze_source_item(db, item)
+    no_political_signal = not (
+        prefilter.candidate_mentioned
+        or prefilter.opponent_mentioned
+        or prefilter.district_mentioned
+        or prefilter.priority_issue_mentioned
+    )
+    prefilter_threshold = int(os.environ.get("PREFILTER_THRESHOLD", "15"))
+    if no_political_signal and prefilter.race_relevance_score < prefilter_threshold:
+        logger.info(
+            "ingestion: prefilter dropped item=%d (score=%d, category=%s) — title=%r",
+            item.id, prefilter.race_relevance_score, prefilter.content_category,
+            (item.title or "")[:60],
+        )
+        item.race_relevance_score = prefilter.race_relevance_score
+        item.race_relevance_label = "irrelevant"
+        item.archived_as_irrelevant = True
+        item.actionability_label = "ignore"
+        item.content_category = prefilter.content_category or "irrelevant"
+        item.relevance_reasons = json.dumps(
+            (prefilter.relevance_reasons or []) + ["Prefilter: no political signal; LLM skipped"]
+        )
+        item.urgency = "low"
+        item.priority_score = 0
+        db.commit()
+        db.refresh(item)
+        return item
+
     # Fetch active frames once so we can pass them into the combined LLM call.
     active_frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
 
@@ -460,9 +494,23 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
             item.summary = build_source_summary(item)
 
         item.race_relevance_score = analysis["relevance_score"]
+        item.race_relevance_label = race_relevance._label(analysis["relevance_score"])
         item.archived_as_irrelevant = not analysis["relevant"]
         item.actionability_label = framing_to_action(analysis["framing"])
         item.sentiment = analysis.get("sentiment", "neutral")
+
+        # Cache the structured extraction so rematch can avoid re-reading article text.
+        try:
+            cacheable = {
+                k: analysis.get(k)
+                for k in (
+                    "one_sentence", "framing", "sentiment", "relevance_score",
+                    "relevant", "opponent_attacks", "reason",
+                )
+            }
+            item.structured_extraction = json.dumps(cacheable)
+        except Exception:
+            pass
 
         reason = (analysis.get("reason") or "").strip()
         if reason:
@@ -607,6 +655,7 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
     feed = feedparser.parse(raw if raw else feed_url)
     added_items: list[SourceItem] = []
     skipped = 0
+    _build_outlet_index_cache: dict = {}  # lazy-loaded once per feed, not per entry
 
     for entry in feed.entries[:50]:
         url = entry.get("link") or ""
@@ -630,6 +679,20 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
         source_author = _normalize_text(rss_author)[:200] or None
 
         inferred_type = "reference" if (not published and _is_reference_url(url)) else "news"
+
+        # For Google News feeds, each entry carries a <source url="publisher.com">
+        # element that feedparser exposes as entry.source.  Extract the publisher
+        # domain so we can attribute the article to the right outlet even though
+        # the stored source_url remains the Google News redirect (for dedup).
+        publisher_domain: str | None = None
+        entry_source = entry.get("source") or {}
+        if entry_source and "news.google.com" in feed_url:
+            src_href = entry_source.get("href") or ""
+            if src_href:
+                from urllib.parse import urlparse as _urlparse
+                import re as _re
+                publisher_domain = _re.sub(r"^www\.", "", _urlparse(src_href).netloc).lower() or None
+
         item = SourceItem(
             title=title,
             raw_text=raw_text,
@@ -639,6 +702,16 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
             published_at=published,
             source_author=source_author,
         )
+
+        # Resolve outlet before persisting so reach weighting is immediate.
+        if publisher_domain:
+            from app.services.outlet_linking import build_outlet_index as _build_idx
+            _oidx = _build_outlet_index_cache.get("cache") or _build_idx(db)
+            _build_outlet_index_cache["cache"] = _oidx
+            outlet_id = _oidx.get(publisher_domain)
+            if outlet_id:
+                item.outlet_id = outlet_id
+
         created = _create_and_analyze(db, item)
         added_items.append(created)
 

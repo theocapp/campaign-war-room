@@ -81,6 +81,7 @@ def _migrate(conn) -> None:
         "ingested_at": "DATETIME",
         "source_author": "TEXT",
         "sentiment": "TEXT",
+        "structured_extraction": "TEXT",
     }.items():
         if col not in existing_si:
             conn.execute(text(f"ALTER TABLE source_items ADD COLUMN {col} {col_type}"))
@@ -140,6 +141,15 @@ def _migrate(conn) -> None:
     if "outlet_id" not in existing_si2:
         conn.execute(text("ALTER TABLE source_items ADD COLUMN outlet_id INTEGER REFERENCES outlets(id)"))
 
+    # outlets: rss_url + districts columns (user-managed outlet catalog)
+    existing_out = {row[1] for row in conn.execute(text("PRAGMA table_info(outlets)"))}
+    if "rss_url" not in existing_out:
+        conn.execute(text("ALTER TABLE outlets ADD COLUMN rss_url TEXT"))
+    if "districts" not in existing_out:
+        conn.execute(text("ALTER TABLE outlets ADD COLUMN districts TEXT"))
+    if "monthly_visitors" not in existing_out:
+        conn.execute(text("ALTER TABLE outlets ADD COLUMN monthly_visitors INTEGER"))
+
     # manual_source_reminders table is created by metadata.create_all; no ALTER needed
     # source_packs / source_pack_items are created by metadata.create_all
     existing_im = {row[1] for row in conn.execute(text("PRAGMA table_info(issue_mentions)"))}
@@ -169,6 +179,8 @@ def init_db():
     with engine.connect() as conn:
         _migrate(conn)
     _phase0_backfill()
+    _repair_frame_data()
+    _backfill_outlet_links()
 
 
 def _phase0_backfill() -> None:
@@ -260,3 +272,17 @@ def _phase0_backfill() -> None:
                 db.flush()
                 db.delete(dup)
             db.commit()
+
+
+def _repair_frame_data() -> None:
+    """Clean hallucinated quotes and leaked prompt scaffolding from frame data."""
+    from app.services.narrative_frames import repair_frame_data
+    with SessionLocal() as db:
+        repair_frame_data(db)
+
+
+def _backfill_outlet_links() -> None:
+    """Link existing source items to outlets by domain."""
+    from app.services.outlet_linking import backfill_outlet_links
+    with SessionLocal() as db:
+        backfill_outlet_links(db)

@@ -7,6 +7,234 @@ from urllib.parse import urlencode
 from app.models import CampaignConfig, Opponent
 
 
+# ── Local outlet catalog ──────────────────────────────────────────────────────
+# Each entry: name, domain, rss_url, outlet_type, authority_score, state, city
+# outlet_type: local_news | regional_news | broadcast | national | blog | social
+# authority_score: 1–10 (10 = most authoritative; mirrors Outlet model)
+#
+# District entries: keyed by "ST-##" (e.g. "PA-08").  Added first, then
+# state-level entries are appended; duplicates by domain are dropped.
+# State entries: keyed by two-letter state code.
+#
+# RSS URL notes:
+#   - WordPress sites typically expose /feed/ or /feed
+#   - Nexstar TV stations (WNEP, WBRE/WYOU, etc.) use /feeds/syndication/rss/...
+#   - MediaNews Group papers use /arcio/rss/ (Arc Publishing)
+#   - Lee Enterprises papers often use /search/?f=rss or /feed/
+
+_OUTLET_CATALOG: dict[str, dict[str, list[dict]]] = {
+
+    # ── District-specific ─────────────────────────────────────────────────────
+    "district": {
+
+        # Pennsylvania 8th — Scranton / Wilkes-Barre / NEPA
+        "PA-08": [
+            {"name": "Times Leader",         "domain": "timesleader.com",     "rss_url": "https://www.timesleader.com/feed/",           "outlet_type": "local_news",    "authority_score": 8,  "state": "PA", "city": "Wilkes-Barre"},
+            {"name": "The Times-Tribune",    "domain": "thetimes-tribune.com","rss_url": "https://thetimes-tribune.com/feed/",          "outlet_type": "local_news",    "authority_score": 9,  "state": "PA", "city": "Scranton"},
+            {"name": "Citizens' Voice",      "domain": "citizensvoice.com",   "rss_url": "https://www.citizensvoice.com/feed/",         "outlet_type": "local_news",    "authority_score": 8,  "state": "PA", "city": "Wilkes-Barre"},
+            {"name": "Standard-Speaker",     "domain": "standardspeaker.com", "rss_url": "https://standardspeaker.com/feed/",           "outlet_type": "local_news",    "authority_score": 6,  "state": "PA", "city": "Hazleton"},
+            {"name": "Pocono Record",        "domain": "poconorecord.com",    "rss_url": "https://www.poconorecord.com/arcio/rss/",     "outlet_type": "local_news",    "authority_score": 6,  "state": "PA", "city": "Stroudsburg"},
+            {"name": "Wayne Independent",    "domain": "wayneindependent.com","rss_url": "https://www.wayneindependent.com/feed/",      "outlet_type": "local_news",    "authority_score": 5,  "state": "PA", "city": "Honesdale"},
+            {"name": "WNEP-TV",              "domain": "wnep.com",            "rss_url": "https://www.wnep.com/feeds/syndication/rss/news/local", "outlet_type": "broadcast", "authority_score": 9, "state": "PA", "city": "Scranton"},
+            {"name": "PAHomepage (WBRE/WYOU)","domain": "pahomepage.com",     "rss_url": "https://www.pahomepage.com/feed/",            "outlet_type": "broadcast",     "authority_score": 7,  "state": "PA", "city": "Wilkes-Barre"},
+            {"name": "River Reporter",       "domain": "riverreporter.com",   "rss_url": "https://www.riverreporter.com/feed/",         "outlet_type": "local_news",    "authority_score": 5,  "state": "PA", "city": "Narrowsburg"},
+            {"name": "Votebeat Pennsylvania","domain": "votebeat.org",        "rss_url": "https://votebeat.org/pennsylvania/rss.xml",   "outlet_type": "regional_news", "authority_score": 7,  "state": "PA", "city": None},
+        ],
+
+        # Pennsylvania 7th — York / Lancaster
+        "PA-07": [
+            {"name": "York Daily Record",    "domain": "ydr.com",             "rss_url": "https://www.ydr.com/arcio/rss/",              "outlet_type": "local_news",    "authority_score": 7,  "state": "PA", "city": "York"},
+            {"name": "LancasterOnline",      "domain": "lancasteronline.com", "rss_url": "https://lancasteronline.com/search/?f=rss",   "outlet_type": "local_news",    "authority_score": 7,  "state": "PA", "city": "Lancaster"},
+            {"name": "York Dispatch",        "domain": "yorkdispatch.com",    "rss_url": "https://www.yorkdispatch.com/arcio/rss/",     "outlet_type": "local_news",    "authority_score": 6,  "state": "PA", "city": "York"},
+        ],
+
+        # Pennsylvania 17th — Pittsburgh suburbs / Allegheny
+        "PA-17": [
+            {"name": "Pittsburgh Post-Gazette","domain": "post-gazette.com",  "rss_url": "https://www.post-gazette.com/rss/rss-politics-state.xml", "outlet_type": "regional_news", "authority_score": 9, "state": "PA", "city": "Pittsburgh"},
+            {"name": "Pittsburgh Tribune-Review","domain": "triblive.com",    "rss_url": "https://triblive.com/feed/",                  "outlet_type": "regional_news", "authority_score": 8,  "state": "PA", "city": "Pittsburgh"},
+            {"name": "WPXI (Cox Media)",     "domain": "wpxi.com",            "rss_url": "https://www.wpxi.com/arcio/rss/category/news/local-news/", "outlet_type": "broadcast", "authority_score": 8, "state": "PA", "city": "Pittsburgh"},
+        ],
+
+        # Ohio 13th — Akron / Youngstown
+        "OH-13": [
+            {"name": "Akron Beacon Journal", "domain": "beaconjournal.com",   "rss_url": "https://www.beaconjournal.com/arcio/rss/",    "outlet_type": "local_news",    "authority_score": 8,  "state": "OH", "city": "Akron"},
+            {"name": "Youngstown Vindicator","domain": "vindy.com",           "rss_url": "https://www.vindy.com/feeds/news.xml",         "outlet_type": "local_news",    "authority_score": 7,  "state": "OH", "city": "Youngstown"},
+            {"name": "WKBN Youngstown",      "domain": "wkbn.com",            "rss_url": "https://www.wkbn.com/feed/",                  "outlet_type": "broadcast",     "authority_score": 7,  "state": "OH", "city": "Youngstown"},
+        ],
+
+        # Michigan 7th — Lansing / suburbs
+        "MI-07": [
+            {"name": "Lansing State Journal", "domain": "lansingstatejournal.com", "rss_url": "https://www.lansingstatejournal.com/arcio/rss/", "outlet_type": "local_news", "authority_score": 7, "state": "MI", "city": "Lansing"},
+            {"name": "WLNS Lansing",         "domain": "wlns.com",            "rss_url": "https://www.wlns.com/feed/",                  "outlet_type": "broadcast",     "authority_score": 7,  "state": "MI", "city": "Lansing"},
+        ],
+
+        # Wisconsin 3rd — La Crosse / western WI
+        "WI-03": [
+            {"name": "La Crosse Tribune",    "domain": "lacrossetribune.com", "rss_url": "https://lacrossetribune.com/search/?f=rss",   "outlet_type": "local_news",    "authority_score": 7,  "state": "WI", "city": "La Crosse"},
+            {"name": "WKBT La Crosse",       "domain": "wkbt.com",            "rss_url": "https://www.wkbt.com/feed/",                  "outlet_type": "broadcast",     "authority_score": 6,  "state": "WI", "city": "La Crosse"},
+        ],
+
+        # Arizona 6th — suburban Phoenix
+        "AZ-06": [
+            {"name": "AZFamily (3TV/CBS5)",  "domain": "azfamily.com",        "rss_url": "https://www.azfamily.com/arcio/rss/",         "outlet_type": "broadcast",     "authority_score": 8,  "state": "AZ", "city": "Phoenix"},
+            {"name": "Arizona Republic",     "domain": "azcentral.com",       "rss_url": "https://www.azcentral.com/arcio/rss/",        "outlet_type": "regional_news", "authority_score": 9,  "state": "AZ", "city": "Phoenix"},
+        ],
+
+        # Georgia 6th — north Atlanta suburbs
+        "GA-06": [
+            {"name": "Atlanta Journal-Constitution","domain": "ajc.com",      "rss_url": "https://www.ajc.com/arcio/rss/",              "outlet_type": "regional_news", "authority_score": 9,  "state": "GA", "city": "Atlanta"},
+            {"name": "WXIA (11Alive)",       "domain": "11alive.com",         "rss_url": "https://www.11alive.com/feeds/syndication/rss/news/local", "outlet_type": "broadcast", "authority_score": 8, "state": "GA", "city": "Atlanta"},
+        ],
+
+        # Nevada 3rd — suburban Las Vegas
+        "NV-03": [
+            {"name": "Las Vegas Review-Journal","domain": "reviewjournal.com","rss_url": "https://www.reviewjournal.com/feed/",          "outlet_type": "regional_news", "authority_score": 8,  "state": "NV", "city": "Las Vegas"},
+            {"name": "Nevada Current",       "domain": "nevadacurrent.com",   "rss_url": "https://nevadacurrent.com/feed/",             "outlet_type": "regional_news", "authority_score": 7,  "state": "NV", "city": None},
+        ],
+
+        # North Carolina 13th — Raleigh suburbs
+        "NC-13": [
+            {"name": "News & Observer",      "domain": "newsobserver.com",    "rss_url": "https://www.newsobserver.com/arcio/rss/",     "outlet_type": "regional_news", "authority_score": 8,  "state": "NC", "city": "Raleigh"},
+            {"name": "WRAL-TV",              "domain": "wral.com",            "rss_url": "https://www.wral.com/rss/",                   "outlet_type": "broadcast",     "authority_score": 8,  "state": "NC", "city": "Raleigh"},
+        ],
+    },
+
+    # ── State-level (always added when district matches state) ────────────────
+    "state": {
+        "PA": [
+            {"name": "Spotlight PA",         "domain": "spotlightpa.org",     "rss_url": "https://www.spotlightpa.org/news/feed.xml",   "outlet_type": "regional_news", "authority_score": 9,  "state": "PA", "city": None},
+            {"name": "Pennsylvania Capital-Star","domain": "penncapital-star.com","rss_url": "https://penncapital-star.com/feed/",      "outlet_type": "regional_news", "authority_score": 8,  "state": "PA", "city": None},
+            {"name": "PennLive",             "domain": "pennlive.com",        "rss_url": "https://www.pennlive.com/arc/outboundfeeds/rss/?outputType=xml", "outlet_type": "regional_news", "authority_score": 8, "state": "PA", "city": None},
+            {"name": "WITF News",            "domain": "witf.org",            "rss_url": "https://www.witf.org/feed/",                  "outlet_type": "broadcast",     "authority_score": 7,  "state": "PA", "city": "Harrisburg"},
+        ],
+        "OH": [
+            {"name": "Ohio Capital Journal",  "domain": "ohiocapitaljournal.com","rss_url": "https://ohiocapitaljournal.com/feed/",    "outlet_type": "regional_news", "authority_score": 8,  "state": "OH", "city": None},
+            {"name": "Cleveland Plain Dealer","domain": "cleveland.com",       "rss_url": "https://www.cleveland.com/arc/outboundfeeds/rss/", "outlet_type": "regional_news", "authority_score": 8, "state": "OH", "city": "Cleveland"},
+        ],
+        "MI": [
+            {"name": "Michigan Advance",      "domain": "michiganadvance.com", "rss_url": "https://michiganadvance.com/feed/",          "outlet_type": "regional_news", "authority_score": 7,  "state": "MI", "city": None},
+            {"name": "Bridge Michigan",       "domain": "bridgemi.com",        "rss_url": "https://www.bridgemi.com/feed/",             "outlet_type": "regional_news", "authority_score": 8,  "state": "MI", "city": None},
+        ],
+        "WI": [
+            {"name": "Wisconsin Examiner",    "domain": "wisconsinexaminer.com","rss_url": "https://wisconsinexaminer.com/feed/",       "outlet_type": "regional_news", "authority_score": 7,  "state": "WI", "city": None},
+            {"name": "Milwaukee Journal Sentinel","domain": "jsonline.com",    "rss_url": "https://www.jsonline.com/arcio/rss/",        "outlet_type": "regional_news", "authority_score": 8,  "state": "WI", "city": "Milwaukee"},
+        ],
+        "AZ": [
+            {"name": "Arizona Mirror",        "domain": "azmirror.com",        "rss_url": "https://azmirror.com/feed/",                 "outlet_type": "regional_news", "authority_score": 7,  "state": "AZ", "city": None},
+            {"name": "12 News (KPNX)",        "domain": "12news.com",          "rss_url": "https://www.12news.com/feeds/syndication/rss/news/local", "outlet_type": "broadcast", "authority_score": 8, "state": "AZ", "city": "Phoenix"},
+        ],
+        "GA": [
+            {"name": "Georgia Recorder",      "domain": "georgiarecorder.com", "rss_url": "https://georgiarecorder.com/feed/",          "outlet_type": "regional_news", "authority_score": 7,  "state": "GA", "city": None},
+            {"name": "GPB News",              "domain": "gpb.org",             "rss_url": "https://www.gpb.org/news/feed",              "outlet_type": "broadcast",     "authority_score": 7,  "state": "GA", "city": None},
+        ],
+        "NV": [
+            {"name": "Nevada Current",        "domain": "nevadacurrent.com",   "rss_url": "https://nevadacurrent.com/feed/",            "outlet_type": "regional_news", "authority_score": 7,  "state": "NV", "city": None},
+            {"name": "KTNV Las Vegas",        "domain": "ktnv.com",            "rss_url": "https://www.ktnv.com/feed/",                 "outlet_type": "broadcast",     "authority_score": 7,  "state": "NV", "city": "Las Vegas"},
+        ],
+        "NC": [
+            {"name": "NC Newsline",           "domain": "ncnewsline.com",      "rss_url": "https://ncnewsline.com/feed/",               "outlet_type": "regional_news", "authority_score": 7,  "state": "NC", "city": None},
+            {"name": "WFAE Charlotte",        "domain": "wfae.org",            "rss_url": "https://www.wfae.org/feed",                  "outlet_type": "broadcast",     "authority_score": 7,  "state": "NC", "city": "Charlotte"},
+        ],
+        "FL": [
+            {"name": "Florida Phoenix",       "domain": "floridaphoenix.com",  "rss_url": "https://floridaphoenix.com/feed/",           "outlet_type": "regional_news", "authority_score": 7,  "state": "FL", "city": None},
+            {"name": "Tampa Bay Times",       "domain": "tampabay.com",        "rss_url": "https://www.tampabay.com/arcio/rss/",        "outlet_type": "regional_news", "authority_score": 9,  "state": "FL", "city": "Tampa"},
+            {"name": "Orlando Sentinel",      "domain": "orlandosentinel.com", "rss_url": "https://www.orlandosentinel.com/arcio/rss/", "outlet_type": "regional_news", "authority_score": 8,  "state": "FL", "city": "Orlando"},
+        ],
+        "TX": [
+            {"name": "Texas Tribune",         "domain": "texastribune.org",    "rss_url": "https://www.texastribune.org/feeds/news/rss.xml", "outlet_type": "regional_news", "authority_score": 9, "state": "TX", "city": None},
+            {"name": "Houston Chronicle",     "domain": "houstonchronicle.com","rss_url": "https://www.houstonchronicle.com/arcio/rss/", "outlet_type": "regional_news", "authority_score": 9, "state": "TX", "city": "Houston"},
+        ],
+        "NY": [
+            {"name": "New York Focus",        "domain": "nyfocus.org",         "rss_url": "https://nyfocus.org/feed/",                  "outlet_type": "regional_news", "authority_score": 7,  "state": "NY", "city": None},
+            {"name": "City & State NY",       "domain": "cityandstateny.com",  "rss_url": "https://www.cityandstateny.com/feed/",       "outlet_type": "regional_news", "authority_score": 7,  "state": "NY", "city": "New York"},
+        ],
+        "CA": [
+            {"name": "CalMatters",            "domain": "calmatters.org",      "rss_url": "https://calmatters.org/feed/",               "outlet_type": "regional_news", "authority_score": 8,  "state": "CA", "city": None},
+            {"name": "LAist",                 "domain": "laist.com",           "rss_url": "https://laist.com/feeds/news.rss",           "outlet_type": "regional_news", "authority_score": 7,  "state": "CA", "city": "Los Angeles"},
+        ],
+        "MN": [
+            {"name": "MinnPost",              "domain": "minnpost.com",        "rss_url": "https://www.minnpost.com/feed/",             "outlet_type": "regional_news", "authority_score": 7,  "state": "MN", "city": None},
+            {"name": "Minnesota Reformer",    "domain": "minnesotareformer.com","rss_url": "https://minnesotareformer.com/feed/",       "outlet_type": "regional_news", "authority_score": 7,  "state": "MN", "city": None},
+        ],
+        "VA": [
+            {"name": "Virginia Mercury",      "domain": "virginiamercury.com", "rss_url": "https://virginiamercury.com/feed/",          "outlet_type": "regional_news", "authority_score": 7,  "state": "VA", "city": None},
+            {"name": "VPM News",              "domain": "vpm.org",             "rss_url": "https://vpm.org/feed/",                     "outlet_type": "broadcast",     "authority_score": 7,  "state": "VA", "city": "Richmond"},
+        ],
+        "CO": [
+            {"name": "Colorado Sun",          "domain": "coloradosun.com",     "rss_url": "https://coloradosun.com/feed/",              "outlet_type": "regional_news", "authority_score": 8,  "state": "CO", "city": None},
+            {"name": "Colorado Public Radio", "domain": "cpr.org",             "rss_url": "https://www.cpr.org/feed/",                  "outlet_type": "broadcast",     "authority_score": 8,  "state": "CO", "city": "Denver"},
+        ],
+    },
+}
+
+
+def get_local_outlets(district: str | None, state_code: str | None,
+                      db=None) -> list[dict]:
+    """Return local outlet definitions for this district/state, deduped by domain.
+
+    Sources (merged in priority order):
+      1. Hardcoded district-specific catalog entries
+      2. Hardcoded state-level catalog entries
+      3. DB Outlet records tagged with this district or state via their `districts` field
+
+    Pass a SQLAlchemy Session as `db` to include DB-managed outlets.  When db is
+    None only the hardcoded catalog is used (safe at import time).
+    """
+    import json as _json
+
+    seen_domains: set[str] = set()
+    results: list[dict] = []
+
+    dist_key = (district or "").upper().strip()
+    state_key = (state_code or "").upper().strip()
+
+    for outlet in _OUTLET_CATALOG["district"].get(dist_key, []):
+        domain = outlet["domain"].lower()
+        if domain not in seen_domains:
+            seen_domains.add(domain)
+            results.append(outlet)
+
+    for outlet in _OUTLET_CATALOG["state"].get(state_key, []):
+        domain = outlet["domain"].lower()
+        if domain not in seen_domains:
+            seen_domains.add(domain)
+            results.append(outlet)
+
+    # DB-managed outlets: any Outlet record whose `districts` JSON array contains
+    # the current district code or state code.
+    if db is not None:
+        try:
+            from app.models import Outlet as _Outlet
+            db_outlets = db.query(_Outlet).filter(
+                _Outlet.active == True,
+                _Outlet.districts.isnot(None),
+            ).all()
+            for o in db_outlets:
+                try:
+                    tagged = _json.loads(o.districts or "[]")
+                except Exception:
+                    tagged = []
+                if dist_key not in tagged and state_key not in tagged:
+                    continue
+                domain = (o.domain or "").lower()
+                if not domain or domain in seen_domains:
+                    continue
+                seen_domains.add(domain)
+                results.append({
+                    "name": o.name,
+                    "domain": domain,
+                    "rss_url": o.rss_url or "",
+                    "outlet_type": o.outlet_type or "local_news",
+                    "authority_score": o.authority_score or 5,
+                    "state": o.state,
+                    "city": o.city,
+                })
+        except Exception:
+            pass  # DB not available or model not loaded — fall back to catalog only
+
+    return results
+
+
 def _gnews_url(query: str) -> str:
     """Build a Google News RSS search URL for the given query string."""
     params = urlencode({"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"})
@@ -142,7 +370,7 @@ def _add(monitors: list[dict[str, Any]], seen: set[tuple], **data: Any) -> None:
     })
 
 
-def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: list[Opponent]) -> list[dict[str, Any]]:
+def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: list[Opponent], db=None) -> list[dict[str, Any]]:
     candidate = campaign_profile.candidate_name
     office = campaign_profile.office or campaign_profile.race
     district = campaign_profile.district
@@ -156,9 +384,61 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
     excluded = _terms(campaign_profile.excluded_keywords)
     small_race = bool(campaign_profile.sparse_race_mode or election_type in {"primary", "special"} or race_level in {"city", "local", "state"})
     geo_terms = [x for x in [district, district_number, location, *neighborhoods] if x]
+    state_code = _parse_state_code(district, location)
+    state_sub = _STATE_SUBREDDITS.get(state_code or "") if state_code else None
+    state_name = _STATE_NAMES.get(state_code or "") if state_code else None
 
     monitors: list[dict[str, Any]] = []
     seen: set[tuple] = set()
+
+    # ── Local outlet feeds + targeted historical searches ────────────────────
+    # For each outlet in the district catalog we add TWO monitors:
+    #
+    #   1. Direct RSS — the outlet's own feed, fetched every scheduler tick.
+    #      Catches new articles within ~30 minutes of publication. Signal is low
+    #      because the feed includes all content (sports, weather, etc.), but the
+    #      relevance filter removes non-race content cheaply.
+    #
+    #   2. Targeted Google News search — "site:<domain>" anchored to the
+    #      candidate name (and opponent if present). This surfaces historical
+    #      coverage of THIS specific race going back months, not just the last
+    #      50 articles the live feed exposes. Fully general: any district in the
+    #      catalog gets this automatically.
+    #
+    # Both monitors are generated from the catalog, so switching to a different
+    # district (OH-13, WI-03, etc.) produces the right outlets automatically.
+    local_outlets = get_local_outlets(district, state_code, db=db)
+
+    # Build the candidate/opponent part of the site-search query once.
+    cand_last_for_search = _candidate_last_name(candidate)
+    opp_last_names = [_candidate_last_name(o.name) for o in opponents if o.name]
+
+    for outlet in local_outlets:
+        # 1. Direct RSS feed
+        _add(monitors, seen,
+             name=f"RSS: {outlet['name']}",
+             monitor_type="rss",
+             url=outlet["rss_url"],
+             category="local_news",
+             source_type="news",
+             relevance_hint=f"Direct RSS feed from {outlet['name']} — a local outlet serving the district.")
+
+        # 2. Site-specific Google News search for this outlet + candidates.
+        #    Surfaces historical coverage that predates when the direct feed was set up.
+        if cand_last_for_search:
+            domain = outlet["domain"]
+            name_parts = [cand_last_for_search] + [n for n in opp_last_names if n]
+            # Build: site:domain "Cognetti" OR "Bresnahan"
+            name_query = " OR ".join(f'"{n}"' for n in name_parts[:3])
+            site_query = f"site:{domain} ({name_query})" if len(name_parts) > 1 else f'site:{domain} "{cand_last_for_search}"'
+            _add(monitors, seen,
+                 name=f"{outlet['name']} — Google News Feed",
+                 monitor_type="rss",
+                 url=_gnews_url(site_query),
+                 category="local_news",
+                 source_type="news",
+                 relevance_hint=f"Google News search for {outlet['name']} coverage of this specific race — surfaces historical articles beyond the live feed window.")
+    # ── End local outlet feeds ────────────────────────────────────────────────
 
     # ── Google News RSS feeds (auto-ingested by the scheduler) ────────────────
     # These are created as monitor_type="rss" so _ensure_rss_feed in monitors.py
@@ -211,12 +491,23 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
              url=_gnews_url(f'"{location}" {office} election'),
              category="race",
              relevance_hint="Google News feed for the race location and office.")
+    # National outlet pickup — single Google News search catches the candidate's
+    # last name appearing in major national outlets, flagging when a local story
+    # escapes into the national press ecosystem.
+    cand_last_for_national = _candidate_last_name(candidate) if candidate else None
+    if cand_last_for_national:
+        _add(monitors, seen,
+             name=f"National pickup: {cand_last_for_national}",
+             monitor_type="rss",
+             url=_gnews_url(
+                 f'"{cand_last_for_national}" '
+                 f'(Politico OR "The Hill" OR Axios OR "AP News" OR NPR OR Reuters OR CNN OR NBC OR "Fox News")'
+             ),
+             category="national",
+             relevance_hint="Detects when national outlets pick up the candidate's story — the key signal for narrative escaping local coverage.")
     # ── End Google News RSS feeds ─────────────────────────────────────────────
 
     # ── Reddit RSS feeds (no credentials required) ────────────────────────────
-    state_code = _parse_state_code(district, location)
-    state_sub = _STATE_SUBREDDITS.get(state_code or "") if state_code else None
-    state_name = _STATE_NAMES.get(state_code or "") if state_code else None
     cand_last = _candidate_last_name(candidate)
 
     if cand_last:

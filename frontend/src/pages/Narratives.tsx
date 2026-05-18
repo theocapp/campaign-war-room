@@ -1,13 +1,9 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import type { NarrativeFrameWithCounts } from '../api/types'
-import Sparkline from '../components/Sparkline'
 import FilterChips from '../components/FilterChips'
-
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-}
+import { useEffect } from 'react'
 
 const OWNER_LABELS: Record<string, string> = {
   candidate: 'Our message',
@@ -16,21 +12,65 @@ const OWNER_LABELS: Record<string, string> = {
 }
 
 const OWNER_COLORS: Record<string, string> = {
-  candidate: 'var(--candidate-border, #22c55e)',
-  opponent: 'var(--opponent-border, #ef4444)',
-  media: 'var(--border, #64748b)',
+  candidate: '#22c55e',
+  opponent: '#ef4444',
+  media: '#64748b',
 }
 
-const TREND_ICONS: Record<string, string> = {
-  up: '↑',
-  down: '↓',
-  flat: '→',
+const STAGE_COLORS: Record<string, string> = {
+  emerging:   '#3b82f6',
+  spreading:  '#22c55e',
+  mainstream: '#8b5cf6',
+  active:     '#94a3b8',
+  fading:     '#f59e0b',
+  dormant:    '#475569',
 }
 
-const TREND_COLORS: Record<string, string> = {
-  up: '#f97316',
-  down: '#64748b',
-  flat: '#94a3b8',
+const STAGE_LABELS: Record<string, string> = {
+  emerging:   'Emerging',
+  spreading:  'Spreading',
+  mainstream: 'Mainstream',
+  active:     'Active',
+  fading:     'Fading',
+  dormant:    'Dormant',
+}
+
+function fmtTiers(tiers: { national: number; regional: number; local: number; blog: number; social: number }): string | null {
+  const parts: string[] = []
+  if (tiers.national > 0) parts.push(`${tiers.national} national`)
+  if (tiers.regional > 0) parts.push(`${tiers.regional} regional`)
+  if (tiers.local > 0) parts.push(`${tiers.local} local`)
+  if (tiers.blog > 0) parts.push(`${tiers.blog} blog`)
+  if (tiers.social > 0) parts.push(`${tiers.social} social`)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
+function analyticalSentence(frame: NarrativeFrameWithCounts): string {
+  const { stage, mentions_this_week: tw, mentions_last_week: lw, mentions_total: total,
+    unique_outlets_this_week: uow, unique_outlets_last_week: uolw, days_active_last_7: days } = frame
+  const o = (n: number) => n === 1 ? 'outlet' : 'outlets'
+  const s = (n: number) => n === 1 ? 'story' : 'stories'
+  const hasOutlets = uow > 0 || uolw > 0
+
+  switch (stage) {
+    case 'dormant':
+      return 'No coverage in the last 2 weeks.'
+    case 'emerging':
+      if (hasOutlets) return `Just appearing — picked up by ${uow} ${o(uow)}, ${days} of the last 7 days.`
+      return `Just appearing — ${total} ${s(total)} so far.`
+    case 'spreading':
+      if (hasOutlets) return `Spreading — ${uow} ${o(uow)} this week vs ${uolw} last week, active ${days} of last 7 days.`
+      return `Growing fast — ${tw} ${s(tw)} this week, up from ${lw} last week.`
+    case 'fading':
+      if (hasOutlets) return `Fading — down to ${uow} ${o(uow)} this week from ${uolw} last week.`
+      return `Coverage declining — ${tw} ${s(tw)} this week, down from ${lw} last week.`
+    case 'mainstream':
+      if (hasOutlets) return `Sustained coverage — ${uow} ${o(uow)} this week, active ${days} of last 7 days.`
+      return `Established — ${tw} ${s(tw)} this week, ${total} total.`
+    default:
+      if (hasOutlets) return `${uow} ${o(uow)} this week${uolw > 0 ? ` vs ${uolw} last week` : ''}, active ${days} of last 7 days.`
+      return `${tw} ${s(tw)} this week${lw > 0 ? `, ${lw} last week` : ''}.`
+  }
 }
 
 function FrameCard({
@@ -42,132 +82,69 @@ function FrameCard({
   onDelete: (id: number) => void
   onEdit: (frame: NarrativeFrameWithCounts) => void
 }) {
-  const [series, setSeries] = useState<{ date: string; count: number }[] | null>(null)
-
-  useEffect(() => {
-    fetch(`/api/frames/${frame.id}/timeseries?bucket=day&days=0`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.series) setSeries(data.series) })
-      .catch(() => {/* sparkline is non-critical */})
-  }, [frame.id])
+  const accentColor = OWNER_COLORS[frame.owner_type] || '#64748b'
+  const stageColor = STAGE_COLORS[frame.stage] || '#94a3b8'
 
   return (
-    <div style={{
-      background: 'var(--surface, #1e293b)',
-      border: `2px solid ${OWNER_COLORS[frame.owner_type] || 'var(--border)'}`,
-      borderRadius: 8,
-      padding: '16px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 12,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-        <div>
-          <span style={{
-            fontSize: 10,
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            letterSpacing: '0.08em',
-            color: OWNER_COLORS[frame.owner_type],
-            marginBottom: 4,
-            display: 'block',
-          }}>
+    <Link
+      to={`/frames/${frame.id}`}
+      style={{ textDecoration: 'none', display: 'block' }}
+    >
+      <div style={{
+        background: 'var(--surface, #1e293b)',
+        border: '1px solid var(--border, #334155)',
+        borderLeft: `3px solid ${accentColor}`,
+        borderRadius: 8,
+        padding: '14px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        cursor: 'pointer',
+      }}
+        onMouseEnter={e => (e.currentTarget.style.borderColor = accentColor)}
+        onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border, #334155)'; e.currentTarget.style.borderLeftColor = accentColor }}
+      >
+        {/* Top row: owner label + edit/remove buttons */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: accentColor }}>
             {OWNER_LABELS[frame.owner_type] || frame.owner_type}
             {frame.source === 'llm' && <span style={{ color: '#94a3b8', fontWeight: 400 }}> · auto-suggested</span>}
           </span>
-          <div style={{ fontWeight: 600, fontSize: 16, color: 'var(--text, #f1f5f9)' }}>{frame.name}</div>
-          {frame.description && (
-            <div style={{ fontSize: 13, color: 'var(--text-muted, #94a3b8)', marginTop: 4 }}>{frame.description}</div>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-          <button
-            onClick={() => onEdit(frame)}
-            style={{ background: 'transparent', border: '1px solid var(--border, #334155)', color: 'var(--text-muted, #94a3b8)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
-          >Edit</button>
-          <button
-            onClick={() => onDelete(frame.id)}
-            style={{ background: 'transparent', border: '1px solid #ef4444', color: '#ef4444', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
-          >Remove</button>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end' }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text, #f1f5f9)', display: 'flex', alignItems: 'center', gap: 4 }}>
-            {frame.mentions_this_week}
-            <span style={{ fontSize: 14, color: TREND_COLORS[frame.trend] }}>{TREND_ICONS[frame.trend]}</span>
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>this week</div>
-        </div>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted, #94a3b8)' }}>{frame.mentions_last_week}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>last week</div>
-        </div>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted, #94a3b8)' }}>{frame.mentions_total}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>total</div>
-        </div>
-        <div style={{ flex: 1, minWidth: 80 }}>
-          {series && <Sparkline data={series} color={OWNER_COLORS[frame.owner_type] || '#3b82f6'} height={36} />}
-        </div>
-        <Link
-          to={`/frames/${frame.id}`}
-          style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', textDecoration: 'none', whiteSpace: 'nowrap', paddingBottom: 2 }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'var(--text, #f1f5f9)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted, #94a3b8)')}
-        >
-          View detail →
-        </Link>
-      </div>
-
-      {frame.recent_articles.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted, #94a3b8)', marginBottom: 6 }}>Recent</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {frame.recent_articles.map(a => {
-              const title = stripHtml(a.title || '(no title)')
-              const claim = a.extracted_text ? stripHtml(a.extracted_text) : null
-              return (
-                <div key={a.id} style={{
-                  fontSize: 12, color: 'var(--text, #f1f5f9)',
-                  borderLeft: '2px solid var(--border, #334155)', paddingLeft: 8,
-                  overflow: 'hidden', minWidth: 0,
-                }}>
-                  {claim ? (
-                    <>
-                      <div style={{
-                        fontStyle: 'italic', color: 'var(--text, #f1f5f9)', lineHeight: 1.4,
-                        display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
-                        overflow: 'hidden',
-                      }}>
-                        &ldquo;{claim}&rdquo;
-                      </div>
-                      <div style={{ marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {a.source_url
-                          ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted, #94a3b8)', textDecoration: 'none', fontSize: 11 }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{a.source_name ? `${a.source_name} · ` : ''}{title}</a>
-                          : <span style={{ color: 'var(--text-muted, #94a3b8)', fontSize: 11 }}>{a.source_name ? `${a.source_name} · ` : ''}{title}</span>}
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {a.source_url
-                          ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }} onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')} onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>{title}</a>
-                          : title}
-                      </div>
-                      {a.source_name && (
-                        <div style={{ color: 'var(--text-muted, #94a3b8)', fontSize: 11, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.source_name}</div>
-                      )}
-                    </>
-                  )}
-                </div>
-              )
-            })}
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={e => { e.preventDefault(); e.stopPropagation(); onEdit(frame) }}
+              style={{ background: 'transparent', border: '1px solid var(--border, #334155)', color: 'var(--text-muted, #94a3b8)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
+            >Edit</button>
+            <button
+              onClick={e => { e.preventDefault(); e.stopPropagation(); onDelete(frame.id) }}
+              style={{ background: 'transparent', border: '1px solid #ef4444', color: '#ef4444', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
+            >Remove</button>
           </div>
         </div>
-      )}
-    </div>
+
+        {/* Frame name */}
+        <div style={{ fontWeight: 600, fontSize: 16, color: 'var(--text, #f1f5f9)' }}>{frame.name}</div>
+
+        {/* Description */}
+        {frame.description && (
+          <div style={{ fontSize: 13, color: 'var(--text-muted, #94a3b8)', lineHeight: 1.5 }}>{frame.description}</div>
+        )}
+
+        {/* Stage chip + analytical sentence */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 2 }}>
+          <span style={{
+            padding: '2px 8px', borderRadius: 10, flexShrink: 0,
+            background: stageColor + '22',
+            border: `1px solid ${stageColor}`,
+            color: stageColor, fontSize: 10, fontWeight: 700,
+            letterSpacing: '0.04em', textTransform: 'uppercase',
+          }}>{STAGE_LABELS[frame.stage]}</span>
+          <span style={{ fontSize: 13, color: 'var(--text-muted, #94a3b8)' }}>
+            {analyticalSentence(frame)}
+          </span>
+        </div>
+      </div>
+    </Link>
   )
 }
 
@@ -473,7 +450,7 @@ export default function Narratives() {
       ].map(({ label, frames: group }) => group.length > 0 && (
         <div key={label} style={{ marginBottom: 32 }}>
           <h2 style={{ fontSize: 14, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted, #94a3b8)', margin: '0 0 12px' }}>{label}</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {group.map(frame => (
               <FrameCard
                 key={frame.id}

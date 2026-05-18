@@ -114,6 +114,9 @@ class SourceItem(Base):
     extraction_quality_reasons = Column(Text, nullable=True)  # JSON array stored as text
     # positive | negative | neutral | mixed — how the article's tone affects the candidate
     sentiment = Column(String, nullable=True)
+    # JSON blob of the full LLM analysis result (summary, framing, sentiment,
+    # opponent_attacks, etc.) cached so rematch can skip re-reading article text.
+    structured_extraction = Column(Text, nullable=True)
     outlet_id = Column(Integer, ForeignKey("outlets.id"), nullable=True)
 
     issue_mentions = relationship("IssueMention", back_populates="source_item", cascade="all, delete-orphan")
@@ -260,6 +263,15 @@ class Outlet(Base):
     city = Column(String, nullable=True)    # e.g. "Scranton"
     # 1 (blog with no editorial staff) to 10 (major regional daily)
     authority_score = Column(Integer, nullable=False, default=5)
+    # RSS feed URL for this outlet (used when creating monitors)
+    rss_url = Column(String, nullable=True)
+    # JSON array of district codes this outlet covers, e.g. ["PA-08", "PA-07"]
+    # Used so user-added outlets are picked up by get_local_outlets() for future campaigns.
+    districts = Column(Text, nullable=True)
+    # Estimated monthly unique visitors (from LLM knowledge or manual entry).
+    # Used to calculate reach: reach = monthly_visitors * per_article_factor (default 0.003).
+    # NULL means fall back to authority_score-based weighting.
+    monthly_visitors = Column(Integer, nullable=True)
     active = Column(Boolean, default=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

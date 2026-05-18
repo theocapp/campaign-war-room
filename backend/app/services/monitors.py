@@ -1,6 +1,9 @@
 import json
+import logging
 import re
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -8,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.models import CampaignConfig, Opponent, RssFeed, SourceItem, SourceMonitor
 from app.services import ingestion
 from app.services.search_provider import get_search_provider
-from app.services.source_discovery import generate_monitors_for_campaign, _gnews_url_with_dates, _candidate_last_name
+from app.services.source_discovery import generate_monitors_for_campaign, get_local_outlets, _gnews_url_with_dates, _candidate_last_name, _parse_state_code
 
 
 def _json_list(value: list | None) -> str | None:
@@ -39,6 +42,283 @@ def _ensure_rss_feed(db: Session, monitor: SourceMonitor) -> None:
     if db.query(RssFeed).filter_by(url=monitor.url).first():
         return
     db.add(RssFeed(name=monitor.name, url=monitor.url, source_type=monitor.source_type or "news"))
+
+
+def _validate_rss_url(url: str, timeout: int = 8) -> bool:
+    """Return True if the URL responds with XML-ish content that looks like a feed."""
+    if not url:
+        return False
+    try:
+        import requests as _requests
+        r = _requests.get(
+            url, timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CampaignBot/1.0)"},
+            allow_redirects=True,
+        )
+        if r.status_code != 200:
+            return False
+        ct = r.headers.get("content-type", "")
+        body = r.text[:500].lower()
+        return (
+            "xml" in ct or "rss" in ct or "atom" in ct
+            or "<rss" in body or "<feed" in body or "<?xml" in body
+        )
+    except Exception:
+        return False
+
+
+def _auto_discover_outlets(db: Session, district: str, state_code: str | None,
+                            location: str | None, candidate: str | None) -> int:
+    """Use an LLM to discover local news outlets for an uncatalogued district.
+
+    Validates each suggested RSS URL before saving.  Idempotent — skips domains
+    that already exist as Outlet records.  Returns number of new outlets created.
+
+    Only runs when the district has no outlets in either the hardcoded catalog
+    or the DB already — safe to call on every campaign init.
+    """
+    import json as _json
+    from app.models import Outlet
+    from app.services.llm_provider import get_provider
+    from app.services.source_discovery import get_local_outlets
+
+    # Skip if the catalog already has DISTRICT-SPECIFIC entries (not just state-level ones).
+    # State-level entries apply to every race in the state so they don't substitute for
+    # local outlets specific to this district.
+    dist_key = district.upper().strip()
+    from app.services.source_discovery import _OUTLET_CATALOG
+    has_hardcoded = bool(_OUTLET_CATALOG["district"].get(dist_key))
+
+    # Also check DB for any outlets already tagged with this exact district.
+    import json as _json2
+    from app.models import Outlet as _OutletCheck
+    db_tagged = [
+        o for o in db.query(_OutletCheck).filter(
+            _OutletCheck.active == True, _OutletCheck.districts.isnot(None)
+        ).all()
+        if dist_key in (_json2.loads(o.districts or "[]"))
+    ]
+    if has_hardcoded or db_tagged:
+        return 0  # district already covered
+
+    logger.info("outlet_discovery: no catalog entries for %s — running LLM discovery", district)
+
+    location_hint = location or district
+    state_name = state_code or ""
+
+    prompt = f"""You are helping set up a political news monitoring system for a US congressional campaign.
+
+Campaign district: {district}
+Location: {location_hint}
+State: {state_name}
+
+List the 8-10 most important LOCAL and REGIONAL news outlets that cover this specific congressional district. Focus on:
+- Local daily newspapers
+- Local TV news stations
+- Regional political news sites (like state-focused journalism nonprofits)
+- Do NOT include national outlets (NY Times, Washington Post, Politico, etc.)
+
+For each outlet provide:
+- name: the outlet's common name
+- domain: just the domain (e.g. "akronbeaconjournal.com")
+- rss_url: the outlet's main RSS feed URL (use /feed/ for WordPress sites, check for common patterns)
+- outlet_type: one of: local_news, regional_news, broadcast
+- authority_score: integer 1-10 (10=major metro daily, 8=solid regional paper, 6=small local paper, 5=community site)
+- monthly_visitors: your best estimate of monthly unique website visitors as an integer (e.g. 450000 for a mid-size regional daily, 1500000 for a major market TV station website, 80000 for a small community paper). Be conservative — err low rather than high.
+- city: primary city served (or null)
+
+Return ONLY a JSON array. No explanation. Example format:
+[{{"name":"Akron Beacon Journal","domain":"beaconjournal.com","rss_url":"https://www.beaconjournal.com/arcio/rss/","outlet_type":"local_news","authority_score":8,"monthly_visitors":420000,"city":"Akron"}}]"""
+
+    try:
+        provider = get_provider()
+        raw = provider.complete(prompt)
+    except Exception as e:
+        logger.warning("outlet_discovery: LLM call failed for %s: %s", district, e)
+        return 0
+
+    # Parse JSON — strip markdown fences if present
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip().rstrip("`").strip()
+
+    try:
+        suggestions = _json.loads(raw)
+        if not isinstance(suggestions, list):
+            raise ValueError("expected list")
+    except Exception as e:
+        logger.warning("outlet_discovery: JSON parse failed for %s: %s | raw=%r", district, e, raw[:200])
+        return 0
+
+    created = 0
+    for s in suggestions:
+        try:
+            domain = (s.get("domain") or "").lower().strip().lstrip("www.").strip("/")
+            rss_url = (s.get("rss_url") or "").strip()
+            name = (s.get("name") or domain).strip()
+            if not domain or not rss_url:
+                continue
+            if db.query(Outlet).filter_by(domain=domain).first():
+                continue
+            if not _validate_rss_url(rss_url):
+                logger.info("outlet_discovery: RSS validation failed for %s (%s)", name, rss_url)
+                continue
+            import json as _json2
+            mv_raw = s.get("monthly_visitors")
+            monthly_visitors = max(1000, int(mv_raw)) if mv_raw else None
+            db.add(Outlet(
+                name=name,
+                domain=domain,
+                rss_url=rss_url,
+                outlet_type=s.get("outlet_type", "local_news"),
+                authority_score=max(1, min(10, int(s.get("authority_score") or 5))),
+                monthly_visitors=monthly_visitors,
+                state=state_code,
+                city=s.get("city"),
+                districts=_json2.dumps([district]),
+                active=True,
+                notes="Auto-discovered by LLM on campaign setup",
+            ))
+            created += 1
+            logger.info("outlet_discovery: added %s (%s)", name, domain)
+        except Exception as e:
+            logger.warning("outlet_discovery: error processing suggestion %r: %s", s, e)
+            continue
+
+    if created:
+        db.commit()
+        logger.info("outlet_discovery: created %d outlets for %s", created, district)
+
+    return created
+
+
+def _estimate_outlet_traffic(db: Session) -> int:
+    """Ask the LLM to estimate monthly_visitors for any outlets that don't have it yet.
+
+    Batches all missing outlets into a single LLM call to stay cheap.
+    Idempotent — only processes outlets where monthly_visitors IS NULL.
+    Returns the number of outlets updated.
+    """
+    import json as _json
+    from app.models import Outlet
+    from app.services.llm_provider import get_provider
+
+    missing = db.query(Outlet).filter(
+        Outlet.monthly_visitors.is_(None),
+        Outlet.active == True,
+    ).all()
+    if not missing:
+        return 0
+
+    outlet_list = "\n".join(
+        f'- {o.name} ({o.domain}) [{o.outlet_type}, {o.state or "US"}]'
+        for o in missing
+    )
+    prompt = f"""Estimate the monthly unique website visitors for each of these US news outlets.
+Use your knowledge of their audience size. Be conservative — err low rather than high.
+Return ONLY a JSON object mapping domain → integer visitor count. No explanation.
+
+Outlets:
+{outlet_list}
+
+Example format: {{"beaconjournal.com": 420000, "wkbn.com": 850000}}"""
+
+    try:
+        provider = get_provider()
+        raw = provider.complete(prompt)
+    except Exception as e:
+        logger.warning("traffic_estimate: LLM call failed: %s", e)
+        return 0
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip().rstrip("`").strip()
+
+    try:
+        estimates = _json.loads(raw)
+        if not isinstance(estimates, dict):
+            raise ValueError("expected object")
+    except Exception as e:
+        logger.warning("traffic_estimate: JSON parse failed: %s | raw=%r", e, raw[:300])
+        return 0
+
+    updated = 0
+    domain_map = {o.domain.lower(): o for o in missing}
+    for domain_raw, visitors in estimates.items():
+        domain = domain_raw.lower().strip()
+        outlet = domain_map.get(domain)
+        if not outlet:
+            continue
+        try:
+            outlet.monthly_visitors = max(1000, int(visitors))
+            updated += 1
+        except Exception:
+            continue
+
+    if updated:
+        db.commit()
+        logger.info("traffic_estimate: estimated monthly visitors for %d outlets", updated)
+    return updated
+
+
+def _seed_campaign_outlets(db: Session, campaign) -> int:
+    """Create Outlet records for all local outlets in the district catalog.
+
+    For districts in the hardcoded catalog: seeds from catalog entries.
+    For uncatalogued districts: triggers LLM auto-discovery.
+
+    Idempotent — skips outlets whose domain already exists.  Returns total
+    new Outlet records created.
+    """
+    from app.models import Outlet
+    state_code = _parse_state_code(campaign.district, campaign.location)
+
+    # Auto-discover outlets for districts not in the hardcoded catalog.
+    # This runs first so discovered outlets are available to seed below.
+    if campaign.district:
+        _auto_discover_outlets(
+            db,
+            district=campaign.district,
+            state_code=state_code,
+            location=campaign.location,
+            candidate=campaign.candidate_name,
+        )
+
+    outlets = get_local_outlets(campaign.district, state_code, db=db)
+    created = 0
+    for o in outlets:
+        domain = o["domain"].lower()
+        existing = db.query(Outlet).filter_by(domain=domain).first()
+        if existing:
+            # Backfill rss_url onto pre-existing Outlet records that predate the column
+            if not existing.rss_url and o.get("rss_url"):
+                existing.rss_url = o["rss_url"]
+                created += 1  # counts as an update worth committing
+            continue
+        db.add(Outlet(
+            name=o["name"],
+            domain=domain,
+            rss_url=o.get("rss_url"),
+            outlet_type=o.get("outlet_type", "local_news"),
+            authority_score=o.get("authority_score", 5),
+            state=o.get("state"),
+            city=o.get("city"),
+            active=True,
+        ))
+        created += 1
+    if created:
+        db.commit()
+
+    # Estimate monthly visitors for any outlets still missing it (one LLM call, batched).
+    _estimate_outlet_traffic(db)
+
+    return created
 
 
 def _soft_duplicate(db: Session, title: str | None, source_name: str | None) -> SourceItem | None:
@@ -146,7 +426,11 @@ def auto_setup_monitors(db: Session) -> dict:
             "ingested": 0,
         }
 
-    suggestions = generate_monitors_for_campaign(campaign, db.query(Opponent).all())
+    # Seed Outlet records for the district before creating monitors so that
+    # articles ingested immediately below can be authority-weighted correctly.
+    _seed_campaign_outlets(db, campaign)
+
+    suggestions = generate_monitors_for_campaign(campaign, db.query(Opponent).all(), db=db)
 
     created: list[SourceMonitor] = []
     skipped = 0

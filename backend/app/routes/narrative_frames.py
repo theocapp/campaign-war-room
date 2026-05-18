@@ -82,6 +82,13 @@ def suggest_frames(days_back: int = 14, db: Session = Depends(get_db)):
     return {"suggested": len(frames), "frames": frames}
 
 
+@router.post("/audit-duplicates")
+def audit_duplicates(db: Session = Depends(get_db)):
+    """Ask the LLM to find and merge semantic duplicate frames."""
+    result = svc.audit_duplicates(db)
+    return result
+
+
 @router.post("/rematch")
 def rematch_articles(days_back: int = 365, db: Session = Depends(get_db)):
     """Enqueue a rematch job and return immediately (<1 s)."""

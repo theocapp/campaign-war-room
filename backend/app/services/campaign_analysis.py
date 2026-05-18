@@ -216,8 +216,8 @@ def analyze_with_frames(
     """
     raw = None
     try:
-        from app.services.llm_provider import get_provider, MockLLMProvider
-        provider = get_provider()
+        from app.services.llm_provider import get_ingestion_provider, MockLLMProvider
+        provider = get_ingestion_provider()
 
         # Mock provider doesn't understand structured prompts — use keyword fallback
         if isinstance(provider, MockLLMProvider):

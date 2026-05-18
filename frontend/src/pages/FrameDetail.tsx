@@ -19,6 +19,13 @@ const OWNER_LABELS: Record<string, string> = {
   media: 'Media theme',
 }
 
+function fmtReach(n: number): string {
+  if (n === 0) return '—'
+  if (n >= 1_000_000) return `~${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `~${Math.round(n / 1_000)}K`
+  return `~${Math.round(n)}`
+}
+
 function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
 }
@@ -27,7 +34,7 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-interface Timeseries { date: string; count: number }
+interface Timeseries { date: string; count: number; weighted_reach: number }
 interface ShareOfVoice { total: number; candidate: number; opponent: number; neutral: number }
 
 export default function FrameDetail() {
@@ -86,9 +93,9 @@ export default function FrameDetail() {
       ].filter(s => s.value > 0)
     : []
 
-  // Top outlets from recent articles
+  // Top outlets from key articles
   const outletCounts: Record<string, number> = {}
-  for (const a of frame.recent_articles) {
+  for (const a of frame.key_articles) {
     if (a.source_name) outletCounts[a.source_name] = (outletCounts[a.source_name] || 0) + 1
   }
   const topOutlets = Object.entries(outletCounts)
@@ -119,16 +126,31 @@ export default function FrameDetail() {
                 {frame.description}
               </p>
             )}
+            {(frame.first_seen_at || frame.last_seen_at) && (
+              <div style={{ display: 'flex', gap: 16, marginTop: 8 }}>
+                {frame.first_seen_at && (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>
+                    First seen: <strong style={{ color: 'var(--text, #f1f5f9)' }}>{new Date(frame.first_seen_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</strong>
+                  </span>
+                )}
+                {frame.last_seen_at && (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>
+                    Last seen: <strong style={{ color: 'var(--text, #f1f5f9)' }}>{new Date(frame.last_seen_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</strong>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', gap: 24, flexShrink: 0 }}>
             {[
-              { label: 'This week', value: frame.mentions_this_week },
-              { label: 'Last week', value: frame.mentions_last_week },
-              { label: 'Total', value: frame.mentions_total },
-            ].map(({ label, value }) => (
+              { label: 'This week', reach: frame.reach_this_week, stories: frame.mentions_this_week },
+              { label: 'Last week', reach: frame.reach_last_week, stories: frame.mentions_last_week },
+              { label: 'Total', reach: frame.reach_total, stories: frame.mentions_total },
+            ].map(({ label, reach, stories }) => (
               <div key={label} style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--text, #f1f5f9)' }}>{value}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>{label}</div>
+                <div style={{ fontSize: 26, fontWeight: 700, color: 'var(--text, #f1f5f9)' }} title="Estimated readers reached (outlet monthly traffic × 0.3%). Approximate only.">{fmtReach(reach)}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>{label} est. readers</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted, #64748b)' }}>{stories} stories</div>
               </div>
             ))}
           </div>
@@ -140,7 +162,7 @@ export default function FrameDetail() {
         {/* Bar chart */}
         <div style={{ background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 8, padding: '20px 20px 12px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text, #f1f5f9)' }}>Daily mentions</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text, #f1f5f9)' }}>Est. daily readers</div>
             <div style={{ display: 'flex', gap: 4 }}>
               {[0, 30, 90].map(d => (
                 <button
@@ -165,9 +187,12 @@ export default function FrameDetail() {
               <Tooltip
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 4, fontSize: 12 }}
                 labelFormatter={(_label, payload) => (payload as unknown as { payload?: { date: string } }[])?.[0]?.payload?.date ?? ''}
-                formatter={(v) => [v as number, 'mentions']}
+                formatter={(v, name) => [
+                  name === 'weighted_reach' ? fmtReach(v as number) : v as number,
+                  name === 'weighted_reach' ? 'est. readers' : 'stories',
+                ]}
               />
-              <Bar dataKey="count" fill={accentColor} radius={[2, 2, 0, 0]} />
+              <Bar dataKey="weighted_reach" fill={accentColor} radius={[2, 2, 0, 0]} />
               {monitoringStart && (
                 <ReferenceLine
                   x={monitoringStart}
@@ -235,15 +260,18 @@ export default function FrameDetail() {
           )}
         </div>
 
-        {/* Recent articles */}
+        {/* Key moments */}
         <div style={{ background: 'var(--surface, #1e293b)', border: '1px solid var(--border, #334155)', borderRadius: 8, padding: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text, #f1f5f9)', marginBottom: 12 }}>Recent articles</div>
-          {frame.recent_articles.length === 0 ? (
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text, #f1f5f9)', marginBottom: 12 }}>Key moments</div>
+          {frame.key_articles.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)' }}>No articles yet</div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {frame.recent_articles.map(a => (
-                <div key={a.id} style={{ borderLeft: `2px solid ${accentColor}`, paddingLeft: 10 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {frame.key_articles.map(a => (
+                <div key={`${a.role}-${a.id}`} style={{ borderLeft: `2px solid ${accentColor}`, paddingLeft: 10 }}>
+                  {a.role && (
+                    <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: accentColor, marginBottom: 3 }}>{a.role}</div>
+                  )}
                   <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text, #f1f5f9)' }}>
                     {a.source_url
                       ? <a href={a.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>{stripHtml(a.title || '(no title)')}</a>
@@ -251,12 +279,15 @@ export default function FrameDetail() {
                     {' '}
                     <Link to={`/sources/${a.id}`} style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', textDecoration: 'none' }}>detail</Link>
                   </div>
-                  {a.summary && (
-                    <div style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', marginTop: 2 }}>
-                      {stripHtml(a.summary).slice(0, 160)}{stripHtml(a.summary).length > 160 ? '…' : ''}
+                  {a.extracted_text && (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', fontStyle: 'italic', marginTop: 3 }}>
+                      "{stripHtml(a.extracted_text).slice(0, 160)}{stripHtml(a.extracted_text).length > 160 ? '…' : ''}"
                     </div>
                   )}
-                  {a.source_name && <div style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', marginTop: 2 }}>{a.source_name}</div>}
+                  <div style={{ display: 'flex', gap: 8, marginTop: 3, alignItems: 'center' }}>
+                    {a.source_name && <span style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)' }}>{a.source_name}</span>}
+                    {a.published_at && <span style={{ fontSize: 11, color: 'var(--text-muted, #64748b)' }}>{new Date(a.published_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+                  </div>
                 </div>
               ))}
             </div>

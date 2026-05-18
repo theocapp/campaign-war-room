@@ -608,6 +608,7 @@ export interface SourceTemplate {
 }
 
 export interface NarrativeFrameArticle {
+  role?: 'First mention' | 'Peak day' | 'Latest' | string
   id: number
   title: string | null
   summary: string | null
@@ -627,8 +628,18 @@ export interface NarrativeFrameWithCounts {
   mentions_this_week: number
   mentions_last_week: number
   mentions_total: number
+  reach_this_week: number
+  reach_last_week: number
+  reach_total: number
   trend: 'up' | 'down' | 'flat'
-  recent_articles: NarrativeFrameArticle[]
+  stage: 'dormant' | 'emerging' | 'spreading' | 'mainstream' | 'active' | 'fading'
+  outlet_tiers: { national: number; regional: number; local: number; blog: number; social: number }
+  unique_outlets_this_week: number
+  unique_outlets_last_week: number
+  days_active_last_7: number
+  first_seen_at: string | null
+  last_seen_at: string | null
+  key_articles: NarrativeFrameArticle[]
 }
 
 export interface NarrativeFrameSuggestion {

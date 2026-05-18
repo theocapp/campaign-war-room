@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta, date
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func
+from sqlalchemy import String, case, func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import CampaignConfig, NarrativeFrame, NarrativeFrameMention, RssFeed, SourceItem
+from app.models import CampaignConfig, NarrativeFrame, NarrativeFrameMention, Outlet, RssFeed, SourceItem
 
 router = APIRouter()
 
@@ -21,12 +21,24 @@ def frame_timeseries(
     Day-by-day mention counts bucketed by article publish date.
     days=0 means all time.
     """
+    # Count distinct story clusters per day (unique stories) AND sum outlet
+    # authority weights (reach). Unique stories dedup wire coverage; reach does
+    # NOT dedup — a wire story in 5 major papers has 5× the reach of one blog.
+    cluster_key = func.coalesce(SourceItem.story_cluster_id, func.cast(SourceItem.id, String))
+    # Weight: monthly_visitors * 0.003 when available, else authority_score / 10.
+    reach_weight = case(
+        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * 0.003),
+        else_=func.coalesce(Outlet.authority_score, 5) / 10.0,
+    )
     q = (
         db.query(
             func.date(SourceItem.published_at).label("day"),
-            func.count(NarrativeFrameMention.id).label("count"),
+            func.count(func.distinct(cluster_key)).label("count"),
+            func.round(func.sum(reach_weight), 1).label("weighted_reach"),
         )
+        .select_from(NarrativeFrameMention)
         .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
         .filter(
             NarrativeFrameMention.frame_id == frame_id,
             SourceItem.published_at.isnot(None),
@@ -37,7 +49,7 @@ def frame_timeseries(
     rows = q.group_by("day").order_by("day").all()
 
     # Fill in zeros for every day in the range so the chart has no gaps.
-    counts_by_date = {str(r.day): r.count for r in rows}
+    by_date: dict[str, dict] = {str(r.day): {"count": r.count, "weighted_reach": float(r.weighted_reach or 0)} for r in rows}
     today = date.today()
     if rows:
         start = date.fromisoformat(str(rows[0].day))
@@ -48,7 +60,9 @@ def frame_timeseries(
     series = []
     d = start
     while d <= today:
-        series.append({"date": str(d), "count": counts_by_date.get(str(d), 0)})
+        day_str = str(d)
+        entry = by_date.get(day_str, {"count": 0, "weighted_reach": 0.0})
+        series.append({"date": day_str, "count": entry["count"], "weighted_reach": entry["weighted_reach"]})
         d += timedelta(days=1)
 
     return {"frame_id": frame_id, "bucket": bucket, "days": days, "series": series}
@@ -78,12 +92,23 @@ def frame_share_of_voice(
         return {"frame_id": frame_id, "days": days, "total": 0, "candidate": 0, "opponent": 0, "neutral": 0}
 
     source_ids = [m.source_item_id for m in mentions]
-    items = db.query(SourceItem.id, SourceItem.source_owner_type).filter(SourceItem.id.in_(source_ids)).all()
-    owner_map = {i.id: i.source_owner_type for i in items}
+    items = (
+        db.query(SourceItem.id, SourceItem.source_owner_type, SourceItem.story_cluster_id)
+        .filter(SourceItem.id.in_(source_ids))
+        .all()
+    )
 
+    # Deduplicate by story cluster — a single wire story across 5 outlets should
+    # contribute one vote, not five. Items without a cluster id fall back to the
+    # source id so each still counts once.
     counts = {"candidate": 0, "opponent": 0, "neutral": 0}
-    for sid in source_ids:
-        owner = owner_map.get(sid, "unclear") or "unclear"
+    seen_clusters: set[str] = set()
+    for sid, owner, cluster in items:
+        key = cluster or f"source-{sid}"
+        if key in seen_clusters:
+            continue
+        seen_clusters.add(key)
+        owner = owner or "unclear"
         if owner in ("candidate", "campaign"):
             counts["candidate"] += 1
         elif owner == "opponent":
@@ -91,7 +116,9 @@ def frame_share_of_voice(
         else:
             counts["neutral"] += 1
 
-    total = len(source_ids)
+    total = len(seen_clusters)
+    if total == 0:
+        return {"frame_id": frame_id, "days": days, "total": 0, "candidate": 0, "opponent": 0, "neutral": 0}
     return {
         "frame_id": frame_id,
         "days": days,
@@ -125,34 +152,47 @@ def spike_report(db: Session = Depends(get_db)):
 
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()  # noqa: E712
 
+    # Spike detection uses weighted reach: a burst of low-authority blog posts
+    # shouldn't trigger the same alert as equivalent coverage in major papers.
+    reach_weight = func.case(
+        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * 0.003),
+        else_=func.coalesce(Outlet.authority_score, 5) / 10.0,
+    )
+
     spikes = []
     for frame in frames:
-        count_24h = (
-            db.query(func.count(NarrativeFrameMention.id))
+        reach_24h = (
+            db.query(func.round(func.sum(reach_weight), 2))
+            .select_from(NarrativeFrameMention)
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+            .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
             .filter(
                 NarrativeFrameMention.frame_id == frame.id,
                 NarrativeFrameMention.created_at >= cutoff_24h,
             )
-            .scalar()
+            .scalar() or 0
         )
-        count_7d = (
-            db.query(func.count(NarrativeFrameMention.id))
+        reach_7d = (
+            db.query(func.round(func.sum(reach_weight), 2))
+            .select_from(NarrativeFrameMention)
+            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+            .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
             .filter(
                 NarrativeFrameMention.frame_id == frame.id,
                 NarrativeFrameMention.created_at >= cutoff_7d,
             )
-            .scalar()
+            .scalar() or 0
         )
 
-        daily_avg_7d = count_7d / 7.0
-        if count_24h >= 3 and daily_avg_7d > 0 and count_24h >= daily_avg_7d * 2:
+        daily_avg_7d = reach_7d / 7.0
+        if reach_24h >= 1.5 and daily_avg_7d > 0 and reach_24h >= daily_avg_7d * 2:
             spikes.append({
                 "frame_id": frame.id,
                 "frame_name": frame.name,
                 "owner_type": frame.owner_type,
-                "count_24h": count_24h,
-                "daily_avg_7d": round(daily_avg_7d, 1),
-                "ratio": round(count_24h / daily_avg_7d, 1),
+                "count_24h": round(float(reach_24h), 1),
+                "daily_avg_7d": round(float(daily_avg_7d), 1),
+                "ratio": round(float(reach_24h) / float(daily_avg_7d), 1),
             })
 
     spikes.sort(key=lambda x: x["ratio"], reverse=True)

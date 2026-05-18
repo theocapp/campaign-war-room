@@ -851,7 +851,7 @@ class GroqProvider(OpenAIProvider):
 class GeminiProvider(OpenAIProvider):
     """Google Gemini — free tier with 1M tokens/day. Get a key at aistudio.google.com."""
 
-    def __init__(self, api_key: str, model: str = "gemini-flash-latest"):
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         try:
             from openai import OpenAI
             self._client = OpenAI(
@@ -1083,7 +1083,7 @@ def get_provider() -> BaseLLMProvider:
         # Google Gemini: 1M tokens/day free — add whenever GEMINI_API_KEY is set
         gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if gemini_key:
-            gemini_model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+            gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
             try:
                 providers.append(GeminiProvider(api_key=gemini_key, model=gemini_model))
                 log.info("LLM fallback chain includes Gemini (%s)", gemini_model)
@@ -1113,4 +1113,66 @@ def get_provider() -> BaseLLMProvider:
 
     result = providers[0] if len(providers) == 1 else FallbackProvider(providers)
     _provider_singleton = result
+    return result
+
+
+# ── Ingestion provider (small model, separate quota) ──────────────────────────
+
+_ingestion_singleton: "BaseLLMProvider | None" = None
+
+
+def get_ingestion_provider() -> BaseLLMProvider:
+    """Lightweight provider for background article ingestion (summarize/score/classify).
+
+    Uses llama-3.1-8b-instant (GROQ_INGESTION_MODEL) which has its own separate
+    100k tokens/day quota per key — keeps the 70B model quota free for
+    auto-suggest and rematch where quality matters more.
+    Falls back to the main provider if no ingestion model is configured.
+    """
+    global _ingestion_singleton
+    if _ingestion_singleton is not None:
+        return _ingestion_singleton
+
+    ingestion_model = os.environ.get("GROQ_INGESTION_MODEL", "").strip()
+    if not ingestion_model:
+        # No separate ingestion model configured — share the main provider
+        return get_provider()
+
+    provider_name = os.environ.get("LLM_PROVIDER", "").lower().strip()
+    if provider_name != "groq":
+        return get_provider()
+
+    groq_keys: list[str] = []
+    primary = os.environ.get("GROQ_API_KEY", "").strip()
+    if primary:
+        groq_keys.append(primary)
+    for n in range(2, 7):
+        extra = os.environ.get(f"GROQ_API_KEY_{n}", "").strip()
+        if extra:
+            groq_keys.append(extra)
+
+    if not groq_keys:
+        return get_provider()
+
+    providers: list[BaseLLMProvider] = []
+    for key in groq_keys:
+        try:
+            providers.append(GroqProvider(api_key=key, model=ingestion_model))
+        except RuntimeError:
+            pass
+
+    # Gemini as fallback for ingestion too
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        try:
+            providers.append(GeminiProvider(api_key=gemini_key, model="gemini-2.5-flash"))
+        except RuntimeError:
+            pass
+
+    if not providers:
+        return get_provider()
+
+    result = providers[0] if len(providers) == 1 else FallbackProvider(providers)
+    _ingestion_singleton = result
+    log.info("Ingestion provider: %s × %d provider(s) using %s", "Groq", len(providers), ingestion_model)
     return result
