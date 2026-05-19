@@ -510,6 +510,74 @@ def run_historical_backfill(db: Session) -> dict:
     return {"added": total_added, "queries": len(queries), "windows": len(windows)}
 
 
+def _lookup_twitter_handle(name: str) -> str | None:
+    """Ask the LLM for a person's Twitter/X handle, then verify it against Nitter.
+
+    Returns the bare handle (no @) if verified, or None if unknown or unverifiable.
+    The LLM is cheap for this — it's a single short-answer call. Nitter probe
+    confirms the handle actually exists before we save it.
+    """
+    from app.services.llm_provider import get_provider, MockLLMProvider
+    from app.services.twitter_scraper import extract_twitter_username, resolve_nitter_rss
+
+    try:
+        provider = get_provider()
+        if isinstance(provider, MockLLMProvider):
+            return None
+        prompt = (
+            f"What is the official X/Twitter handle for {name}? "
+            f"If you know it with confidence, reply with ONLY the handle including the @ symbol (e.g. @JohnSmith). "
+            f"If you are not sure or do not know, reply with exactly: unknown"
+        )
+        raw = (provider.complete(prompt) or "").strip()
+        if not raw or raw.lower() == "unknown":
+            return None
+        handle = extract_twitter_username(raw)
+        if not handle:
+            return None
+        # Verify the handle actually resolves on a Nitter instance before saving
+        rss_url = resolve_nitter_rss(handle)
+        return handle if rss_url else None
+    except Exception as exc:
+        logger.warning("_lookup_twitter_handle: failed for %r: %s", name, exc)
+        return None
+
+
+def _auto_populate_twitter_handles(db: Session, monitors: list[SourceMonitor]) -> None:
+    """For newly created twitter_profile monitors with no handle, ask the LLM.
+
+    Runs only on monitors that were just created (no query set yet) and whose
+    name contains a recognisable person's name. Skips the journalists placeholder
+    since that requires manual identification.
+    """
+    from app.services.twitter_scraper import ensure_twitter_feed
+
+    twitter_monitors = [
+        m for m in monitors
+        if m.monitor_type == "twitter_profile" and not m.query and not m.url
+        and "journalists" not in m.name.lower()
+    ]
+    for monitor in twitter_monitors:
+        # Extract the person's name from the monitor name — strip suffixes
+        person_name = (
+            monitor.name
+            .replace(" X/Twitter profile", "")
+            .replace(" Twitter profile", "")
+            .strip()
+        )
+        logger.info("auto_twitter: looking up handle for %r", person_name)
+        handle = _lookup_twitter_handle(person_name)
+        if handle:
+            monitor.query = f"@{handle}" if not handle.startswith("@") else handle
+            db.flush()
+            ensure_twitter_feed(db, monitor)
+            logger.info("auto_twitter: set @%s for %r", handle, person_name)
+        else:
+            logger.info("auto_twitter: no verified handle found for %r", person_name)
+    if twitter_monitors:
+        db.commit()
+
+
 def auto_setup_monitors(db: Session) -> dict:
     """Generate monitors for the current campaign and ingest new search monitors.
 
@@ -545,6 +613,11 @@ def auto_setup_monitors(db: Session) -> dict:
         _ensure_rss_feed(db, monitor)
         created.append(monitor)
     db.commit()
+
+    # Auto-populate Twitter handles for newly created twitter_profile monitors.
+    # Runs in the background of setup — a failed LLM/Nitter call just leaves
+    # the monitor empty for manual entry, which is fine.
+    _auto_populate_twitter_handles(db, created)
 
     search_monitors = [m for m in created if m.monitor_type == "search_query" and m.active]
     sources_ingested = 0
