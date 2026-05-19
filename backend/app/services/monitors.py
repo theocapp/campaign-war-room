@@ -510,12 +510,21 @@ def run_historical_backfill(db: Session) -> dict:
     return {"added": total_added, "queries": len(queries), "windows": len(windows)}
 
 
-def _lookup_twitter_handle(name: str) -> str | None:
+def _normalize_person_name(raw: str) -> str:
+    """Convert FEC-format 'LAST, FIRST MIDDLE' to 'First Last' for LLM prompts."""
+    name = raw.strip()
+    if "," in name:
+        parts = [p.strip().title() for p in name.split(",", 1)]
+        # parts[0] = Last, parts[1] = First [Middle]
+        return f"{parts[1]} {parts[0]}".strip()
+    return name.title()
+
+
+def _lookup_twitter_handle(name: str, role_hint: str = "") -> str | None:
     """Ask the LLM for a person's Twitter/X handle, then verify it against Nitter.
 
     Returns the bare handle (no @) if verified, or None if unknown or unverifiable.
-    The LLM is cheap for this — it's a single short-answer call. Nitter probe
-    confirms the handle actually exists before we save it.
+    Nitter probe confirms the handle actually exists before we save it.
     """
     from app.services.llm_provider import get_provider, MockLLMProvider
     from app.services.twitter_scraper import extract_twitter_username, resolve_nitter_rss
@@ -524,10 +533,11 @@ def _lookup_twitter_handle(name: str) -> str | None:
         provider = get_provider()
         if isinstance(provider, MockLLMProvider):
             return None
+        context = f" ({role_hint})" if role_hint else ""
         prompt = (
-            f"What is the official X/Twitter handle for {name}? "
-            f"If you know it with confidence, reply with ONLY the handle including the @ symbol (e.g. @JohnSmith). "
-            f"If you are not sure or do not know, reply with exactly: unknown"
+            f"What is the official X/Twitter handle for {name}{context}? "
+            f"Reply with ONLY the @ handle if you know it with confidence (e.g. @JohnSmith). "
+            f"If you are not sure, reply with exactly: unknown"
         )
         raw = (provider.complete(prompt) or "").strip()
         if not raw or raw.lower() == "unknown":
@@ -535,7 +545,6 @@ def _lookup_twitter_handle(name: str) -> str | None:
         handle = extract_twitter_username(raw)
         if not handle:
             return None
-        # Verify the handle actually resolves on a Nitter instance before saving
         rss_url = resolve_nitter_rss(handle)
         return handle if rss_url else None
     except Exception as exc:
@@ -546,11 +555,14 @@ def _lookup_twitter_handle(name: str) -> str | None:
 def _auto_populate_twitter_handles(db: Session, monitors: list[SourceMonitor]) -> None:
     """For newly created twitter_profile monitors with no handle, ask the LLM.
 
-    Runs only on monitors that were just created (no query set yet) and whose
-    name contains a recognisable person's name. Skips the journalists placeholder
-    since that requires manual identification.
+    Skips the journalists placeholder — those require manual identification.
     """
+    from app.models import CampaignConfig, Opponent
     from app.services.twitter_scraper import ensure_twitter_feed
+
+    campaign = db.query(CampaignConfig).first()
+    opponents = db.query(Opponent).all()
+    opp_names = {_normalize_person_name(o.name): o for o in opponents}
 
     twitter_monitors = [
         m for m in monitors
@@ -558,17 +570,27 @@ def _auto_populate_twitter_handles(db: Session, monitors: list[SourceMonitor]) -
         and "journalists" not in m.name.lower()
     ]
     for monitor in twitter_monitors:
-        # Extract the person's name from the monitor name — strip suffixes
-        person_name = (
+        raw_name = (
             monitor.name
             .replace(" X/Twitter profile", "")
             .replace(" Twitter profile", "")
             .strip()
         )
-        logger.info("auto_twitter: looking up handle for %r", person_name)
-        handle = _lookup_twitter_handle(person_name)
+        person_name = _normalize_person_name(raw_name)
+
+        # Build a role hint so the LLM has enough context for local candidates
+        if campaign and person_name.split()[-1].lower() in (campaign.candidate_name or "").lower():
+            role_hint = f"candidate for {campaign.office or 'office'}, {campaign.district or campaign.location or ''}"
+        elif person_name in opp_names or raw_name in opp_names:
+            opp = opp_names.get(person_name) or opp_names.get(raw_name)
+            role_hint = f"politician, {campaign.district or campaign.location or ''}" if campaign else "politician"
+        else:
+            role_hint = campaign.district or campaign.location or ""
+
+        logger.info("auto_twitter: looking up handle for %r (role: %s)", person_name, role_hint)
+        handle = _lookup_twitter_handle(person_name, role_hint)
         if handle:
-            monitor.query = f"@{handle}" if not handle.startswith("@") else handle
+            monitor.query = f"@{handle}"
             db.flush()
             ensure_twitter_feed(db, monitor)
             logger.info("auto_twitter: set @%s for %r", handle, person_name)
