@@ -521,11 +521,24 @@ def _normalize_person_name(raw: str) -> str:
 
 
 def _lookup_twitter_handles(name: str, role_hint: str = "") -> list[str]:
-    """Ask the LLM for all known Twitter/X handles for a person, verify each on Nitter.
+    """Find all verified Twitter/X handles for a person.
 
-    Politicians often have multiple accounts (personal, official, mayoral, campaign).
-    Returns a list of all verified handles (bare, no @). Empty list if none found.
+    Strategy (in order):
+      1. Web search — most reliable for current handles, especially local politicians.
+         Searches "{name} twitter site:twitter.com OR site:x.com" and extracts
+         handles from result URLs. No-op with MockSearchProvider.
+      2. LLM fallback — used when web search finds nothing. Good for well-known
+         figures whose handles are in training data, but prone to hallucination
+         for local candidates. Every candidate is verified on Nitter before saving.
+
+    Returns a list of verified bare handles (no @). Empty list if none found.
     """
+    # Try web search first — more reliable than LLM for current social handles
+    verified = _search_for_twitter_handles(name, role_hint)
+    if verified:
+        return verified
+
+    # LLM fallback
     from app.services.llm_provider import get_provider, MockLLMProvider
     from app.services.twitter_scraper import extract_twitter_username, resolve_nitter_rss
     import json as _json
@@ -537,46 +550,35 @@ def _lookup_twitter_handles(name: str, role_hint: str = "") -> list[str]:
         context = f" ({role_hint})" if role_hint else ""
         prompt = (
             f"List ALL known X/Twitter accounts for {name}{context}. "
-            f"Include personal accounts, official/government accounts, campaign accounts, and mayoral or prior-role accounts — even if unverified. "
-            f"Reply with ONLY a JSON array of @ handles you know about, e.g. [\"@JohnSmith\", \"@RepJohnSmith\"]. "
+            f"Include personal, official, campaign, and prior-role accounts — even if unverified. "
+            f"Reply with ONLY a JSON array of @ handles, e.g. [\"@JohnSmith\", \"@RepJohnSmith\"]. "
             f"If you know of none, reply with exactly: []"
         )
         raw = (provider.complete(prompt) or "").strip()
         if not raw or raw == "[]":
             return []
 
-        # Parse JSON array
         try:
             parsed = _json.loads(raw)
             if not isinstance(parsed, list):
                 raise ValueError
             candidates = [extract_twitter_username(h) for h in parsed if isinstance(h, str)]
-            candidates = [h for h in candidates if h]
         except Exception:
-            # Fallback: try to extract any @handles from free-text response
             import re
             candidates = re.findall(r'@([A-Za-z0-9_]{1,50})', raw)
+        candidates = [h for h in candidates if h]
 
-        if not candidates:
-            return []
-
-        # Verify each candidate against Nitter — drop hallucinated handles
         verified = []
         for handle in candidates:
             if resolve_nitter_rss(handle):
                 verified.append(handle)
-                logger.info("_lookup_twitter_handles: verified @%s for %r", handle, name)
+                logger.info("_lookup_twitter_handles: verified @%s for %r via LLM", handle, name)
             else:
                 logger.debug("_lookup_twitter_handles: @%s not found on Nitter for %r", handle, name)
-
-        # If LLM handles all failed verification, fall back to web search
-        if not verified:
-            verified = _search_for_twitter_handles(name, role_hint)
-
         return verified
 
     except Exception as exc:
-        logger.warning("_lookup_twitter_handles: failed for %r: %s", name, exc)
+        logger.warning("_lookup_twitter_handles: LLM fallback failed for %r: %s", name, exc)
         return []
 
 
@@ -602,9 +604,8 @@ def _search_for_twitter_handles(name: str, role_hint: str = "") -> list[str]:
 
         candidates: list[str] = []
         for result in response.results:
-            # Extract handles from twitter.com / x.com URLs in the result
-            for url in [result.url or "", result.description or "", result.title or ""]:
-                handle = extract_twitter_username(url)
+            for text in [result.url or "", getattr(result, "snippet", "") or "", result.title or ""]:
+                handle = extract_twitter_username(text)
                 if handle and handle not in candidates:
                     candidates.append(handle)
 
