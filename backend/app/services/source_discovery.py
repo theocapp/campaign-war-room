@@ -778,6 +778,55 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
              relevance_hint=f"Add {opponent.name}'s verified YouTube channel URL. The system will subscribe to the video RSS feed automatically.")
     # ── End YouTube ───────────────────────────────────────────────────────────
 
+    # ── Twitter/X profiles via Nitter RSS ─────────────────────────────────────
+    # Twitter's public pages are JavaScript-rendered so trafilatura can't scrape
+    # them. Nitter instances serve static HTML + RSS for public profiles. The
+    # monitor runner probes the instance list and registers the first working
+    # feed URL. If all instances are blocked the monitor retries daily.
+    #
+    # The `query` field holds the Twitter handle; the user fills it in after
+    # verifying the official account. Format: @handle or bare handle.
+    if candidate:
+        _add(monitors, seen,
+             name=f"{candidate} X/Twitter profile",
+             monitor_type="twitter_profile",
+             query=None,
+             url=None,
+             category="social",
+             source_type="social",
+             relevance_hint=f"Add the candidate's verified X/Twitter handle (e.g. @CognettForCongress) "
+                            f"to monitor tweets. The system will find a working Nitter RSS feed automatically.")
+
+    for opponent in opponents:
+        if not opponent.name:
+            continue
+        _add(monitors, seen,
+             name=f"{opponent.name} X/Twitter profile",
+             monitor_type="twitter_profile",
+             query=None,
+             url=None,
+             category="social",
+             source_type="opponent_statement",
+             relevance_hint=f"Add {opponent.name}'s verified X/Twitter handle to monitor their tweets and attacks. "
+                            f"This is where opposition attacks typically land first.")
+
+    # Local journalist Twitter accounts — high-signal for tip-offs and early framing.
+    # Generated as a single manual monitor; user adds individual handles after identifying
+    # which journalists actively cover the race.
+    if location or district:
+        geo_label = location or district
+        _add(monitors, seen,
+             name=f"{geo_label} journalists X/Twitter",
+             monitor_type="twitter_profile",
+             query=None,
+             url=None,
+             category="social",
+             source_type="news",
+             relevance_hint=f"Add Twitter handles for local journalists who cover {geo_label} politics "
+                            f"(one monitor per journalist). Journalists often post breaking news on Twitter "
+                            f"hours before it appears in print.")
+    # ── End Twitter/X profiles ────────────────────────────────────────────────
+
     # ── FEC filing monitors ───────────────────────────────────────────────────
     # Independent expenditure 24/48-hr notices (schedule_e) are the most
     # time-sensitive FEC signal — a PAC spending against your candidate must

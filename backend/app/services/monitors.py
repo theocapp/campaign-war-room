@@ -74,6 +74,13 @@ def _ensure_rss_feed(db: Session, monitor: SourceMonitor) -> None:
     """
     from app.services.source_discovery import _youtube_channel_rss
 
+    if monitor.monitor_type == "twitter_profile":
+        if not (monitor.query or monitor.url):
+            return  # waiting for user to supply a handle
+        from app.services.twitter_scraper import ensure_twitter_feed
+        ensure_twitter_feed(db, monitor)
+        return
+
     if monitor.monitor_type == "youtube":
         if not monitor.url:
             return  # waiting for user to supply a channel URL

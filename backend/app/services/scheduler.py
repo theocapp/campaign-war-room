@@ -224,6 +224,20 @@ def _run_reddit() -> None:
         log.exception("Scheduled Reddit ingestion failed with an unhandled exception")
 
 
+def _run_twitter_recheck() -> None:
+    """Sync: re-probe Nitter for any twitter_profile monitors without a feed."""
+    from app.db import SessionLocal
+    from app.services.twitter_scraper import recheck_failed_twitter_monitors
+
+    log.info("Twitter/Nitter recheck starting")
+    try:
+        with SessionLocal() as db:
+            resolved = recheck_failed_twitter_monitors(db)
+        log.info("Twitter/Nitter recheck complete: newly_resolved=%d", resolved)
+    except Exception:
+        log.exception("Twitter/Nitter recheck failed")
+
+
 def _run_fec() -> None:
     """Sync: poll all active FEC monitors. Called by scheduler (daily)."""
     from app.db import SessionLocal
@@ -293,6 +307,17 @@ def start_scheduler() -> None:
         trigger="interval",
         hours=24,
         id="fec_daily",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Twitter/Nitter recheck: daily — retries monitors that couldn't find a
+    # working Nitter instance last time (instances come and go)
+    _scheduler.add_job(
+        lambda: asyncio.ensure_future(asyncio.to_thread(_run_twitter_recheck)),
+        trigger="interval",
+        hours=24,
+        id="twitter_nitter_recheck",
         max_instances=1,
         coalesce=True,
         replace_existing=True,
