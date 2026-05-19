@@ -36,7 +36,57 @@ def _duplicate_query(db: Session, values: dict) -> SourceMonitor | None:
     return q.filter(or_(*clauses)).first()
 
 
+def _resolve_youtube_channel_id(url: str) -> str | None:
+    """Extract or resolve a YouTube channel ID from a channel URL.
+
+    Handles:
+      youtube.com/channel/UCxxxxxxxx   → direct ID extraction
+      youtube.com/@handle              → fetches page HTML to find channel ID
+    Returns None if resolution fails.
+    """
+    if not url:
+        return None
+    # Direct channel ID in URL
+    m = re.search(r"youtube\.com/channel/(UC[A-Za-z0-9_-]{20,})", url)
+    if m:
+        return m.group(1)
+    # Handle-based URL — fetch the page and look for channel ID in the HTML
+    try:
+        import requests as _req
+        r = _req.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True)
+        m = re.search(r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{20,})"', r.text)
+        if m:
+            return m.group(1)
+        m = re.search(r'<link rel="canonical" href="https://www\.youtube\.com/channel/(UC[A-Za-z0-9_-]{20,})"', r.text)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
 def _ensure_rss_feed(db: Session, monitor: SourceMonitor) -> None:
+    """Register an RssFeed row for the monitor so the scheduler picks it up.
+
+    For monitor_type="rss": straightforward — use the URL as-is.
+    For monitor_type="youtube": resolve channel ID from the URL and convert
+    to the YouTube XML feed format before registering.
+    """
+    from app.services.source_discovery import _youtube_channel_rss
+
+    if monitor.monitor_type == "youtube":
+        if not monitor.url:
+            return  # waiting for user to supply a channel URL
+        channel_id = _resolve_youtube_channel_id(monitor.url)
+        if not channel_id:
+            logger.warning("monitors: could not resolve YouTube channel ID from %s", monitor.url)
+            return
+        feed_url = _youtube_channel_rss(channel_id)
+        if db.query(RssFeed).filter_by(url=feed_url).first():
+            return
+        db.add(RssFeed(name=monitor.name, url=feed_url, source_type=monitor.source_type or "social"))
+        return
+
     if monitor.monitor_type != "rss" or not monitor.url:
         return
     if db.query(RssFeed).filter_by(url=monitor.url).first():
@@ -333,6 +383,49 @@ def _soft_duplicate(db: Session, title: str | None, source_name: str | None) -> 
         ):
             return item
     return None
+
+
+def run_fec_monitors(db: Session) -> dict:
+    """Poll all active FEC monitors and ingest any new filings.
+
+    Called by the scheduler on a daily cadence — FEC notices are filed
+    within 24-48 hours, so daily polling is sufficient.
+
+    Returns a summary dict with counts per monitor type.
+    """
+    from app.services import fec_monitor
+
+    fec_monitors = (
+        db.query(SourceMonitor)
+        .filter(
+            SourceMonitor.monitor_type.in_(["fec_filings", "fec_ie_district"]),
+            SourceMonitor.active == True,  # noqa: E712
+        )
+        .all()
+    )
+
+    results = {"fec_filings": 0, "fec_ie_district": 0, "monitors_run": 0}
+
+    for monitor in fec_monitors:
+        if not monitor.query:
+            continue
+        try:
+            if monitor.monitor_type == "fec_filings":
+                # query = FEC candidate ID; name contains the candidate name
+                candidate_name = monitor.name.replace("FEC: ", "").replace(" filings", "").strip()
+                n = fec_monitor.poll_candidate_fec(db, monitor.query, candidate_name)
+                results["fec_filings"] += n
+            elif monitor.monitor_type == "fec_ie_district":
+                n = fec_monitor.poll_district_ie(db, monitor.query)
+                results["fec_ie_district"] += n
+            results["monitors_run"] += 1
+            monitor.last_checked_at = datetime.utcnow()
+            monitor.updated_at = datetime.utcnow()
+            db.commit()
+        except Exception as exc:
+            logger.warning("run_fec_monitors: monitor %d failed: %s", monitor.id, exc)
+
+    return results
 
 
 def _run_search_monitor(db: Session, monitor: SourceMonitor) -> int:

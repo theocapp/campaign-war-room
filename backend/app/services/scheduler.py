@@ -224,6 +224,23 @@ def _run_reddit() -> None:
         log.exception("Scheduled Reddit ingestion failed with an unhandled exception")
 
 
+def _run_fec() -> None:
+    """Sync: poll all active FEC monitors. Called by scheduler (daily)."""
+    from app.db import SessionLocal
+    from app.services.monitors import run_fec_monitors
+
+    log.info("Scheduled FEC polling starting")
+    try:
+        with SessionLocal() as db:
+            results = run_fec_monitors(db)
+        log.info(
+            "Scheduled FEC polling complete: monitors_run=%d fec_filings=%d fec_ie_district=%d",
+            results["monitors_run"], results["fec_filings"], results["fec_ie_district"],
+        )
+    except Exception:
+        log.exception("Scheduled FEC polling failed with an unhandled exception")
+
+
 def start_scheduler() -> None:
     """Start the background scheduler.  Called once during app startup."""
     global _scheduler
@@ -266,6 +283,16 @@ def start_scheduler() -> None:
         trigger="interval",
         hours=2,
         id="reddit_auto",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # FEC filings: daily (IE notices must be filed within 24-48 hours of expenditure)
+    _scheduler.add_job(
+        lambda: asyncio.ensure_future(asyncio.to_thread(_run_fec)),
+        trigger="interval",
+        hours=24,
+        id="fec_daily",
         max_instances=1,
         coalesce=True,
         replace_existing=True,

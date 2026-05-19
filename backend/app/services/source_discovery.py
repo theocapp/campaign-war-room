@@ -268,6 +268,17 @@ _STATE_SUBREDDITS: dict[str, str] = {
 }
 
 
+def _globenewswire_url(query: str) -> str:
+    """GlobeNewswire keyword RSS — free, no auth required."""
+    params = urlencode({"rss": "true", "filter": "keyword", "search": query})
+    return f"https://www.globenewswire.com/RssFeed/search?{params}"
+
+
+def _youtube_channel_rss(channel_id: str) -> str:
+    """RSS feed for a YouTube channel given its UCxxxxxxxx channel ID."""
+    return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
+
 def _reddit_search_url(query: str, subreddit: str | None = None) -> str:
     """Build a Reddit RSS search URL. subreddit=None searches all of Reddit."""
     params = urlencode({"q": query, "sort": "new", "limit": "25", "t": "all"})
@@ -675,6 +686,132 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
                      query=_q(_quoted(geo), priority), category="issue",
                      required_terms=[priority, geo], excluded_terms=excluded,
                      relevance_hint="Sparse-race issue query anchored to local geography.")
+
+    # ── Press release wires ───────────────────────────────────────────────────
+    # GlobeNewswire supports keyword RSS natively (free, no auth).
+    # PR Newswire and Business Wire don't have keyword RSS, so we route them
+    # through Google News site-specific search, which surfaces the same releases.
+    wire_name = cand_last_for_search or candidate
+    if wire_name:
+        _add(monitors, seen,
+             name=f"GlobeNewswire: {wire_name}",
+             monitor_type="rss",
+             url=_globenewswire_url(wire_name),
+             category="press_release",
+             source_type="news",
+             relevance_hint="GlobeNewswire press releases mentioning the candidate. "
+                            "Catches campaign announcements and opposition research before local outlets pick them up.")
+        _add(monitors, seen,
+             name=f"PR Newswire: {wire_name}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:prnewswire.com "{wire_name}"'),
+             category="press_release",
+             source_type="news",
+             relevance_hint="PR Newswire releases mentioning the candidate, surfaced via Google News.")
+        _add(monitors, seen,
+             name=f"Business Wire: {wire_name}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:businesswire.com "{wire_name}"'),
+             category="press_release",
+             source_type="news",
+             relevance_hint="Business Wire releases mentioning the candidate, surfaced via Google News.")
+
+    for opponent in opponents:
+        opp_wire = _candidate_last_name(opponent.name) or opponent.name
+        if not opp_wire:
+            continue
+        _add(monitors, seen,
+             name=f"GlobeNewswire: {opp_wire}",
+             monitor_type="rss",
+             url=_globenewswire_url(opp_wire),
+             category="press_release",
+             source_type="opponent_statement",
+             relevance_hint=f"GlobeNewswire press releases from or about {opponent.name}.")
+        _add(monitors, seen,
+             name=f"PR Newswire: {opp_wire}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:prnewswire.com "{opp_wire}"'),
+             category="press_release",
+             source_type="opponent_statement",
+             relevance_hint=f"PR Newswire releases mentioning {opponent.name}.")
+    # ── End press release wires ───────────────────────────────────────────────
+
+    # ── YouTube ───────────────────────────────────────────────────────────────
+    # Google News site search surfaces YouTube content that gets indexed as news.
+    # Channel-based RSS (youtube.com/feeds/videos.xml?channel_id=UC...) is added
+    # as monitor_type="youtube" once the user provides a channel URL — the monitor
+    # runner resolves the channel ID and auto-converts it to a proper RSS feed.
+    if wire_name:
+        _add(monitors, seen,
+             name=f"YouTube: {wire_name}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:youtube.com "{wire_name}"'),
+             category="social",
+             source_type="social",
+             relevance_hint="YouTube videos about the candidate surfaced via Google News — catches campaign ads, debate clips, and viral moments.")
+        _add(monitors, seen,
+             name=f"{candidate} YouTube channel",
+             monitor_type="youtube",
+             url=None,
+             category="social",
+             source_type="social",
+             relevance_hint="Add the candidate's YouTube channel URL (e.g. youtube.com/@CandidateName) after verifying it. "
+                            "The system will subscribe to the channel's video RSS feed automatically.")
+
+    for opponent in opponents:
+        if not opponent.name:
+            continue
+        opp_last = _candidate_last_name(opponent.name) or opponent.name
+        _add(monitors, seen,
+             name=f"YouTube: {opp_last}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:youtube.com "{opp_last}"'),
+             category="social",
+             source_type="opponent_statement",
+             relevance_hint=f"YouTube videos about {opponent.name} surfaced via Google News.")
+        _add(monitors, seen,
+             name=f"{opponent.name} YouTube channel",
+             monitor_type="youtube",
+             url=None,
+             category="social",
+             source_type="opponent_statement",
+             relevance_hint=f"Add {opponent.name}'s verified YouTube channel URL. The system will subscribe to the video RSS feed automatically.")
+    # ── End YouTube ───────────────────────────────────────────────────────────
+
+    # ── FEC filing monitors ───────────────────────────────────────────────────
+    # Independent expenditure 24/48-hr notices (schedule_e) are the most
+    # time-sensitive FEC signal — a PAC spending against your candidate must
+    # file within 24-48 hours, giving you advance warning before the ads air.
+    #
+    # Opponent fundraising (F3 quarterly reports) signal financial momentum.
+    #
+    # monitor_type="fec_filings" uses the `query` field to store the FEC
+    # candidate ID (e.g. "H8PA08123").  The monitor runner calls api.fec.gov.
+    for opponent in opponents:
+        if not opponent.fec_candidate_id:
+            continue
+        _add(monitors, seen,
+             name=f"FEC: {opponent.name} filings",
+             monitor_type="fec_filings",
+             query=opponent.fec_candidate_id,
+             category="public_record",
+             source_type="public_record",
+             relevance_hint=f"Polls api.fec.gov for independent expenditure notices and fundraising reports tied to {opponent.name} (FEC ID: {opponent.fec_candidate_id}).")
+
+    # District-level independent expenditure monitor — catches all PAC/dark money
+    # spending in the race, not just spending tied to a specific candidate ID.
+    if district:
+        state_code_for_fec = state_code or ""
+        dist_num = district_number or re.sub(r"[^0-9]", "", district or "")
+        if state_code_for_fec and dist_num:
+            _add(monitors, seen,
+                 name=f"FEC: independent expenditures in {district}",
+                 monitor_type="fec_ie_district",
+                 query=f"{state_code_for_fec}:{dist_num}",
+                 category="public_record",
+                 source_type="public_record",
+                 relevance_hint=f"Polls FEC schedule_e for all independent expenditure notices targeting {district} — catches dark money and PAC activity across the whole race.")
+    # ── End FEC filing monitors ───────────────────────────────────────────────
 
     public_record_names = [
         "FEC candidate or committee check",
