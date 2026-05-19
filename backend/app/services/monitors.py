@@ -520,36 +520,105 @@ def _normalize_person_name(raw: str) -> str:
     return name.title()
 
 
-def _lookup_twitter_handle(name: str, role_hint: str = "") -> str | None:
-    """Ask the LLM for a person's Twitter/X handle, then verify it against Nitter.
+def _lookup_twitter_handles(name: str, role_hint: str = "") -> list[str]:
+    """Ask the LLM for all known Twitter/X handles for a person, verify each on Nitter.
 
-    Returns the bare handle (no @) if verified, or None if unknown or unverifiable.
-    Nitter probe confirms the handle actually exists before we save it.
+    Politicians often have multiple accounts (personal, official, mayoral, campaign).
+    Returns a list of all verified handles (bare, no @). Empty list if none found.
     """
     from app.services.llm_provider import get_provider, MockLLMProvider
     from app.services.twitter_scraper import extract_twitter_username, resolve_nitter_rss
+    import json as _json
 
     try:
         provider = get_provider()
         if isinstance(provider, MockLLMProvider):
-            return None
+            return []
         context = f" ({role_hint})" if role_hint else ""
         prompt = (
-            f"What is the official X/Twitter handle for {name}{context}? "
-            f"Reply with ONLY the @ handle if you know it with confidence (e.g. @JohnSmith). "
-            f"If you are not sure, reply with exactly: unknown"
+            f"List ALL known X/Twitter accounts for {name}{context}. "
+            f"Include personal accounts, official/government accounts, campaign accounts, and mayoral or prior-role accounts — even if unverified. "
+            f"Reply with ONLY a JSON array of @ handles you know about, e.g. [\"@JohnSmith\", \"@RepJohnSmith\"]. "
+            f"If you know of none, reply with exactly: []"
         )
         raw = (provider.complete(prompt) or "").strip()
-        if not raw or raw.lower() == "unknown":
-            return None
-        handle = extract_twitter_username(raw)
-        if not handle:
-            return None
-        rss_url = resolve_nitter_rss(handle)
-        return handle if rss_url else None
+        if not raw or raw == "[]":
+            return []
+
+        # Parse JSON array
+        try:
+            parsed = _json.loads(raw)
+            if not isinstance(parsed, list):
+                raise ValueError
+            candidates = [extract_twitter_username(h) for h in parsed if isinstance(h, str)]
+            candidates = [h for h in candidates if h]
+        except Exception:
+            # Fallback: try to extract any @handles from free-text response
+            import re
+            candidates = re.findall(r'@([A-Za-z0-9_]{1,50})', raw)
+
+        if not candidates:
+            return []
+
+        # Verify each candidate against Nitter — drop hallucinated handles
+        verified = []
+        for handle in candidates:
+            if resolve_nitter_rss(handle):
+                verified.append(handle)
+                logger.info("_lookup_twitter_handles: verified @%s for %r", handle, name)
+            else:
+                logger.debug("_lookup_twitter_handles: @%s not found on Nitter for %r", handle, name)
+
+        # If LLM handles all failed verification, fall back to web search
+        if not verified:
+            verified = _search_for_twitter_handles(name, role_hint)
+
+        return verified
+
     except Exception as exc:
-        logger.warning("_lookup_twitter_handle: failed for %r: %s", name, exc)
-        return None
+        logger.warning("_lookup_twitter_handles: failed for %r: %s", name, exc)
+        return []
+
+
+def _search_for_twitter_handles(name: str, role_hint: str = "") -> list[str]:
+    """Web search fallback: search for a person's Twitter handles when the LLM doesn't know them.
+
+    Uses the configured search provider (no-op with MockSearchProvider).
+    Extracts @handles from result URLs and snippets, then verifies each on Nitter.
+    """
+    import re
+    from app.services.search_provider import get_search_provider
+    from app.services.twitter_scraper import extract_twitter_username, resolve_nitter_rss
+
+    try:
+        provider = get_search_provider()
+        # MockSearchProvider returns no results — skip gracefully
+        if type(provider).__name__ == "MockSearchProvider":
+            return []
+
+        context = f" {role_hint}" if role_hint else ""
+        query = f"{name}{context} twitter OR \"x.com\""
+        response = provider.search(query, limit=10)
+
+        candidates: list[str] = []
+        for result in response.results:
+            # Extract handles from twitter.com / x.com URLs in the result
+            for url in [result.url or "", result.description or "", result.title or ""]:
+                handle = extract_twitter_username(url)
+                if handle and handle not in candidates:
+                    candidates.append(handle)
+
+        verified = []
+        for handle in candidates:
+            if resolve_nitter_rss(handle):
+                verified.append(handle)
+                logger.info("_search_for_twitter_handles: verified @%s for %r", handle, name)
+
+        return verified
+
+    except Exception as exc:
+        logger.warning("_search_for_twitter_handles: failed for %r: %s", name, exc)
+        return []
 
 
 def _auto_populate_twitter_handles(db: Session, monitors: list[SourceMonitor]) -> None:
@@ -582,20 +651,37 @@ def _auto_populate_twitter_handles(db: Session, monitors: list[SourceMonitor]) -
         if campaign and person_name.split()[-1].lower() in (campaign.candidate_name or "").lower():
             role_hint = f"candidate for {campaign.office or 'office'}, {campaign.district or campaign.location or ''}"
         elif person_name in opp_names or raw_name in opp_names:
-            opp = opp_names.get(person_name) or opp_names.get(raw_name)
             role_hint = f"politician, {campaign.district or campaign.location or ''}" if campaign else "politician"
         else:
             role_hint = campaign.district or campaign.location or ""
 
-        logger.info("auto_twitter: looking up handle for %r (role: %s)", person_name, role_hint)
-        handle = _lookup_twitter_handle(person_name, role_hint)
-        if handle:
-            monitor.query = f"@{handle}"
+        logger.info("auto_twitter: looking up handles for %r (role: %s)", person_name, role_hint)
+        handles = _lookup_twitter_handles(person_name, role_hint)
+
+        if not handles:
+            logger.info("auto_twitter: no verified handles found for %r", person_name)
+            continue
+
+        # First handle goes on the original monitor; additional handles get new monitors
+        for i, handle in enumerate(handles):
+            if i == 0:
+                target = monitor
+            else:
+                target = SourceMonitor(
+                    name=f"{person_name} X/Twitter (@{handle})",
+                    monitor_type="twitter_profile",
+                    source_type=monitor.source_type,
+                    category=monitor.category,
+                    active=True,
+                )
+                db.add(target)
+                db.flush()
+
+            target.query = f"@{handle}"
             db.flush()
-            ensure_twitter_feed(db, monitor)
-            logger.info("auto_twitter: set @%s for %r", handle, person_name)
-        else:
-            logger.info("auto_twitter: no verified handle found for %r", person_name)
+            ensure_twitter_feed(db, target)
+            logger.info("auto_twitter: registered @%s for %r", handle, person_name)
+
     if twitter_monitors:
         db.commit()
 
