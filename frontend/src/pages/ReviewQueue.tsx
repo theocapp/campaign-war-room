@@ -16,13 +16,13 @@ function timeAgo(iso: string | null): string {
 const FRAMING_LABEL: Record<string, { label: string; color: string }> = {
   respond:  { label: 'Needs response', color: '#ef4444' },
   review:   { label: 'Worth reviewing', color: '#f97316' },
-  monitor:  { label: 'Monitor',        color: '#64748b' },
-  ignore:   { label: 'Low priority',   color: '#334155' },
+  monitor:  { label: 'Monitor',        color: '#6b6b6b' },
+  ignore:   { label: 'Low priority',   color: '#3f3f3f' },
 }
 
 function ScoreBadge({ score }: { score: number | null }) {
   if (score == null) return null
-  const color = score >= 60 ? '#22c55e' : score >= 35 ? '#f97316' : '#64748b'
+  const color = score >= 60 ? '#22c55e' : score >= 35 ? '#f97316' : '#6b6b6b'
   return (
     <span style={{
       fontSize: 11, fontWeight: 700, color, border: `1px solid ${color}`,
@@ -39,7 +39,7 @@ export default function ReviewQueue() {
   const [error, setError] = useState<string | null>(null)
   const [acting, setActing] = useState<number | null>(null)
   const [filterAction, setFilterAction] = useState('all')
-  const [filterScore, setFilterScore] = useState('all')
+  const [filterScore, setFilterScore] = useState('60')
 
   const load = useCallback(() => {
     setLoading(true)
@@ -86,9 +86,9 @@ export default function ReviewQueue() {
       {/* Header */}
       <div style={{ marginBottom: 16 }}>
         <h1 style={{ margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: 'var(--text, #f1f5f9)' }}>
-          AI Audit
+          Review Queue
         </h1>
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted, #94a3b8)', lineHeight: 1.5 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.5 }}>
           These are articles the AI scored in the last 48 hours. Confirm or correct its calls —
           your feedback helps you spot when the AI is getting things wrong.
           Articles you mark will be removed from this list.
@@ -120,20 +120,20 @@ export default function ReviewQueue() {
           ]}
         />
         {filtered.length !== items.length && (
-          <span style={{ fontSize: 12, color: 'var(--text-muted, #94a3b8)', alignSelf: 'center' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', alignSelf: 'center' }}>
             Showing {filtered.length} of {items.length}
           </span>
         )}
       </div>
 
       {filtered.length === 0 && items.length > 0 && (
-        <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-muted, #94a3b8)', fontSize: 13 }}>
+        <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-muted)', fontSize: 13 }}>
           No items match these filters.
         </div>
       )}
 
       {items.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted, #94a3b8)' }}>
+        <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>✓</div>
           <div style={{ fontWeight: 600, color: 'var(--text, #f1f5f9)', marginBottom: 4 }}>All caught up</div>
           <div style={{ fontSize: 13 }}>No new articles to review in the last 48 hours.</div>
@@ -148,9 +148,9 @@ export default function ReviewQueue() {
 
           return (
             <div key={item.id} style={{
-              background: 'var(--surface, #1e293b)',
-              border: '1px solid var(--border, #334155)',
-              borderLeft: `4px solid ${isRelevant ? framing.color : '#334155'}`,
+              background: 'var(--surface-1)',
+              border: '1px solid var(--border)',
+              borderLeft: `4px solid ${isRelevant ? framing.color : '#3f3f3f'}`,
               borderRadius: 8,
               padding: '14px 16px',
             }}>
@@ -158,33 +158,47 @@ export default function ReviewQueue() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
                 <span style={{
                   fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
-                  letterSpacing: '0.08em', color: isRelevant ? framing.color : '#475569',
-                  background: isRelevant ? `${framing.color}18` : '#1e293b',
-                  border: `1px solid ${isRelevant ? framing.color : '#334155'}`,
+                  letterSpacing: '0.08em', color: isRelevant ? framing.color : '#6b6b6b',
+                  background: isRelevant ? `${framing.color}18` : 'var(--surface-2)',
+                  border: `1px solid ${isRelevant ? framing.color : '#3f3f3f'}`,
                   borderRadius: 4, padding: '1px 6px',
                 }}>
                   AI: {isRelevant ? framing.label : 'Irrelevant'}
                 </span>
                 <ScoreBadge score={item.race_relevance_score} />
-                <span style={{ fontSize: 11, color: 'var(--text-muted, #94a3b8)', marginLeft: 'auto' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>
                   {item.source_name} · {timeAgo(item.created_at)}
                 </span>
               </div>
 
-              {/* Title */}
-              <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text, #f1f5f9)', lineHeight: 1.4, marginBottom: 6 }}>
+              {/* AI evidence — the reason the AI scored it this way */}
+              {item.relevance_reasons?.length > 0 && (
+                <div style={{
+                  fontSize: 13, fontStyle: 'italic',
+                  color: 'var(--text-secondary)',
+                  borderLeft: '2px solid #3f3f3f',
+                  paddingLeft: 10,
+                  lineHeight: 1.55,
+                  marginBottom: 8,
+                }}>
+                  "{Array.isArray(item.relevance_reasons)
+                    ? item.relevance_reasons.join(' ')
+                    : item.relevance_reasons}"
+                </div>
+              )}
+
+              {/* Title — secondary, just for navigation */}
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.4, marginBottom: 8 }}>
                 {item.source_url
-                  ? <a href={item.source_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>{item.title || '(no title)'}</a>
+                  ? <a href={item.source_url} target="_blank" rel="noopener noreferrer"
+                      style={{ color: 'inherit', textDecoration: 'none' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = '#ffbf00')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'inherit')}>
+                      {item.title || '(no title)'} ↗
+                    </a>
                   : (item.title || '(no title)')
                 }
               </div>
-
-              {/* Summary */}
-              {item.summary && (
-                <div style={{ fontSize: 13, color: 'var(--text-muted, #94a3b8)', lineHeight: 1.5, marginBottom: 10 }}>
-                  {item.summary.replace(/<[^>]+>/g, '').slice(0, 220)}
-                </div>
-              )}
 
               {/* Action buttons */}
               <div style={{ display: 'flex', gap: 8 }}>
