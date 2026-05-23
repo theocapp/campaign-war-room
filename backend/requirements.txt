@@ -13,3 +13,12 @@ anthropic>=0.28.0
 apscheduler>=3.10.4,<4
 trafilatura>=1.12.0
 praw>=7.7.0
+pytrends>=4.9.0
+# pytrends 4.9.x passes the legacy `method_whitelist` arg to urllib3, which was
+# removed in urllib3 2.0 — pin below 2 so Google Trends collection keeps working.
+urllib3<2
+# Used only by the optional BigQuery historical-backfill path
+# (app/services/gdelt_bigquery.py). Safe to omit if you only use the
+# GDELT DOC API + RSS ingestion paths — the import is lazy.
+google-cloud-bigquery>=3.0
+readability-lxml==0.8.4.1

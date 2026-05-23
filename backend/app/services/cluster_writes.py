@@ -25,8 +25,20 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+def _dt_str(dt: datetime) -> str:
+    """Format a datetime for storage with a space separator.
+
+    SQLAlchemy's SQLite DateTime type binds/stores dates as
+    '%Y-%m-%d %H:%M:%S.%f' (space-separated). `datetime.isoformat()` uses a
+    'T' separator, which sorts *after* a space in SQLite's text comparison and
+    silently breaks `WHERE date >= ...` range filters. These helpers write
+    dates via raw text() SQL, so they must match SQLAlchemy's format exactly.
+    """
+    return dt.isoformat(sep=" ")
+
+
+def _now_str() -> str:
+    return _dt_str(datetime.utcnow())
 
 
 def upsert_frame_match(
@@ -38,15 +50,19 @@ def upsert_frame_match(
     source_type: str = "cluster_runtime",
     matched_by: str = "llm",
     representative_snapshot_ts: Optional[datetime] = None,
+    article_date: Optional[datetime] = None,
 ) -> None:
-    """Insert a FrameClusterMatch row, or update confidence/last_seen on an
+    """Insert a FrameClusterMatch row, or update confidence/timestamps on an
     existing one. Idempotent.
 
     `confidence` is monotonic: an UPSERT only raises it, never lowers it.
-    `first_seen_at` is preserved on conflict; `last_seen_at` is bumped.
+    `first_seen_at` uses MIN — backfill can push it earlier than runtime.
+    `last_seen_at` uses MAX — never regresses to an older date.
+    `article_date` should be the article's published_at so historical coverage
+    is dated correctly rather than stamped with today's ingestion time.
     """
-    snapshot = (representative_snapshot_ts or datetime.utcnow()).isoformat()
-    now_iso = _now_iso()
+    snapshot = _dt_str(representative_snapshot_ts or datetime.utcnow())
+    match_date = _dt_str(article_date or datetime.utcnow())
     db.execute(
         text(
             """
@@ -55,10 +71,11 @@ def upsert_frame_match(
                representative_snapshot_ts, first_seen_at, last_seen_at)
             VALUES
               (:frame_id, :cluster_id, :confidence, :matched_by, :source_type,
-               :snapshot, :now, :now)
+               :snapshot, :match_date, :match_date)
             ON CONFLICT(frame_id, story_cluster_id) DO UPDATE SET
               confidence = MAX(excluded.confidence, frame_cluster_matches.confidence),
-              last_seen_at = excluded.last_seen_at,
+              first_seen_at = MIN(excluded.first_seen_at, frame_cluster_matches.first_seen_at),
+              last_seen_at = MAX(excluded.last_seen_at, frame_cluster_matches.last_seen_at),
               source_type = excluded.source_type,
               representative_snapshot_ts = excluded.representative_snapshot_ts
             """
@@ -70,7 +87,7 @@ def upsert_frame_match(
             "matched_by": matched_by,
             "source_type": source_type,
             "snapshot": snapshot,
-            "now": now_iso,
+            "match_date": match_date,
         },
     )
 
@@ -103,7 +120,7 @@ def upsert_opponent_activity(
     fp = fingerprint or _opponent_fingerprint(claim, attack, promise)
     if not fp:
         return
-    now_iso = _now_iso()
+    now_str = _now_str()
     db.execute(
         text(
             """
@@ -126,6 +143,6 @@ def upsert_opponent_activity(
             "promise": promise,
             "fp": fp,
             "source_type": source_type,
-            "now": now_iso,
+            "now": now_str,
         },
     )

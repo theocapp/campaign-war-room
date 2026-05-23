@@ -125,40 +125,45 @@ def _validate_rss_url(url: str, timeout: int = 8) -> bool:
 
 
 def _auto_discover_outlets(db: Session, district: str, state_code: str | None,
-                            location: str | None, candidate: str | None) -> int:
-    """Use an LLM to discover local news outlets for an uncatalogued district.
+                            location: str | None, candidate: str | None,
+                            force: bool = False) -> int:
+    """Use an LLM to discover local news outlets for a campaign district.
 
-    Validates each suggested RSS URL before saving.  Idempotent — skips domains
-    that already exist as Outlet records.  Returns number of new outlets created.
+    Validates each suggested RSS URL before saving. Idempotent — skips domains
+    that already exist as Outlet records. Returns number of new outlets created.
 
-    Only runs when the district has no outlets in either the hardcoded catalog
-    or the DB already — safe to call on every campaign init.
+    Normally only runs when the district has no outlets (hardcoded catalog or
+    DB). Pass force=True to run discovery even when entries exist — useful
+    for augmenting curated districts (PA-08) with additional outlets and for
+    periodic re-discovery to catch newly-emerged outlets.
     """
     import json as _json
     from app.models import Outlet
     from app.services.llm_provider import get_provider
     from app.services.source_discovery import get_local_outlets
 
-    # Skip if the catalog already has DISTRICT-SPECIFIC entries (not just state-level ones).
-    # State-level entries apply to every race in the state so they don't substitute for
-    # local outlets specific to this district.
     dist_key = district.upper().strip()
-    from app.services.source_discovery import _OUTLET_CATALOG
-    has_hardcoded = bool(_OUTLET_CATALOG["district"].get(dist_key))
 
-    # Also check DB for any outlets already tagged with this exact district.
-    import json as _json2
-    from app.models import Outlet as _OutletCheck
-    db_tagged = [
-        o for o in db.query(_OutletCheck).filter(
-            _OutletCheck.active == True, _OutletCheck.districts.isnot(None)
-        ).all()
-        if dist_key in (_json2.loads(o.districts or "[]"))
-    ]
-    if has_hardcoded or db_tagged:
-        return 0  # district already covered
+    if not force:
+        # Skip if the catalog already has DISTRICT-SPECIFIC entries (not just state-level ones).
+        from app.services.source_discovery import _OUTLET_CATALOG
+        has_hardcoded = bool(_OUTLET_CATALOG["district"].get(dist_key))
 
-    logger.info("outlet_discovery: no catalog entries for %s — running LLM discovery", district)
+        # Also check DB for any outlets already tagged with this exact district.
+        import json as _json2
+        from app.models import Outlet as _OutletCheck
+        db_tagged = [
+            o for o in db.query(_OutletCheck).filter(
+                _OutletCheck.active == True, _OutletCheck.districts.isnot(None)
+            ).all()
+            if dist_key in (_json2.loads(o.districts or "[]"))
+        ]
+        if has_hardcoded or db_tagged:
+            return 0  # district already covered
+
+        logger.info("outlet_discovery: no catalog entries for %s — running LLM discovery", district)
+    else:
+        logger.info("outlet_discovery: FORCE mode — running LLM discovery for %s (catalog/DB will be augmented)", district)
 
     location_hint = location or district
     state_name = state_code or ""
@@ -462,52 +467,136 @@ def _run_search_monitor(db: Session, monitor: SourceMonitor) -> int:
     return added
 
 
-def run_historical_backfill(db: Session) -> dict:
-    """One-time 90-day Google News backfill on campaign initialization.
+def _full_name(raw: str | None) -> str | None:
+    """Convert FEC-format 'LAST, FIRST MIDDLE' to 'First Last' (quoted for search)."""
+    if not raw:
+        return None
+    name = raw.strip()
+    if "," in name:
+        parts = [p.strip().title() for p in name.split(",", 1)]
+        if len(parts) == 2 and parts[0] and parts[1]:
+            return f"{parts[1]} {parts[0]}".strip()
+    return name.title()
 
-    Breaks 90 days into 3 monthly windows and fetches each key query per window.
-    Marks CampaignConfig.historical_backfill_completed = True when done.
-    Safe to call multiple times — skips if already completed.
+
+def _load_json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        loaded = json.loads(value)
+        return [str(x).strip() for x in loaded if str(x).strip()] if isinstance(loaded, list) else []
+    except Exception:
+        return []
+
+
+def run_historical_backfill(db: Session, *, force: bool = False, days_back: int = 180) -> dict:
+    """Google News backfill on a sliding window of date-ranged queries.
+
+    Idempotent: runs once per campaign (gated by extended_backfill_completed).
+    With force=True, ignores the flag and re-runs. Safe to re-run anyway because
+    ingest_rss dedupes on source_url and relevance is enforced downstream by the
+    LLM scoring pipeline (so broader queries don't degrade signal; they just
+    give the pipeline more raw input).
+
+    Quality safeguards:
+      • Quoted full-name queries reduce false positives vs. bare last names.
+      • Each broad term is joined with the campaign location/district to scope
+        results to the race (e.g. `healthcare "PA-08"` rather than bare `healthcare`).
+      • Capped at ~120 query×window combinations to bound runtime.
+      • URL dedup is enforced by ingest_rss → no duplicate SourceItems.
+      • Existing relevance/frame-matching pipeline runs over backfilled articles
+        unchanged, so off-topic results are filtered out at scoring time.
     """
     campaign = db.query(CampaignConfig).first()
-    if not campaign or campaign.historical_backfill_completed:
-        return {"skipped": True}
+    if not campaign:
+        return {"skipped": True, "reason": "no campaign"}
+    if getattr(campaign, "extended_backfill_completed", False) and not force:
+        return {"skipped": True, "reason": "already completed"}
 
     opponents = db.query(Opponent).all()
-    candidate = campaign.candidate_name
 
-    queries = []
-    if candidate:
-        cand_last = _candidate_last_name(candidate)
-        if cand_last:
-            queries.append(cand_last)
+    # Build queries. Each entry is the raw query string passed to Google News.
+    # Prefer quoted full names for precision; fall back to last names where useful.
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(q: str | None) -> None:
+        if not q:
+            return
+        q = q.strip()
+        if not q or q.lower() in seen:
+            return
+        seen.add(q.lower())
+        queries.append(q)
+
+    # Candidate variants
+    cand_full = _full_name(campaign.candidate_name)
+    cand_last = _candidate_last_name(campaign.candidate_name) if campaign.candidate_name else None
+    if cand_full:
+        add(f'"{cand_full}"')
+    if cand_last and cand_full and cand_last.lower() != cand_full.lower():
+        add(cand_last)
+
+    # Opponent variants
     for opp in opponents:
-        opp_last = _candidate_last_name(opp.name)
-        if opp_last:
-            queries.append(opp_last)
-    if campaign.district:
-        queries.append(campaign.district)
+        opp_full = _full_name(opp.name)
+        opp_last = _candidate_last_name(opp.name) if opp.name else None
+        if opp_full:
+            add(f'"{opp_full}"')
+        if opp_last and opp_full and opp_last.lower() != opp_full.lower():
+            add(opp_last)
 
+    # District / geography
+    if campaign.district:
+        add(campaign.district)
+        # Scoped issue/topic queries: `<issue> <district>` — keeps results race-scoped
+        # so we don't pull in generic national stories about the issue.
+        for issue in _load_json_list(campaign.key_priorities)[:5]:
+            add(f'{issue} {campaign.district}')
+
+    # Relevance keywords scoped to candidate (e.g. `"Paige Cognetti" healthcare`)
+    if cand_full:
+        for kw in _load_json_list(campaign.relevance_keywords)[:8]:
+            add(f'"{cand_full}" {kw}')
+
+    # Bound total queries to avoid runaway API calls
+    queries = queries[:20]
+
+    # Build sliding 30-day windows back to `days_back` days
     now = datetime.utcnow()
-    windows = []
-    for i in range(3):
+    window_count = max(1, days_back // 30)
+    windows: list[tuple[str, str]] = []
+    for i in range(window_count):
         before = now - timedelta(days=i * 30)
         after = now - timedelta(days=(i + 1) * 30)
         windows.append((after.strftime("%Y-%m-%d"), before.strftime("%Y-%m-%d")))
 
     total_added = 0
+    total_attempts = 0
+    failures = 0
     for query in queries:
         for after_date, before_date in windows:
+            total_attempts += 1
             url = _gnews_url_with_dates(query, after_date, before_date)
             try:
                 result = ingestion.ingest_rss(db, url, label=f"Backfill: {query} ({after_date})")
                 total_added += result.added
-            except Exception:
-                pass
+            except Exception as exc:
+                failures += 1
+                logger.warning("backfill query failed: %s (%s)", query, exc)
 
     campaign.historical_backfill_completed = True
+    campaign.extended_backfill_completed = True
     db.commit()
-    return {"added": total_added, "queries": len(queries), "windows": len(windows)}
+    return {
+        "added": total_added,
+        "queries": len(queries),
+        "windows": len(windows),
+        "attempts": total_attempts,
+        "failures": failures,
+        "days_back": days_back,
+        "forced": force,
+    }
 
 
 def _normalize_person_name(raw: str) -> str:
@@ -759,4 +848,358 @@ def auto_setup_monitors(db: Session) -> dict:
         "search_monitors_ingested": len(search_monitors),
         "sources_ingested": sources_ingested,
         "ingested": sources_ingested,
+    }
+
+
+# ── Journalist auto-discovery ─────────────────────────────────────────────────
+# Identify journalists who actively cover this race by extracting bylines from
+# already-ingested articles, then look up their social handles via the same
+# LLM + web-search + Nitter-verify path used for candidates/opponents.
+#
+# Key design choice: we discover journalists from the data we ALREADY have,
+# not by asking an LLM "who covers PA-08". That yields:
+#   • Proven relevance — they wrote about the race
+#   • Frequency-weighted — daily reporters surface over one-off authors
+#   • Self-updating — new bylines get captured as articles flow in
+#   • Generalizable — no race-specific knowledge required, works for any campaign
+
+_INSTITUTIONAL_BYLINES = {
+    "associated press", "reuters", "ap", "afp", "agence france-presse",
+    "bloomberg news", "the associated press", "staff report", "staff",
+    "editorial board", "the editorial board", "wire report",
+    "ap staff", "reuters staff", "newsroom", "the editors",
+}
+
+
+def auto_discover_journalists(
+    db: "Session",
+    *,
+    days_back: int = 30,
+    min_articles: int = 2,
+    max_journalists: int = 15,
+    article_cap: int = 300,
+) -> dict:
+    """Auto-create twitter_profile monitors for journalists covering this race.
+
+    Process recent race-relevant articles, LLM-extract the byline from each,
+    rank authors by article count, and look up Twitter handles for the most
+    frequent ones (using the existing LLM + Nitter-verify path).
+
+    `min_articles` = how many race-relevant articles an author needs before
+    they're worth a monitor. `max_journalists` caps the number we look up
+    handles for per run (since handle lookup costs LLM calls + Nitter probes).
+
+    Idempotent: skips authors who already have a twitter_profile monitor.
+    """
+    import re as _re
+    from collections import Counter
+    from datetime import datetime as _dt, timedelta as _td
+    from app.models import SourceItem, SourceMonitor
+    from app.services.llm_provider import get_provider, MockLLMProvider
+    from app.services.twitter_scraper import ensure_twitter_feed
+
+    cutoff = _dt.utcnow() - _td(days=days_back)
+    articles = (
+        db.query(SourceItem)
+        .filter(
+            SourceItem.created_at >= cutoff,
+            SourceItem.race_relevance_score >= 50,
+            SourceItem.title.isnot(None),
+        )
+        .order_by(SourceItem.created_at.desc())
+        .limit(article_cap)
+        .all()
+    )
+
+    if not articles:
+        return {"processed": 0, "candidates_found": 0, "monitors_created": 0,
+                "reason": "no recent race-relevant articles"}
+
+    provider = get_provider()
+    if isinstance(provider, MockLLMProvider):
+        return {"processed": 0, "candidates_found": 0, "monitors_created": 0,
+                "reason": "mock LLM provider — auto-discovery requires a real LLM"}
+
+    logger.info("journalist_discovery: extracting bylines from %d articles", len(articles))
+
+    # Pass 1 — extract author from each article.
+    author_counts: Counter = Counter()
+    author_outlets: dict = {}        # author -> set of outlets
+    looks_like_name = _re.compile(r"^[A-Za-z][A-Za-z .'\-]+(?:\s+[A-Za-z][A-Za-z .'\-]+)+$")
+
+    for art in articles:
+        snippet = (art.raw_text or art.summary or "")[:1500]
+        prompt = (
+            f"Title: {art.title}\n"
+            f"Source: {art.source_name or 'unknown'}\n\n"
+            f"Article excerpt:\n{snippet}\n\n"
+            "Who is the byline (author) of this article? Return ONLY the author's "
+            "name — no titles, no quotes, no extra text. If the byline is an "
+            "institution (AP, Reuters, Staff, Editorial Board, etc.) or there is "
+            "no byline, return exactly: NONE"
+        )
+        try:
+            raw = (provider.complete(prompt) or "").strip()
+        except Exception as exc:
+            logger.debug("journalist_discovery: LLM byline extraction failed: %s", exc)
+            continue
+
+        name = raw.removeprefix("By ").removeprefix("by ").strip(' "\'.,:')
+        if not name or name.upper() == "NONE":
+            continue
+        if name.lower() in _INSTITUTIONAL_BYLINES:
+            continue
+        if not (2 <= len(name) <= 60 and looks_like_name.match(name)):
+            continue
+
+        author_counts[name] += 1
+        author_outlets.setdefault(name, set()).add(art.source_name or "?")
+
+    # Filter to journalists frequent enough to be worth monitoring.
+    candidates = [
+        (name, count) for name, count in author_counts.most_common(max_journalists)
+        if count >= min_articles
+    ]
+    logger.info(
+        "journalist_discovery: found %d candidates (≥%d articles in %d days) out of %d distinct bylines",
+        len(candidates), min_articles, days_back, len(author_counts),
+    )
+
+    # Pass 2 — look up Twitter AND Bluesky handles for each candidate, skip
+    # those already being monitored on either platform.
+    from app.services.bluesky_scraper import lookup_bluesky_handles, ensure_bluesky_monitor
+
+    twitter_created = 0
+    bluesky_created = 0
+    skipped_existing = 0
+    skipped_no_social = 0
+
+    reactivated = 0
+
+    for name, count in candidates:
+        existing_rows = (
+            db.query(SourceMonitor)
+            .filter(
+                SourceMonitor.monitor_type.in_(("twitter_profile", "bluesky_profile")),
+                SourceMonitor.name.ilike(f"%{name}%"),
+            )
+            .all()
+        )
+        if existing_rows:
+            # If any are active, fine — already monitored.
+            if any(m.active for m in existing_rows):
+                skipped_existing += 1
+                continue
+            # All deactivated (auto-pruned earlier). Reactivate them —
+            # the journalist is producing race-relevant content again.
+            for m in existing_rows:
+                m.active = True
+                reactivated += 1
+                logger.info(
+                    "journalist_discovery: reactivated monitor id=%d %r (now producing race content)",
+                    m.id, m.name,
+                )
+            db.flush()
+            continue
+
+        outlets = sorted(author_outlets.get(name, set()))[:2]
+        role_hint = f"journalist at {', '.join(outlets)}" if outlets else "journalist"
+
+        found_any = False
+
+        # Twitter / X
+        for handle in _lookup_twitter_handles(name, role_hint):
+            monitor = SourceMonitor(
+                name=f"{name} X/Twitter (@{handle})",
+                monitor_type="twitter_profile",
+                query=f"@{handle}",
+                category="social",
+                source_type="news",
+                active=True,
+            )
+            db.add(monitor)
+            db.flush()
+            ensure_twitter_feed(db, monitor)
+            twitter_created += 1
+            found_any = True
+            logger.info(
+                "journalist_discovery: twitter monitor for %s @%s (%d articles, outlets: %s)",
+                name, handle, count, ", ".join(outlets),
+            )
+
+        # Bluesky
+        for handle in lookup_bluesky_handles(name, role_hint):
+            new_id = ensure_bluesky_monitor(db, name=name, handle=handle)
+            if new_id is not None:
+                bluesky_created += 1
+                found_any = True
+                logger.info(
+                    "journalist_discovery: bluesky monitor for %s @%s (%d articles)",
+                    name, handle, count,
+                )
+
+        if not found_any:
+            skipped_no_social += 1
+            logger.info(
+                "journalist_discovery: no verified social handle for %r (%d articles)",
+                name, count,
+            )
+
+    db.commit()
+    return {
+        "processed": len(articles),
+        "distinct_bylines": len(author_counts),
+        "candidates_found": len(candidates),
+        "twitter_monitors_created": twitter_created,
+        "bluesky_monitors_created": bluesky_created,
+        "reactivated": reactivated,
+        "skipped_existing": skipped_existing,
+        "skipped_no_social": skipped_no_social,
+    }
+
+
+# ── Auto-prune: deactivate monitors that never produced relevant content ──────
+# Paired with auto-discovery, this completes the self-tuning loop:
+#   auto-discovery adds journalists → auto-prune removes the ones who never
+#   produced race-relevant posts → re-discovery can reactivate them later if
+#   their writing trends race-relevant again.
+
+def prune_unproductive_monitors(
+    db: "Session",
+    *,
+    min_age_days: int = 30,
+    min_posts: int = 15,
+    relevance_threshold: int = 40,
+    dry_run: bool = True,
+) -> dict:
+    """Soft-deactivate twitter/bluesky monitors that consistently produce
+    irrelevant content. Conservative by design.
+
+    A monitor is eligible for pruning only when ALL of:
+      • monitor_type is twitter_profile or bluesky_profile (RSS not touched)
+      • monitor was created ≥ `min_age_days` ago (give it grace to prove itself)
+      • monitor has produced ≥ `min_posts` SourceItems
+      • ZERO of those posts hit race_relevance_score ≥ `relevance_threshold`
+      • monitor is NOT name-matched to the candidate or any opponent (protected)
+
+    `dry_run=True` (default) logs what WOULD be pruned without applying.
+    `dry_run=False` flips `active=False` on each pruned monitor. Already-
+    deactivated monitors can be reactivated by the journalist auto-discovery
+    if the same handle later starts producing race-relevant content.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from app.models import CampaignConfig, Opponent, SourceItem, SourceMonitor
+
+    cutoff_created = _dt.utcnow() - _td(days=min_age_days)
+
+    # Build the set of name terms that mark a monitor as protected. Includes
+    # the candidate, every opponent, and their surnames in lowercase.
+    protected_terms: set[str] = set()
+    campaign = db.query(CampaignConfig).first()
+    raw_names = []
+    if campaign and campaign.candidate_name:
+        raw_names.append(campaign.candidate_name)
+    for opp in db.query(Opponent).all():
+        if opp.name:
+            raw_names.append(opp.name)
+    for raw in raw_names:
+        n = raw.strip().lower()
+        if n:
+            protected_terms.add(n)
+        last = n.split(",")[0] if "," in n else n.split()[-1]
+        last = last.strip()
+        if last and len(last) >= 3:
+            protected_terms.add(last)
+
+    def _is_protected(monitor_name: str | None) -> bool:
+        n = (monitor_name or "").lower()
+        return any(term in n for term in protected_terms)
+
+    def _strip_handle(query: str | None) -> str | None:
+        if not query:
+            return None
+        h = query.strip().lstrip("@").strip()
+        return h or None
+
+    monitors = (
+        db.query(SourceMonitor)
+        .filter(
+            SourceMonitor.monitor_type.in_(("twitter_profile", "bluesky_profile")),
+            SourceMonitor.active == True,  # noqa: E712
+            SourceMonitor.created_at < cutoff_created,
+        )
+        .all()
+    )
+
+    actions: list[dict] = []
+    skipped_protected = 0
+    skipped_no_handle = 0
+    skipped_too_few_posts = 0
+    skipped_has_relevant_post = 0
+
+    for m in monitors:
+        if _is_protected(m.name):
+            skipped_protected += 1
+            continue
+        handle = _strip_handle(m.query)
+        if not handle:
+            skipped_no_handle += 1
+            continue
+
+        # Both Nitter (twitter_profile) and Bluesky (bluesky_profile) URLs
+        # have the handle in the path, so a single LIKE pattern suffices.
+        post_count = (
+            db.query(SourceItem.id)
+            .filter(SourceItem.source_url.like(f"%/{handle}/%"))
+            .count()
+        )
+        if post_count < min_posts:
+            skipped_too_few_posts += 1
+            continue
+
+        relevant_count = (
+            db.query(SourceItem.id)
+            .filter(
+                SourceItem.source_url.like(f"%/{handle}/%"),
+                SourceItem.race_relevance_score >= relevance_threshold,
+            )
+            .count()
+        )
+        if relevant_count > 0:
+            skipped_has_relevant_post += 1
+            continue
+
+        # Eligible.
+        reason = (
+            f"auto-prune: 0/{post_count} posts cleared relevance ≥ "
+            f"{relevance_threshold} after ≥{min_age_days}d"
+        )
+        actions.append({
+            "monitor_id": m.id,
+            "name": m.name,
+            "handle": handle,
+            "monitor_type": m.monitor_type,
+            "post_count": post_count,
+            "reason": reason,
+        })
+        if dry_run:
+            logger.info("prune_monitors: WOULD deactivate id=%d (%s) — %s",
+                        m.id, m.name, reason)
+        else:
+            m.active = False
+            logger.info("prune_monitors: deactivated id=%d (%s) — %s",
+                        m.id, m.name, reason)
+
+    if not dry_run and actions:
+        db.commit()
+
+    return {
+        "dry_run": dry_run,
+        "eligible_for_review": len(monitors),
+        "pruned": len(actions),
+        "actions": actions,
+        "skipped_protected": skipped_protected,
+        "skipped_no_handle": skipped_no_handle,
+        "skipped_too_few_posts": skipped_too_few_posts,
+        "skipped_has_relevant_post": skipped_has_relevant_post,
     }

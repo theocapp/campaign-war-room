@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.models import NarrativeFrame, Opponent, SourceItem
+from app.models import NarrativeFrame, Opponent, OpponentActivity, SourceItem
 from app.services import campaign_analysis, intelligence, narrative_frames, race_relevance, scoring, story_clustering
 from app.services.campaign_analysis import framing_to_action
 from app.services.snapshots import build_source_summary
@@ -381,6 +381,7 @@ def _persist_cluster_native(
             source_type="cluster_runtime",
             matched_by="llm",
             representative_snapshot_ts=datetime.utcnow(),
+            article_date=item.published_at,
         )
 
     # Opponent attacks → ClusterOpponentActivity
@@ -465,14 +466,11 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     analysis = campaign_analysis.analyze_with_frames(db, item, frames=active_frames)
 
     if analysis.get("_used_fallback"):
-        # Groq unavailable — fall back to keyword scoring and old summarize path
-        if not item.summary and item.raw_text:
-            if item.extraction_quality_label == "poor":
-                item.summary = build_source_summary(item)
-            else:
-                item.summary = intelligence.summarize_source(item.raw_text)
-        if not item.urgency or item.urgency == "low":
-            item.urgency = intelligence.classify_urgency(f"{item.title} {item.raw_text or ''}")
+        # LLM unavailable even after the patient wait (rare). Apply only cheap
+        # keyword relevance as a stopgap — no further LLM calls — and leave
+        # `summary` NULL so the next rescore (only_unscored) re-does this article
+        # properly: real LLM score + frame match. Never a permanent keyword-only,
+        # frame-unmatched entry.
         race_relevance.apply_relevance(db, item)
         db.commit()
         db.refresh(item)
@@ -557,11 +555,58 @@ def ingest_text(
     return _create_and_analyze(db, item)
 
 
+def _try_wayback_fallback(url: str) -> tuple[str | None, bool]:
+    """Try to recover an article from any web archive when direct fetch fails
+    or extracts poorly. Tries Wayback first, then archive.today as second
+    fallback. Returns (html_or_None, archived_flag).
+
+    The name is kept for back-compat; the function now uses the broader
+    try_archive_fallbacks helper.
+    """
+    from app.services.wayback import try_archive_fallbacks
+    html, source = try_archive_fallbacks(url)
+    if not html:
+        return None, False
+    logger.info("archive recovery: %s via %s", url[:80], source)
+    return html, True
+
+
+def _try_readability_extraction(html: str) -> tuple[str | None, str | None]:
+    """Try Mozilla Readability algorithm as a fallback extractor when our
+    standard HTML cleaner returns poor quality. Returns (title, body_text)
+    on success, (None, None) on failure.
+
+    Readability operates on the legally-fetched HTML — it's a better text
+    extractor for pages with heavy DOM chrome, embedded apps, or non-standard
+    article structures. Different category from paywall-bypass services.
+    """
+    if not html:
+        return None, None
+    try:
+        from readability import Document
+        doc = Document(html)
+        title = (doc.title() or "").strip() or None
+        content_html = doc.summary() or ""
+        # Strip HTML tags from the content_html (readability returns HTML for content)
+        text = re.sub(r"<[^>]+>", " ", content_html)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or len(text.split()) < 40:
+            return None, None
+        return title, text
+    except Exception as exc:
+        logger.debug("readability extraction failed: %s", exc)
+        return None, None
+
+
 def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
     # Dedup by URL
     existing = db.query(SourceItem).filter_by(source_url=url).first()
     if existing:
         return existing
+
+    html_text: str | None = None
+    content_type = ""
+    archived_via_wayback = False
 
     try:
         resp = httpx.get(url, timeout=15, follow_redirects=True, headers={
@@ -569,22 +614,79 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
         })
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
+        html_text = resp.text
+    except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.HTTPError) as exc:
+        # Direct fetch failed (timeout / paywall / 4xx / 5xx). Try Wayback.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.info(
+            "ingest_url: direct fetch failed for %s (%s%s) — trying Wayback",
+            url, type(exc).__name__,
+            f" {status}" if status else "",
+        )
+        html_text, archived_via_wayback = _try_wayback_fallback(url)
+        if not html_text:
+            logger.warning("ingest_url: both direct + Wayback failed for %s", url)
+            return None
+        content_type = "text/html"  # Wayback always returns HTML
+
+    try:
         source_author: Optional[str] = None
         if "html" in content_type:
-            title, body_text, quality_score, quality_label, quality_reasons = _clean_html_with_quality(resp.text)
-            published_date = _parse_html_published_date(resp.text)
+            title, body_text, quality_score, quality_label, quality_reasons = _clean_html_with_quality(html_text)
+            published_date = _parse_html_published_date(html_text)
+
+            # Readability rescue: when standard extraction returned poor/thin
+            # content, try Mozilla Readability on the same HTML before paying
+            # the network cost of archive lookup. Often saves pages with weird
+            # DOM (lots of nav/ad chrome, embedded apps, non-standard tags).
+            if (
+                not archived_via_wayback
+                and html_text
+                and (not body_text or len(body_text.split()) < 80)
+            ):
+                read_title, read_body = _try_readability_extraction(html_text)
+                if read_body and len(read_body.split()) > len(body_text.split() if body_text else []):
+                    logger.info(
+                        "ingest_url: Readability rescue for %s (std=%d words, readability=%d words)",
+                        url[:80], len(body_text.split()) if body_text else 0, len(read_body.split()),
+                    )
+                    title = read_title or title
+                    body_text = read_body
+                    quality_score, quality_label, quality_reasons = _assess_extraction_quality(body_text, title or "")
+
+            # If still poor/empty after Readability, fall back to web archives.
+            # Sometimes the live page has aggressive JS or paywall while the
+            # archived snapshot has the printable text.
+            if (
+                not archived_via_wayback
+                and (not body_text or len(body_text.split()) < 80)
+            ):
+                wb_html, wb_ok = _try_wayback_fallback(url)
+                if wb_ok and wb_html:
+                    wb_title, wb_body, wb_score, wb_label, wb_reasons = _clean_html_with_quality(wb_html)
+                    if wb_body and len(wb_body.split()) > len(body_text.split()):
+                        logger.info(
+                            "ingest_url: Wayback rescue for %s (live=%d words, wayback=%d words)",
+                            url, len(body_text.split()), len(wb_body.split()),
+                        )
+                        title = wb_title or title
+                        body_text = wb_body
+                        quality_score, quality_label, quality_reasons = wb_score, wb_label, wb_reasons
+                        archived_via_wayback = True
+                        if not published_date:
+                            published_date = _parse_html_published_date(wb_html)
             # Extract author from <meta name="author"> or <meta property="article:author">
             author_match = re.search(
                 r'<meta\s[^>]*?(?:name|property)=["\'](?:author|article:author)["\'][^>]*?content=["\']([^"\']{1,200})["\']'
                 r'|<meta\s[^>]*?content=["\']([^"\']{1,200})["\'][^>]*?(?:name|property)=["\'](?:author|article:author)["\']',
-                resp.text, re.IGNORECASE,
+                html_text, re.IGNORECASE,
             )
             if author_match:
                 raw_author = author_match.group(1) or author_match.group(2) or ""
                 source_author = _normalize_text(raw_author) or None
         else:
             title = url.split("/")[-1].replace("-", " ").replace("_", " ")
-            body_text = resp.text[:4000]
+            body_text = html_text[:4000]
             quality_score, quality_label, quality_reasons = _assess_extraction_quality(body_text, title)
             published_date = None
 
@@ -608,13 +710,9 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
         if item.extraction_quality_label == "poor":
             item.summary = build_source_summary(item)
         return _create_and_analyze(db, item)
-    except httpx.TimeoutException as exc:
-        logger.warning("Timeout fetching URL %s: %s", url, exc)
-        return None
-    except httpx.HTTPStatusError as exc:
-        logger.warning("HTTP %s fetching URL %s", exc.response.status_code, url)
-        return None
     except Exception as exc:
+        # Network failures already handled above (with Wayback fallback).
+        # This catches downstream errors: HTML parsing, _create_and_analyze, etc.
         logger.warning("Failed to ingest URL %s: %s: %s", url, type(exc).__name__, exc)
         return None
 

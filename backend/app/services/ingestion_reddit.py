@@ -1,29 +1,29 @@
-"""Reddit ingestion via PRAW (free official API).
+"""Reddit ingestion via public JSON API — no credentials required.
 
-Reads from subreddits relevant to NEPA/PA-08 and searches for candidate and
-opponent name mentions.  Each Reddit post becomes a SourceItem with
-source_type="social".
+Searches subreddits for candidate and opponent name mentions using Reddit's
+unauthenticated JSON endpoint. No app registration needed.
 
-Authentication: Reddit's "read-only script app" — set in .env:
-    REDDIT_CLIENT_ID=...
-    REDDIT_CLIENT_SECRET=...
-    REDDIT_USER_AGENT=CampaignWarRoom/1.0
-
-If credentials are not set, the ingester logs a warning and returns 0.
-
-SUBREDDITS searched (configurable via REDDIT_SUBREDDITS env var, comma-separated):
-    pennsylvania, Scranton, nepa, politics (fallback: all four)
+Subreddits searched (configurable via REDDIT_SUBREDDITS env var):
+    pennsylvania, Scranton, nepa, politics (fallback defaults)
 """
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SUBREDDITS = ["pennsylvania", "Scranton", "nepa", "politics"]
-_POST_LIMIT = 25  # per subreddit per search term
+_POST_LIMIT = 25
+_REQUEST_DELAY = 1.0  # seconds between requests — Reddit rate limit is ~60/min unauthed
+
+_HEADERS = {
+    "User-Agent": "CampaignWarRoom/1.0 (political monitoring; contact via github.com)",
+    "Accept": "application/json",
+}
 
 
 @dataclass
@@ -35,30 +35,7 @@ class RedditIngestResult:
     errors: int
 
 
-def _get_reddit():
-    """Return a praw.Reddit read-only instance or None if credentials missing."""
-    import praw  # lazy import so app starts even if praw not installed
-    client_id = os.getenv("REDDIT_CLIENT_ID", "").strip()
-    client_secret = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
-    user_agent = os.getenv("REDDIT_USER_AGENT", "CampaignWarRoom/1.0").strip()
-
-    if not client_id or not client_secret:
-        logger.warning(
-            "Reddit credentials not set (REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET). "
-            "Skipping Reddit ingestion."
-        )
-        return None
-
-    return praw.Reddit(
-        client_id=client_id,
-        client_secret=client_secret,
-        user_agent=user_agent,
-        read_only=True,
-    )
-
-
 def _search_terms(db) -> list[str]:
-    """Build search terms from CampaignConfig: candidate + opponent names."""
     from app.models import CampaignConfig, Opponent
     campaign = db.query(CampaignConfig).first()
     terms: list[str] = []
@@ -70,38 +47,44 @@ def _search_terms(db) -> list[str]:
     return terms
 
 
-def _post_url(submission) -> str:
-    return f"https://www.reddit.com{submission.permalink}"
-
-
-def _post_text(submission) -> str:
-    title = submission.title or ""
-    selftext = (submission.selftext or "").strip()
-    if selftext and selftext not in ("[deleted]", "[removed]"):
-        return f"{title}\n\n{selftext}"
-    return title
-
-
 def _utc_from_timestamp(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
 
 
-def ingest_reddit(db) -> RedditIngestResult:
-    """Search Reddit for campaign-relevant posts and ingest them.
+def _search_subreddit(sub: str, term: str, limit: int = 25) -> list[dict]:
+    """Hit Reddit's public JSON search endpoint. Returns list of post dicts."""
+    url = f"https://www.reddit.com/r/{sub}/search.json"
+    params = {
+        "q": term,
+        "restrict_sr": "1",
+        "sort": "new",
+        "limit": str(limit),
+        "t": "month",
+    }
+    try:
+        resp = httpx.get(url, params=params, headers=_HEADERS, timeout=15, follow_redirects=True)
+        if resp.status_code == 429:
+            logger.warning("Reddit: rate limited on r/%s — backing off 60s", sub)
+            time.sleep(60)
+            return []
+        if resp.status_code != 200:
+            logger.warning("Reddit: r/%s search returned %d", sub, resp.status_code)
+            return []
+        data = resp.json()
+        return data.get("data", {}).get("children", [])
+    except Exception as exc:
+        logger.warning("Reddit: request failed for r/%s q=%r: %s", sub, term, exc)
+        return []
 
-    Dedupes by source_url (Reddit permalink). Only ingests posts with at least
-    one search term in the title or body. Returns counts.
-    """
+
+def ingest_reddit(db) -> RedditIngestResult:
+    """Search Reddit for campaign-relevant posts and ingest them."""
     from app.models import SourceItem
     from app.services.ingestion import ingest_text
 
-    reddit = _get_reddit()
-    if reddit is None:
-        return RedditIngestResult(0, 0, 0, 0, 0)
-
     terms = _search_terms(db)
     if not terms:
-        logger.info("Reddit ingestion: no search terms available (no campaign config?)")
+        logger.info("Reddit: no search terms (no campaign config)")
         return RedditIngestResult(0, 0, 0, 0, 0)
 
     subreddit_names = [
@@ -112,46 +95,52 @@ def ingest_reddit(db) -> RedditIngestResult:
 
     posts_found = added = skipped = errors = 0
 
-    for sub_name in subreddit_names:
-        try:
-            subreddit = reddit.subreddit(sub_name)
-            for term in terms:
+    for sub in subreddit_names:
+        for term in terms:
+            children = _search_subreddit(sub, term, _POST_LIMIT)
+            for child in children:
+                post = child.get("data", {})
+                permalink = post.get("permalink", "")
+                if not permalink:
+                    continue
+
+                url = f"https://www.reddit.com{permalink}"
+                posts_found += 1
+
+                if db.query(SourceItem).filter_by(source_url=url).first():
+                    skipped += 1
+                    continue
+
+                title = (post.get("title") or "").strip()
+                selftext = (post.get("selftext") or "").strip()
+                if selftext in ("[deleted]", "[removed]", ""):
+                    text = title
+                else:
+                    text = f"{title}\n\n{selftext}"
+
+                if not text.strip():
+                    skipped += 1
+                    continue
+
                 try:
-                    for submission in subreddit.search(term, limit=_POST_LIMIT, sort="new"):
-                        posts_found += 1
-                        url = _post_url(submission)
-
-                        if db.query(SourceItem).filter_by(source_url=url).first():
-                            skipped += 1
-                            continue
-
-                        text = _post_text(submission)
-                        if not text.strip():
-                            skipped += 1
-                            continue
-
-                        try:
-                            ingest_text(
-                                db,
-                                title=submission.title[:200],
-                                raw_text=text[:4000],
-                                source_name=f"Reddit r/{sub_name}",
-                                source_type="social",
-                                source_url=url,
-                                published_at=_utc_from_timestamp(submission.created_utc),
-                                source_author=str(submission.author) if submission.author else None,
-                            )
-                            added += 1
-                        except Exception as exc:
-                            logger.warning("Reddit: ingest_text failed for %s: %s", url, exc)
-                            errors += 1
-
+                    author = post.get("author") or None
+                    created_utc = post.get("created_utc") or 0
+                    ingest_text(
+                        db,
+                        title=title[:200],
+                        raw_text=text[:4000],
+                        source_name=f"Reddit r/{sub}",
+                        source_type="social",
+                        source_url=url,
+                        published_at=_utc_from_timestamp(float(created_utc)) if created_utc else None,
+                        source_author=str(author) if author and author != "None" else None,
+                    )
+                    added += 1
                 except Exception as exc:
-                    logger.warning("Reddit search failed (r/%s, term=%r): %s", sub_name, term, exc)
+                    logger.warning("Reddit: ingest_text failed for %s: %s", url, exc)
                     errors += 1
-        except Exception as exc:
-            logger.warning("Reddit: could not access subreddit %r: %s", sub_name, exc)
-            errors += 1
+
+            time.sleep(_REQUEST_DELAY)
 
     logger.info(
         "Reddit ingest: subreddits=%d terms=%d found=%d added=%d skipped=%d errors=%d",

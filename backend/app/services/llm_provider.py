@@ -8,6 +8,7 @@ is missing.
 import json
 import logging
 import os
+import threading
 import re
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -863,17 +864,30 @@ class GeminiProvider(OpenAIProvider):
             raise RuntimeError("openai package not installed. Run: pip install openai") from e
 
 
+class CerebrasProvider(OpenAIProvider):
+    """Cerebras — 1M tokens/day free tier, OpenAI-compatible. Sign up at cerebras.ai."""
+
+    def __init__(self, api_key: str, model: str = "qwen-3-235b-a22b-instruct-2507"):
+        try:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=api_key, base_url="https://api.cerebras.ai/v1")
+            self._model = model
+        except ImportError as e:
+            raise RuntimeError("openai package not installed. Run: pip install openai") from e
+
+
 # ── Fallback provider chain ───────────────────────────────────────────────────
 
 class FallbackProvider(BaseLLMProvider):
-    """Round-robins across a list of providers, rotating on ProviderRateLimitError.
+    """Round-robins across providers, rotating on every call to spread load evenly.
 
-    Starts each call from the next provider in the rotation so load is spread
-    evenly across all keys from the first request — no single key gets hammered
-    until it exhausts its per-minute quota before the others are touched.
+    With N providers and a 2.5s delay between articles, each provider receives
+    only ~2 req/min — well under any per-minute rate limit. On rate-limit, the
+    provider is marked exhausted for 90s (recovering per-minute limits) and the
+    same article immediately tries the next available provider.
 
-    When all providers are exhausted it falls back to Mock so the app stays
-    functional, but logs a clear warning.
+    When all providers are exhausted, waits 90s for per-minute limits to
+    recover before retrying. Falls back to Mock only if still fully exhausted.
     """
 
     def __init__(self, providers: list[BaseLLMProvider]):
@@ -881,12 +895,10 @@ class FallbackProvider(BaseLLMProvider):
         self._providers = providers
         self._next = 0
         self._lock = threading.Lock()
-        # Tracks which provider indices are known-exhausted this session.
-        # Cleared after _EXHAUSTED_TTL_SECONDS so daily limits can recover.
         self._exhausted: set[int] = set()
         self._exhausted_at: dict[int, float] = {}
 
-    _EXHAUSTED_TTL_SECONDS = 3600  # forget exhausted status after 1 hour
+    _EXHAUSTED_TTL_SECONDS = 90  # forget exhausted status after 90s so per-minute limits can recover
 
     def _start_index(self) -> int:
         with self._lock:
@@ -915,7 +927,7 @@ class FallbackProvider(BaseLLMProvider):
             p = self._providers[idx]
             try:
                 return getattr(p, method)(*args, **kwargs)
-            except ProviderRateLimitError as e:
+            except ProviderRateLimitError:
                 log.warning(
                     "FallbackProvider: %s[%d] rate-limited — trying next provider",
                     type(p).__name__, idx,
@@ -923,10 +935,21 @@ class FallbackProvider(BaseLLMProvider):
                 self._exhausted.add(idx)
                 self._exhausted_at[idx] = time.time()
                 continue
-        # All known-good providers failed — reset exhausted set and try once more
-        # (limits may have recovered)
-        if self._exhausted:
-            log.info("FallbackProvider: all providers exhausted, resetting for retry")
+        # All providers exhausted. Wait it out: per-minute rate limits recover
+        # within a minute or two, so retry every 90s rather than degrading to a
+        # keyword/mock result. The cap (LLM_EXHAUSTED_MAX_WAIT_SECONDS, default
+        # 30 min) is a safety valve — a genuine multi-hour daily-quota outage
+        # must not freeze ingestion indefinitely.
+        max_wait = float(os.environ.get("LLM_EXHAUSTED_MAX_WAIT_SECONDS", "1800"))
+        waited = 0.0
+        while self._exhausted and waited < max_wait:
+            log.warning(
+                "FallbackProvider: all %d providers exhausted — waiting 90s for "
+                "rate limits to recover (waited %.0fs / %.0fs cap)",
+                n, waited, max_wait,
+            )
+            time.sleep(90)
+            waited += 90
             self._exhausted.clear()
             self._exhausted_at.clear()
             for i in range(n):
@@ -935,8 +958,100 @@ class FallbackProvider(BaseLLMProvider):
                 try:
                     return getattr(p, method)(*args, **kwargs)
                 except ProviderRateLimitError:
+                    self._exhausted.add(idx)
+                    self._exhausted_at[idx] = time.time()
                     continue
-        log.warning("FallbackProvider: all providers rate-limited for %s — using mock", method)
+        log.warning(
+            "FallbackProvider: all providers still rate-limited for %s after "
+            "%.0fs — using mock fallback", method, waited,
+        )
+        return getattr(MockLLMProvider(), method)(*args, **kwargs)
+
+    def complete(self, prompt: str) -> str:
+        return self._call("complete", prompt)
+
+    def summarize(self, text: str, max_words: int = 80) -> str:
+        return self._call("summarize", text, max_words)
+
+    def classify_urgency(self, text: str) -> str:
+        return self._call("classify_urgency", text)
+
+    def extract_issues(self, text: str) -> list[str]:
+        return self._call("extract_issues", text)
+
+    def detect_opponent_activity(self, text: str, opponent_name: str) -> dict:
+        return self._call("detect_opponent_activity", text, opponent_name)
+
+    def generate_talking_points(self, issue: str, tone: str, context: str = "",
+                                campaign_profile: Optional[dict] = None,
+                                sources: Optional[list[dict]] = None,
+                                opponent_activities: Optional[list[dict]] = None) -> dict:
+        return self._call("generate_talking_points", issue, tone, context,
+                          campaign_profile, sources, opponent_activities)
+
+    def generate_risk_warning(self, text: str, credibility_note: str) -> Optional[str]:
+        return self._call("generate_risk_warning", text, credibility_note)
+
+    def verify_opponent_subject(self, sentence: str, opponent_name: str, candidate_name: str) -> str:
+        return self._call("verify_opponent_subject", sentence, opponent_name, candidate_name)
+
+
+class PrimaryWithFallbackProvider(BaseLLMProvider):
+    """Provider that ALWAYS tries the primary first, only falling back when
+    the primary errors or rate-limits.
+
+    Different from FallbackProvider (which round-robins across all providers):
+    here the primary is the canonical choice for every call. Use when you
+    have a paid premium provider you want to use whenever possible, with
+    free providers as resilience-only safety net.
+
+    Used by get_judge_provider for variant naming + future LLM-as-judge work
+    where we want consistent OpenAI quality, not load-balanced rotation.
+    """
+
+    def __init__(self, primary: BaseLLMProvider, fallbacks: list[BaseLLMProvider]) -> None:
+        import time
+        self._primary = primary
+        self._fallbacks = fallbacks
+        self._primary_exhausted_until: float = 0.0  # unix ts; primary skipped if past now
+
+    _PRIMARY_COOLDOWN_S = 60.0  # after primary rate-limits, skip it for 60s
+
+    def _call(self, method: str, *args, **kwargs):
+        import time
+        now = time.time()
+
+        # Try primary first (unless in cooldown)
+        if now >= self._primary_exhausted_until:
+            try:
+                return getattr(self._primary, method)(*args, **kwargs)
+            except ProviderRateLimitError as e:
+                log.warning(
+                    "PrimaryWithFallback: primary %s rate-limited — cooling down %.0fs",
+                    type(self._primary).__name__, self._PRIMARY_COOLDOWN_S,
+                )
+                self._primary_exhausted_until = now + self._PRIMARY_COOLDOWN_S
+            except Exception as e:
+                log.warning(
+                    "PrimaryWithFallback: primary %s failed (%s) — trying fallbacks",
+                    type(self._primary).__name__, str(e)[:80],
+                )
+
+        # Fall through to fallbacks in order (no round-robin)
+        for prov in self._fallbacks:
+            try:
+                return getattr(prov, method)(*args, **kwargs)
+            except ProviderRateLimitError:
+                continue
+            except Exception as e:
+                log.debug(
+                    "PrimaryWithFallback: fallback %s failed: %s",
+                    type(prov).__name__, str(e)[:80],
+                )
+                continue
+
+        # All exhausted — degrade to mock
+        log.warning("PrimaryWithFallback: all providers exhausted — using mock")
         return getattr(MockLLMProvider(), method)(*args, **kwargs)
 
     def complete(self, prompt: str) -> str:
@@ -1031,15 +1146,33 @@ def get_provider() -> BaseLLMProvider:
 
     providers: list[BaseLLMProvider] = []
 
+    # ── Cerebras keys (prepended to all chains when present) ──────────────────
+    cerebras_model = os.environ.get("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+    cerebras_keys: list[str] = []
+    primary_cerebras = os.environ.get("CEREBRAS_API_KEY", "").strip()
+    if primary_cerebras:
+        cerebras_keys.append(primary_cerebras)
+    for n in range(2, 11):
+        extra = os.environ.get(f"CEREBRAS_API_KEY_{n}", "").strip()
+        if extra:
+            cerebras_keys.append(extra)
+    for key in cerebras_keys:
+        try:
+            providers.append(CerebrasProvider(api_key=key, model=cerebras_model))
+        except RuntimeError as e:
+            log.warning("Cerebras provider init failed: %s", e)
+    if cerebras_keys:
+        log.info("LLM chain includes %d Cerebras key(s) (%s)", len(cerebras_keys), cerebras_model)
+
     # ── Groq keys (primary + any extras) ──────────────────────────────────────
     if provider_name == "groq":
         model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-        # Collect GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, … (up to 5 extras)
+        # Collect GROQ_API_KEY, GROQ_API_KEY_2, … GROQ_API_KEY_10 (up to 10 keys)
         groq_keys: list[str] = []
         primary = os.environ.get("GROQ_API_KEY", "").strip()
         if primary:
             groq_keys.append(primary)
-        for n in range(2, 7):
+        for n in range(2, 11):
             extra = os.environ.get(f"GROQ_API_KEY_{n}", "").strip()
             if extra:
                 groq_keys.append(extra)
@@ -1080,15 +1213,23 @@ def get_provider() -> BaseLLMProvider:
 
     # ── Append cross-provider fallbacks (always, when primary is Groq) ─────────
     if provider_name == "groq":
-        # Google Gemini: 1M tokens/day free — add whenever GEMINI_API_KEY is set
-        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if gemini_key:
-            gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        # Google Gemini: add GEMINI_API_KEY plus GEMINI_API_KEY_2 … _10 for extra daily quota
+        gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        gemini_keys: list[str] = []
+        primary_gemini = os.environ.get("GEMINI_API_KEY", "").strip()
+        if primary_gemini:
+            gemini_keys.append(primary_gemini)
+        for n in range(2, 11):
+            extra = os.environ.get(f"GEMINI_API_KEY_{n}", "").strip()
+            if extra:
+                gemini_keys.append(extra)
+        for gkey in gemini_keys:
             try:
-                providers.append(GeminiProvider(api_key=gemini_key, model=gemini_model))
-                log.info("LLM fallback chain includes Gemini (%s)", gemini_model)
+                providers.append(GeminiProvider(api_key=gkey, model=gemini_model))
             except RuntimeError as e:
                 log.warning("Gemini provider init failed: %s", e)
+        if gemini_keys:
+            log.info("LLM fallback chain includes %d Gemini key(s) (%s)", len(gemini_keys), gemini_model)
 
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
         if anthropic_key:
@@ -1119,6 +1260,97 @@ def get_provider() -> BaseLLMProvider:
 # ── Ingestion provider (small model, separate quota) ──────────────────────────
 
 _ingestion_singleton: "BaseLLMProvider | None" = None
+_judge_singleton: "BaseLLMProvider | None" = None
+
+
+_thread_local = threading.local()
+
+
+def get_judge_provider() -> "BaseLLMProvider":
+    """Return the provider for LLM-as-judge tasks (variant naming, auto-
+    promotion verdicts, "what's changing" insights, etc.).
+
+    Strategy: OpenAI gpt-4o-mini first (paid, better instruction-following),
+    fall back through any configured Groq keys (free, llama-3.3-70b) and
+    finally Gemini if all else fails. The FallbackProvider chain handles
+    rotation on rate limits.
+
+    Centralized so all "judgment" code paths use the same provider with the
+    same fallback behavior — change here propagates everywhere.
+
+    Override via env vars:
+      OPENAI_JUDGE_MODEL — default "gpt-4o-mini"
+      OPENAI_API_KEY     — required for OpenAI primary
+    Falls back to GROQ_* keys + GEMINI_* keys via FallbackProvider chain.
+    """
+    global _judge_singleton
+    if _judge_singleton is not None:
+        return _judge_singleton
+
+    # Build OpenAI primary if configured
+    openai_primary: Optional[OpenAIProvider] = None
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    judge_model = os.environ.get("OPENAI_JUDGE_MODEL", "gpt-4o-mini").strip()
+    if openai_key:
+        try:
+            openai_primary = OpenAIProvider(api_key=openai_key, model=judge_model)
+        except Exception as e:
+            log.warning("Judge: OpenAI init failed (%s) — using free fallback only", e)
+
+    # Build Groq fallback chain for resilience
+    groq_model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    groq_keys: list[str] = []
+    primary_groq = os.environ.get("GROQ_API_KEY", "").strip()
+    if primary_groq:
+        groq_keys.append(primary_groq)
+    for n in range(2, 11):
+        extra = os.environ.get(f"GROQ_API_KEY_{n}", "").strip()
+        if extra:
+            groq_keys.append(extra)
+    groq_fallbacks: list[BaseLLMProvider] = []
+    for key in groq_keys:
+        try:
+            groq_fallbacks.append(GroqProvider(api_key=key, model=groq_model))
+        except Exception:
+            continue
+
+    if openai_primary and groq_fallbacks:
+        # Primary-with-fallback: OpenAI tried first for every call, Groq only
+        # kicks in if OpenAI errors or rate-limits.
+        log.info(
+            "Judge provider: OpenAI %s primary + %d Groq fallbacks",
+            judge_model, len(groq_fallbacks),
+        )
+        _judge_singleton = PrimaryWithFallbackProvider(openai_primary, groq_fallbacks)
+    elif openai_primary:
+        log.info("Judge provider: OpenAI %s (no fallbacks)", judge_model)
+        _judge_singleton = openai_primary
+    elif groq_fallbacks:
+        # No OpenAI — use Groq with round-robin FallbackProvider (load distribution)
+        log.info("Judge provider: %d Groq keys (no OpenAI)", len(groq_fallbacks))
+        _judge_singleton = (
+            groq_fallbacks[0] if len(groq_fallbacks) == 1
+            else FallbackProvider(groq_fallbacks)
+        )
+    else:
+        log.warning("get_judge_provider: no real provider — using mock")
+        return MockLLMProvider()
+
+    return _judge_singleton
+
+
+def set_thread_provider(provider: "BaseLLMProvider | None") -> None:
+    """Pin an LLM provider to the current thread.
+
+    Used by the parallel rescore worker to give each thread an exclusive
+    provider (one key per worker), bypassing FallbackProvider's shared
+    round-robin lock. Call with None to clear.
+    """
+    if provider is None:
+        if hasattr(_thread_local, "provider"):
+            del _thread_local.provider
+    else:
+        _thread_local.provider = provider
 
 
 def get_ingestion_provider() -> BaseLLMProvider:
@@ -1129,9 +1361,20 @@ def get_ingestion_provider() -> BaseLLMProvider:
     auto-suggest and rematch where quality matters more.
     Falls back to the main provider if no ingestion model is configured.
     """
+    # Thread-local override wins — used by the parallel rescore worker.
+    override = getattr(_thread_local, "provider", None)
+    if override is not None:
+        return override
+
     global _ingestion_singleton
     if _ingestion_singleton is not None:
         return _ingestion_singleton
+
+    # Note: paid OpenAI is intentionally NOT used for ongoing ingestion.
+    # Explicit rescore runs route around this by checking OPENAI_RESCORE_MODEL
+    # in rescore._load_providers and pinning workers to OpenAI directly via
+    # set_thread_provider. This keeps routine ingestion on the free Groq tier
+    # while letting one-off rescores use paid models for higher quality.
 
     ingestion_model = os.environ.get("GROQ_INGESTION_MODEL", "").strip()
     if not ingestion_model:
@@ -1146,7 +1389,7 @@ def get_ingestion_provider() -> BaseLLMProvider:
     primary = os.environ.get("GROQ_API_KEY", "").strip()
     if primary:
         groq_keys.append(primary)
-    for n in range(2, 7):
+    for n in range(2, 11):
         extra = os.environ.get(f"GROQ_API_KEY_{n}", "").strip()
         if extra:
             groq_keys.append(extra)
@@ -1155,17 +1398,42 @@ def get_ingestion_provider() -> BaseLLMProvider:
         return get_provider()
 
     providers: list[BaseLLMProvider] = []
+
+    # Cerebras first — 1M tokens/day free tier
+    cerebras_model = os.environ.get("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+    cerebras_keys: list[str] = []
+    primary_cerebras = os.environ.get("CEREBRAS_API_KEY", "").strip()
+    if primary_cerebras:
+        cerebras_keys.append(primary_cerebras)
+    for n in range(2, 11):
+        extra = os.environ.get(f"CEREBRAS_API_KEY_{n}", "").strip()
+        if extra:
+            cerebras_keys.append(extra)
+    for key in cerebras_keys:
+        try:
+            providers.append(CerebrasProvider(api_key=key, model=cerebras_model))
+        except RuntimeError:
+            pass
+
     for key in groq_keys:
         try:
             providers.append(GroqProvider(api_key=key, model=ingestion_model))
         except RuntimeError:
             pass
 
-    # Gemini as fallback for ingestion too
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if gemini_key:
+    # Gemini as fallback for ingestion too — collect all keys, not just the primary
+    gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    gemini_keys: list[str] = []
+    primary_gemini = os.environ.get("GEMINI_API_KEY", "").strip()
+    if primary_gemini:
+        gemini_keys.append(primary_gemini)
+    for n in range(2, 11):
+        extra = os.environ.get(f"GEMINI_API_KEY_{n}", "").strip()
+        if extra:
+            gemini_keys.append(extra)
+    for gkey in gemini_keys:
         try:
-            providers.append(GeminiProvider(api_key=gemini_key, model="gemini-2.5-flash"))
+            providers.append(GeminiProvider(api_key=gkey, model=gemini_model))
         except RuntimeError:
             pass
 
@@ -1174,5 +1442,8 @@ def get_ingestion_provider() -> BaseLLMProvider:
 
     result = providers[0] if len(providers) == 1 else FallbackProvider(providers)
     _ingestion_singleton = result
-    log.info("Ingestion provider: %s × %d provider(s) using %s", "Groq", len(providers), ingestion_model)
+    log.info(
+        "Ingestion provider: %d Cerebras key(s) + %d Groq key(s) + %d Gemini key(s)",
+        len(cerebras_keys), len(groq_keys), len(gemini_keys),
+    )
     return result
