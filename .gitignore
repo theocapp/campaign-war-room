@@ -17,6 +17,13 @@ dist/
 # Env
 .env
 .env.local
+.env.backup-*
+.env.*-pending
+
+# Local backups / temp patches
+*.backup-*
+*.bak
+*.patch
 
 # OS
 .DS_Store
