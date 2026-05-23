@@ -41,7 +41,7 @@ from app.models import (
     StoryCluster,
 )
 from app.services import story_clustering
-from app.services.cluster_writes import _opponent_fingerprint
+from app.services.cluster_writes import _dt_str, _opponent_fingerprint
 
 logger = logging.getLogger("recluster_backfill")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -296,9 +296,9 @@ def _backfill_opponent_activities(db: Session) -> int:
         fp = _opponent_fingerprint(claim, attack, promise)
         if not fp:
             continue
-        ts = (event_ts or datetime.utcnow().isoformat())
+        ts = event_ts or datetime.utcnow()
         if isinstance(ts, datetime):
-            ts = ts.isoformat()
+            ts = _dt_str(ts)  # space separator — see cluster_writes._dt_str
         db.execute(
             text(
                 """
