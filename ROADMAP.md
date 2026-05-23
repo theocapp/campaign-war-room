@@ -209,3 +209,110 @@ Commit your changes to git: git add -A && git commit -m "what you did"
 - [ ] Phase 3: Campaign-defined narrative tracking
 - [ ] Phase 4: Morning briefing view
 - [ ] Phase 5: Test with real campaign
+
+---
+
+## Planned — Infrastructure / Post-Campaign
+
+### Migrate SQLite → Postgres
+**Status:** planned, not started. **Do after the current race or during any natural quiet period — not mid-campaign.**
+
+**Why:**
+- **Proper datetime typing.** SQLite stores datetimes as TEXT and string-compares them; that's the root cause of the `T`-separator class of bugs (see the 2,754-row data migration around `cluster_writes.py`). Postgres has real `TIMESTAMP` columns — that whole bug class disappears structurally.
+- **Concurrent writes.** SQLite serializes through one writer lock. Ingest + rescore + rematch + user requests all fight for it; the `max instances reached` scheduler warnings are partly that. Postgres handles this natively.
+- **Real `ALTER TABLE`.** Adding a column/constraint is a one-line statement in Postgres. In SQLite we had to drop and recreate `google_trend_snapshots` to extend a unique constraint.
+- **Native JSONB.** Several columns hold JSON-as-TEXT (`quality_reasons`, `trends_keywords`) and would become queryable in Postgres.
+- **Multi-campaign / multi-tenant future.** SQLite is one-file, one-process. Any plan to run multiple campaigns simultaneously or move to a server requires Postgres.
+
+**Scope estimate:** ~1–2 focused days. Most queries port via SQLAlchemy unchanged.
+
+**Known migration touchpoints:**
+- `app/db.py` — connection string + engine config
+- `app/services/cluster_writes.py` — uses raw `INSERT ... ON CONFLICT(...) DO UPDATE` (works in both, but verify syntax parity)
+- `app/scripts/recluster_backfill.py` — same pattern
+- DB column types: SQLite is lax, Postgres strict — confirm `DateTime` columns receive `datetime` objects (not strings) everywhere
+- Boolean `== True` filters with `# noqa: E712` — work in both, worth a sweep
+- The T-separator data normalization is already done in the SQLite DB; export will be clean
+
+**High-level steps:**
+1. Spin up Postgres locally (Docker container is simplest)
+2. Update `app/db.py` connection string
+3. Run `Base.metadata.create_all()` against the new DB
+4. Dump SQLite data → load into Postgres (`pgloader` handles SQLAlchemy schemas)
+5. Run the full pipeline against the new DB; verify every endpoint
+6. Fix any SQLite-specific SQL that surfaces (likely 2–5 spots)
+7. Swap connection string in `.env`, archive `war_room.db`
+
+---
+
+## Deployment trajectory — own race → friends → SaaS
+
+The current build is single-tenant by design. That's correct for now. The
+intended trajectory is to grow into multi-deployment, then SaaS — but each
+phase is only built when the previous one's pain points have revealed what's
+actually needed.
+
+### Phase 1 — own race (today)
+
+Self-hosted, single tenant, single SQLite DB on Theo's machine. No changes
+needed. The "any campaign" code we've already built (auto-discovery, adaptive
+stage thresholds, BigQuery integration, monitor auto-prune) has already paid
+most of the generalization tax.
+
+### Phase 2 — helping friends' races (3–10 campaigns)
+
+**Don't multi-tenant the code.** Spin up one independent deployment per friend.
+Each friend gets:
+- Their own server (Railway, Fly.io, Render — ~$10–20/mo each)
+- Their own Postgres DB
+- Their own LLM API keys + BigQuery service account (or Theo's, with reimbursement)
+- A URL with HTTP basic auth so the public can't see their data
+
+Prerequisites before starting Phase 2:
+- **Postgres migration done.** Phase 2 with SQLite is workable but painful
+  (separate `.db` files per friend, no real backup story).
+- **A `./deploy-new-campaign.sh` helper** that automates pushing code to a
+  fresh server + clicking through Setup. Target: 1 hour per friend.
+
+Phase 2 work to actually deliver per friend:
+1. Provision their server
+2. Run the deploy helper
+3. Hand them the URL
+
+Phase 2 also acts as the requirements-gathering phase for Phase 3 — watch
+what real friend-campaigns hit, where API quotas matter, what the UX gaps
+are. That intel is what makes Phase 3 cheap when you get there.
+
+### Phase 3 — SaaS / sellable product
+
+Only build this when there's signal from Phase 2 that it's worth it.
+Required work:
+- Real multi-tenancy: `campaign_id` (or `tenant_id`) on every table,
+  every query tenant-scoped
+- Auth: pick Clerk / NextAuth / Auth0 — depends on stack at that point
+- Self-serve onboarding wizard (sign-up → campaign creation → kicks off
+  the same `/campaign/initialize` chain we already have)
+- Per-tenant quota management for LLM API keys, GDELT polling, BigQuery scans
+- Postgres at scale (already migrated by this point)
+- Hosting, monitoring, observability
+
+Effort estimate: ~2–3 weeks focused work. The generalization code is
+already done — Phase 3 is purely the productization layer.
+
+### Critical timing rule
+
+The Postgres migration is **the bridge** between phases. Do it in a quiet
+period (post-current-campaign or any pause before a friend onboards), NOT:
+- During an active campaign — risky
+- After friends have populated SQLite with their data — migration is harder
+  with multiple DBs to coordinate
+
+### What to NOT do now
+
+- Refactor for multi-tenancy
+- Add auth
+- Build onboarding wizards
+- Set up a SaaS dashboard
+
+Doing any of these before Phase 2 means building blind. Wait until real
+friend-campaigns reveal what's needed.
