@@ -64,15 +64,27 @@ backend/app/
   seed.py           # Seed data
   routes/           # One file per API domain (narrative_frames, analytics, etc.)
   services/
-    scoring.py          # LLM article scoring against narrative frames
-    rescore.py          # Background rescore job
-    narrative_frames.py # Frame match logic
-    scheduler.py        # APScheduler — runs ingestion/sync on a timer
-    ingestion.py        # RSS + crawl orchestration
-    briefing_summary.py # Morning briefing generation
-    llm_provider.py     # LLM abstraction (OpenAI/Anthropic)
-    gdelt_backfill.py   # Historical article backfill
+    campaign_analysis.py  # LLM article scoring against narrative frames (v2 prompt + per-claim extraction)
+    rescore.py            # Parallel rescore job (ThreadPoolExecutor with per-key pinning)
+    narrative_frames.py   # Frame match + suggest + variant reconciliation
+    frame_variants.py     # HDBSCAN density-based variant clustering + LLM naming
+    frame_momentum.py     # Trend × narrative cross-signal classifier
+    embeddings.py         # Gemini gemini-embedding-001 wrapper
+    scheduler.py          # APScheduler — runs ingestion/sync on a timer
+    ingestion.py          # RSS + crawl orchestration (with Readability + paywall fallbacks)
+    wayback.py            # archive.today + Wayback Machine fetch fallbacks
+    feed_discovery.py     # Probes GDELT-found domains for RSS feeds
+    bluesky_scraper.py    # Bluesky firehose ingestion
+    auto_review.py        # Auto-reviews low-relevance items
+    briefing_summary.py   # Morning briefing memo (uses get_judge_provider)
+    llm_provider.py       # LLM abstraction — get_provider() and get_judge_provider()
+    gdelt_backfill.py     # Historical GDELT article backfill
+    gdelt_monitor.py      # Real-time GDELT polling + daily tone snapshots
+    gdelt_bigquery.py     # GDELT BigQuery loader with V2Tone / V2Persons / V2Themes
+    google_trends.py      # Per-DMA + statewide interest-over-time
 ```
+
+**LLM providers**: `get_provider()` is the ingestion/scoring chain (Groq default with fallbacks); `get_judge_provider()` is OpenAI gpt-4o-mini primary with Groq fallback, used by anything that writes prose or makes judgments (briefing, variant naming, frame reclassification, etc.).
 
 **All API routes are prefixed `/api/`** in the FastAPI app.
 
@@ -81,19 +93,19 @@ backend/app/
 - **Narrative Frame**: A named message or attack being tracked (e.g. "Bresnahan's Healthcare Record"). Has `owner_type`: `candidate` | `opponent` | `media`.
 - **Stage**: `emerging → spreading → mainstream → fading → dormant` — computed from article match velocity.
 - **Trend**: `up | flat | down` — week-over-week outlet count direction.
-- **Urgency score**: Client-side only (`narrativeUrgency.ts`). Not stored in DB.
+- **Variant**: A specific phrasing/claim within a frame (HDBSCAN-clustered embeddings, LLM-named). Visible in the Narrative Detail page as a stacked variant-evolution chart.
+- **Momentum signal**: Per-frame label (`viral` / `missing_coverage` / `elite_only` / `stable`) computed daily by `frame_momentum.py`.
 - **Backfill**: One-time historical scoring job. Runs once per campaign setup.
 - **Rescore**: Re-scores all articles when frames change. Can take hours.
 
 ## Running tests
 
 ```bash
-# Frontend
-cd frontend && npm test
-
 # Backend
 cd backend && python -m pytest tests/
 ```
+
+The frontend has no test suite yet — verify changes via the Claude Preview tool against the running dev server.
 
 ## Things to be careful about
 

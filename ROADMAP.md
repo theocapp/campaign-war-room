@@ -200,15 +200,15 @@ Commit your changes to git: git add -A && git commit -m "what you did"
 
 ## Current Status
 
-- [x] Backend and frontend built and running
+- [x] Backend and frontend built and running (frontend-v2 on port 5174)
 - [x] RSS ingestion working
-- [x] Groq configured as LLM provider
+- [x] Groq + OpenAI configured; `get_judge_provider()` routes prose/judgment to OpenAI gpt-4o-mini
 - [x] KG narrative projection removed (previous session)
-- [ ] **Phase 1: Real data flowing** ← START HERE
-- [ ] Phase 2: Single LLM call per article
-- [ ] Phase 3: Campaign-defined narrative tracking
-- [ ] Phase 4: Morning briefing view
-- [ ] Phase 5: Test with real campaign
+- [x] **Phase 1: Real data flowing** — RSS + Google News + GDELT realtime + GDELT BigQuery backfill + Reddit + Bluesky
+- [x] Phase 2: Single-call per-article scoring (v2 prompt with per-claim extraction, quote verification, owner_type rules)
+- [x] Phase 3: Campaign-defined narrative tracking — LLM frame suggestion + per-article candidate frames + HDBSCAN variant clustering
+- [x] Phase 4: Morning briefing view (uses `get_judge_provider()` for the race-situation memo)
+- [ ] Phase 5: Test with real campaign — in progress (Cognetti PA-08 is the live test)
 
 ---
 
