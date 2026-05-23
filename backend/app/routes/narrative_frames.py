@@ -31,6 +31,34 @@ def list_frames(db: Session = Depends(get_db)):
     return svc.get_frames_with_counts(db)
 
 
+@router.get("/{frame_id}/detail")
+def frame_detail(frame_id: int, db: Session = Depends(get_db)):
+    """Full per-frame deep-dive: articles, daily activity, quotes, outlet mix."""
+    detail = svc.get_frame_detail(db, frame_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="frame not found")
+    return detail
+
+
+@router.get("/{frame_id}/timeline")
+def frame_timeline(
+    frame_id: int, days: int = 90, db: Session = Depends(get_db),
+):
+    """Variant-level mention timeline for a frame.
+
+    Returns per-day mention counts per variant + per-day frame totals over the
+    requested window. Use this to render variant-evolution charts: stacked
+    area showing how each variant's share has shifted over time.
+
+    Query params:
+      days — lookback window (default 90)
+    """
+    timeline = svc.get_frame_timeline(db, frame_id, days_back=days)
+    if not timeline:
+        raise HTTPException(status_code=404, detail="frame not found")
+    return timeline
+
+
 @router.post("")
 def create_frame(body: FrameCreate, db: Session = Depends(get_db)):
     owner = body.owner_type if body.owner_type in ("candidate", "opponent", "media") else "candidate"

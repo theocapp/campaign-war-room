@@ -12,6 +12,11 @@ engine = create_engine(
         "check_same_thread": False,
         "timeout": 30,  # seconds to wait for a lock at the Python level
     },
+    # Sized for the parallel rescore worker pool: 16 LLM keys × 2 sessions
+    # (title read + scoring write) + headroom for the API and scheduler.
+    pool_size=20,
+    max_overflow=40,
+    pool_timeout=60,
 )
 
 @event.listens_for(engine, "connect")
@@ -46,6 +51,8 @@ def _migrate(conn) -> None:
         "relevance_keywords": "TEXT", "excluded_keywords": "TEXT", "geography_keywords": "TEXT",
         "race_level": "TEXT", "election_type": "TEXT", "district_number": "TEXT",
         "neighborhood_keywords": "TEXT", "sparse_race_mode": "INTEGER DEFAULT 0",
+        "extended_backfill_completed": "INTEGER DEFAULT 0",
+        "trends_keywords": "TEXT",
     }.items():
         if col not in existing:
             conn.execute(text(f"ALTER TABLE campaign_config ADD COLUMN {col} {col_type}"))
@@ -82,6 +89,7 @@ def _migrate(conn) -> None:
         "source_author": "TEXT",
         "sentiment": "TEXT",
         "structured_extraction": "TEXT",
+        "gdelt_themes": "TEXT",
     }.items():
         if col not in existing_si:
             conn.execute(text(f"ALTER TABLE source_items ADD COLUMN {col} {col_type}"))
@@ -164,6 +172,59 @@ def _migrate(conn) -> None:
     existing_nfm = {row[1] for row in conn.execute(text("PRAGMA table_info(narrative_frame_mentions)"))}
     if "extracted_text" not in existing_nfm:
         conn.execute(text("ALTER TABLE narrative_frame_mentions ADD COLUMN extracted_text TEXT"))
+    # claim_meta: JSON blob with claim_type, actor, intensity, temporal, attribution,
+    # rebuttal_quote, etc. — full extracted claim metadata from v2 scoring.
+    if "claim_meta" not in existing_nfm:
+        conn.execute(text("ALTER TABLE narrative_frame_mentions ADD COLUMN claim_meta TEXT"))
+
+    # source_items: source_credibility (high|medium|low) — assessed by LLM per article
+    existing_si3 = {row[1] for row in conn.execute(text("PRAGMA table_info(source_items)"))}
+    if "source_credibility" not in existing_si3:
+        conn.execute(text(
+            "ALTER TABLE source_items ADD COLUMN source_credibility TEXT DEFAULT 'medium'"
+        ))
+    # gdelt_tone: JSON blob of GDELT V2Tone fields (avg_tone, positive, negative,
+    # polarity, etc.) when the article came from BigQuery backfill.
+    if "gdelt_tone" not in existing_si3:
+        conn.execute(text("ALTER TABLE source_items ADD COLUMN gdelt_tone TEXT"))
+
+    # narrative_frames: last_known_stage + last_stage_check_at for
+    # transition detection. See get_frames_with_counts for the logic.
+    existing_nf = {row[1] for row in conn.execute(text("PRAGMA table_info(narrative_frames)"))}
+    if "last_known_stage" not in existing_nf:
+        conn.execute(text("ALTER TABLE narrative_frames ADD COLUMN last_known_stage TEXT"))
+    if "last_stage_check_at" not in existing_nf:
+        conn.execute(text("ALTER TABLE narrative_frames ADD COLUMN last_stage_check_at DATETIME"))
+
+    # frame_stage_history is created by Base.metadata.create_all (model
+    # defined in models.py) — just ensure the index exists.
+    fsh_exists = conn.execute(text(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='frame_stage_history'"
+    )).scalar()
+    if fsh_exists:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_fsh_frame_transitioned "
+            "ON frame_stage_history(frame_id, transitioned_at)"
+        ))
+
+    # frame_variants table is created by Base.metadata.create_all — index only.
+    fv_exists = conn.execute(text(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='frame_variants'"
+    )).scalar()
+    if fv_exists:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_fv_frame_id ON frame_variants(frame_id)"
+        ))
+
+    # narrative_frame_mentions: variant_id + quote_embedding columns
+    existing_nfm2 = {row[1] for row in conn.execute(text("PRAGMA table_info(narrative_frame_mentions)"))}
+    if "variant_id" not in existing_nfm2:
+        conn.execute(text(
+            "ALTER TABLE narrative_frame_mentions ADD COLUMN variant_id INTEGER "
+            "REFERENCES frame_variants(id)"
+        ))
+    if "quote_embedding" not in existing_nfm2:
+        conn.execute(text("ALTER TABLE narrative_frame_mentions ADD COLUMN quote_embedding TEXT"))
 
     # ── Cluster-native tables (Phase A) ───────────────────────────────────────
     # The tables themselves are created by Base.metadata.create_all (called

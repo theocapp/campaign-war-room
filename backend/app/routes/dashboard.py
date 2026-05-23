@@ -16,37 +16,15 @@ from app.services import briefing_summary as briefing_svc
 
 
 def _compute_spikes(db: Session) -> list[dict]:
-    """Frames where last-24h mentions >= 3 and >= 2× the 7d daily average."""
-    now = datetime.utcnow()
-    cutoff_24h = now - timedelta(hours=24)
-    cutoff_7d = now - timedelta(days=7)
-    frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()  # noqa: E712
-    spikes = []
-    for frame in frames:
-        c24 = (
-            db.query(func.count(NarrativeFrameMention.id))
-            .filter(NarrativeFrameMention.frame_id == frame.id,
-                    NarrativeFrameMention.created_at >= cutoff_24h)
-            .scalar()
-        )
-        c7d = (
-            db.query(func.count(NarrativeFrameMention.id))
-            .filter(NarrativeFrameMention.frame_id == frame.id,
-                    NarrativeFrameMention.created_at >= cutoff_7d)
-            .scalar()
-        )
-        avg = c7d / 7.0
-        if c24 >= 3 and avg > 0 and c24 >= avg * 2:
-            spikes.append({
-                "frame_id": frame.id,
-                "frame_name": frame.name,
-                "owner_type": frame.owner_type,
-                "count_24h": c24,
-                "daily_avg_7d": round(avg, 1),
-                "ratio": round(c24 / avg, 1),
-            })
-    spikes.sort(key=lambda x: x["ratio"], reverse=True)
-    return spikes
+    """Delegates to the canonical cluster-based / reach-weighted spike detector.
+
+    The previous implementation here used the legacy NarrativeFrameMention
+    table and raw mention counts, which silently returned stale data once the
+    pipeline moved to FrameClusterMatch + weighted reach. Now shares the same
+    logic as /analytics/spikes.
+    """
+    from app.routes.analytics import detect_spike_alerts
+    return detect_spike_alerts(db)
 
 router = APIRouter()
 
@@ -140,14 +118,12 @@ def get_morning_briefing(db: Session = Depends(get_db)):
                     SourceItem.published_at.isnot(None))
             .scalar()
         )
-        trend = "up" if this_week > last_week else ("down" if this_week < last_week else "flat")
         pulse.append({
             "id": frame.id,
             "name": frame.name,
             "owner_type": frame.owner_type,
             "this_week": this_week,
             "last_week": last_week,
-            "trend": trend,
         })
     pulse.sort(key=lambda x: x["this_week"], reverse=True)
 
@@ -184,3 +160,28 @@ def get_morning_briefing(db: Session = Depends(get_db)):
         "narrative_pulse": pulse,
         "spike_alerts": _compute_spikes(db),
     }
+
+
+@router.get("/articles/recent")
+def get_recent_relevant_articles(limit: int = 10, db: Session = Depends(get_db)):
+    """Most recent race-relevant articles for the Dashboard right rail.
+
+    Filters: not archived, LLM-scored (real summary, not raw RSS), score >= 50.
+    Ordered by published_at desc so the user sees what's actually new — the
+    review queue's priority sort buries fresh items behind older high-priority
+    ones, which is the wrong signal for "what's happening now."
+    """
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    candidates = (
+        db.query(SourceItem)
+        .filter(
+            SourceItem.archived_as_irrelevant == False,  # noqa: E712
+            SourceItem.published_at >= cutoff,
+            SourceItem.race_relevance_score >= 50,
+        )
+        .order_by(SourceItem.published_at.desc())
+        .limit(limit * 3)  # over-fetch so the LLM-scored filter has headroom
+        .all()
+    )
+    items = [a for a in candidates if _is_llm_scored(a)][:limit]
+    return {"items": [_item_dict(a) for a in items]}

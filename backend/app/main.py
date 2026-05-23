@@ -22,6 +22,17 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         seed(db)
     start_scheduler()
+
+    # Clear any accumulated review-queue backlog on startup
+    import threading
+    def _startup_auto_review():
+        import time; time.sleep(3)  # wait for DB to fully settle
+        from app.db import SessionLocal
+        from app.services.auto_review import auto_review_queue
+        with SessionLocal() as db:
+            auto_review_queue(db)
+    threading.Thread(target=_startup_auto_review, daemon=True).start()
+
     try:
         yield
     finally:

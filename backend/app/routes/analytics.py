@@ -21,6 +21,8 @@ from app.db import get_db
 from app.models import (
     CampaignConfig,
     FrameClusterMatch,
+    GdeltToneSnapshot,
+    GoogleTrendSnapshot,
     NarrativeFrame,
     Outlet,
     RssFeed,
@@ -179,10 +181,10 @@ def get_monitoring_start_date(db: Session = Depends(get_db)):
     }
 
 
-@router.get("/analytics/spikes")
-def spike_report(db: Session = Depends(get_db)):
+def detect_spike_alerts(db: Session) -> list[dict]:
     """Frames whose last-24h weighted reach is ≥ 2× the 7-day daily average.
 
+    Shared between the /analytics/spikes endpoint and the morning briefing.
     Reach is summed across all member articles of every matched cluster, so
     a wire story carried by major papers is correctly weighted against a
     burst of low-authority blog posts.
@@ -210,7 +212,12 @@ def spike_report(db: Session = Depends(get_db)):
             })
 
     spikes.sort(key=lambda x: x["ratio"], reverse=True)
-    return {"spikes": spikes}
+    return spikes
+
+
+@router.get("/analytics/spikes")
+def spike_report(db: Session = Depends(get_db)):
+    return {"spikes": detect_spike_alerts(db)}
 
 
 def _frame_reach_in_window(db: Session, frame_id: int, cutoff: datetime) -> float:
@@ -231,3 +238,52 @@ def _frame_reach_in_window(db: Session, frame_id: int, cutoff: datetime) -> floa
         .scalar()
     )
     return float(val or 0)
+
+
+@router.get("/analytics/tone")
+def get_tone_history(days: int = 30, db: Session = Depends(get_db)):
+    """Return daily GDELT tone snapshots for candidate + opponents.
+
+    Used to render a media-tone trend chart on the Narratives page.
+    Response shape:
+      { "entities": [{ "label": str, "entity_type": str,
+                        "series": [{ "date": "YYYY-MM-DD", "tone": float }] }] }
+    """
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        db.query(GdeltToneSnapshot)
+        .filter(GdeltToneSnapshot.snapshot_date >= cutoff)
+        .order_by(GdeltToneSnapshot.query_label, GdeltToneSnapshot.snapshot_date)
+        .all()
+    )
+    by_entity: dict[str, dict] = {}
+    for row in rows:
+        # GDELT returns 0.0 when the day had few/no indexed articles for the
+        # query — that's "no signal," not a real neutral-tone reading. A
+        # genuine average tone landing on exactly 0.00 is vanishingly rare.
+        if row.avg_tone == 0.0:
+            continue
+        if row.query_label not in by_entity:
+            by_entity[row.query_label] = {
+                "label": row.query_label,
+                "entity_type": row.entity_type,
+                "series": [],
+            }
+        by_entity[row.query_label]["series"].append({
+            "date": row.snapshot_date.strftime("%Y-%m-%d"),
+            "tone": row.avg_tone,
+        })
+    return {"entities": list(by_entity.values())}
+
+
+@router.get("/analytics/search-trends")
+def get_search_trends(days: int = 90, geo: str = "US-PA", db: Session = Depends(get_db)):
+    """Return Google Trends interest-over-time for all tracked terms.
+
+    `geo` selects the geography: "US-PA" (statewide) or "US-PA-577"
+    (Wilkes Barre-Scranton DMA).
+
+    Response: { "terms": [{ "term": str, "series": [{ "date": "YYYY-MM-DD", "interest": int }] }] }
+    """
+    from app.services.google_trends import get_trends_series
+    return {"terms": get_trends_series(db, days=days, geo=geo)}

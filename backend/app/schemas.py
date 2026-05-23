@@ -40,10 +40,11 @@ class CampaignProfileOut(OrmBase):
     relevance_keywords: Optional[list[str]] = None
     excluded_keywords: Optional[list[str]] = None
     geography_keywords: Optional[list[str]] = None
+    trends_keywords: Optional[list[str]] = None
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 
-    @field_validator("key_priorities", "relevance_keywords", "excluded_keywords", "geography_keywords", "neighborhood_keywords", mode="before")
+    @field_validator("key_priorities", "relevance_keywords", "excluded_keywords", "geography_keywords", "neighborhood_keywords", "trends_keywords", mode="before")
     @classmethod
     def _parse_string_list(cls, v):
         if isinstance(v, str):
@@ -72,6 +73,7 @@ class CampaignProfileIn(BaseModel):
     relevance_keywords: Optional[list[str]] = None
     excluded_keywords: Optional[list[str]] = None
     geography_keywords: Optional[list[str]] = None
+    trends_keywords: Optional[list[str]] = None
 
 
 # ── Race Directory ────────────────────────────────────────────────────────────
@@ -306,10 +308,9 @@ class OpponentActivityOut(OrmBase):
     claim: Optional[str]
     attack: Optional[str]
     promise: Optional[str]
-    contradiction_note: Optional[str]
-    repeated_theme: Optional[str]
-    created_at: datetime
-    source_item: Optional[SourceItemOut]
+    source_type: Optional[str]
+    first_seen_at: Optional[datetime]
+    last_seen_at: Optional[datetime]
 
 
 

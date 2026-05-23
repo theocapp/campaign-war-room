@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Opponent, OpponentActivity
+from app.models import Opponent, ClusterOpponentActivity
 from app.schemas import OpponentOut, OpponentIn, OpponentActivityOut
 
 router = APIRouter()
@@ -36,10 +36,13 @@ def get_opponent_activity(opponent_id: int, db: Session = Depends(get_db)):
     if not opp:
         raise HTTPException(status_code=404, detail="Opponent not found")
     activities = (
-        db.query(OpponentActivity)
-        .options(joinedload(OpponentActivity.source_item))
-        .filter(OpponentActivity.opponent_id == opponent_id)
-        .order_by(OpponentActivity.created_at.desc())
+        db.query(ClusterOpponentActivity)
+        .filter(
+            ClusterOpponentActivity.opponent_id == opponent_id,
+            # Exclude blank / garbage rows
+            (ClusterOpponentActivity.attack.isnot(None)) | (ClusterOpponentActivity.claim.isnot(None)) | (ClusterOpponentActivity.promise.isnot(None)),
+        )
+        .order_by(ClusterOpponentActivity.last_seen_at.desc())
         .all()
     )
     return activities

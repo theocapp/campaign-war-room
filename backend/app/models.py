@@ -24,7 +24,9 @@ class CampaignConfig(Base):
     relevance_keywords = Column(Text)  # JSON array stored as text
     excluded_keywords = Column(Text)   # JSON array stored as text
     geography_keywords = Column(Text)  # JSON array stored as text
+    trends_keywords = Column(Text)  # JSON array of extra Google Trends terms
     historical_backfill_completed = Column(Boolean, default=False)
+    extended_backfill_completed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -109,11 +111,17 @@ class SourceItem(Base):
     archived_as_irrelevant = Column(Boolean, default=False)
     story_cluster_id = Column(String, nullable=True)
     duplicate_of_source_id = Column(Integer, nullable=True)
+    gdelt_themes = Column(Text, nullable=True)  # JSON array of GKG theme strings
     extraction_quality_score = Column(Integer, default=100)
     extraction_quality_label = Column(String, default="good")
     extraction_quality_reasons = Column(Text, nullable=True)  # JSON array stored as text
     # positive | negative | neutral | mixed — how the article's tone affects the candidate
     sentiment = Column(String, nullable=True)
+    source_credibility = Column(String, default="medium")  # high|medium|low from v2 LLM
+    # JSON blob of GDELT's V2Tone field when available (BigQuery-ingested articles):
+    # {"avg_tone": -23.5, "positive": 12.1, "negative": 35.6, "polarity": 47.7,
+    #  "activity_density": 1.2, "group_density": 0.8, "word_count": 412}
+    gdelt_tone = Column(Text, nullable=True)
     # JSON blob of the full LLM analysis result (summary, framing, sentiment,
     # opponent_attacks, etc.) cached so rematch can skip re-reading article text.
     structured_extraction = Column(Text, nullable=True)
@@ -288,8 +296,82 @@ class NarrativeFrame(Base):
     source = Column(String, default="human")  # human | llm
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Most recent stage observed for this frame. NULL when never computed.
+    # Compared against the freshly-computed stage in get_frames_with_counts;
+    # any difference triggers a FrameStageHistory row + update of this field.
+    last_known_stage = Column(String, nullable=True)
+    last_stage_check_at = Column(DateTime, nullable=True)
+    # Cross-signal classification from Trend×Narrative correlation:
+    #   viral             — article spike + matching trend spike
+    #   missing_coverage  — trend spike without matching article volume
+    #   elite_only        — article spike without matching trend interest
+    #   stable            — neither metric spiking
+    momentum_signal = Column(String, nullable=True)
+    momentum_signal_at = Column(DateTime, nullable=True)
+    # JSON snapshot of supporting evidence:
+    # {"article_velocity": 3.4, "trend_velocity": 2.1, "matched_terms": [...]}
+    momentum_data = Column(Text, nullable=True)
 
     mentions = relationship("NarrativeFrameMention", back_populates="frame", cascade="all, delete-orphan")
+
+
+class FrameVariant(Base):
+    """A messaging variant within a narrative frame.
+
+    A variant is a specific phrasing/argument of the broader frame:
+      Frame: "Bresnahan's Healthcare Record"
+        Variant 1: "Bresnahan voted against ACA expansion"
+        Variant 2: "Bresnahan blocked Medicaid for seniors"
+        Variant 3: "Bresnahan killed healthcare"  (newer, more aggressive)
+
+    Variants are computed by clustering NarrativeFrameMention.extracted_text
+    quotes per frame (see app/services/frame_variants.py). Each NFM gets
+    assigned a variant_id pointing to its cluster.
+
+    Naming convention: variants get an LLM-generated short name from the
+    dominant phrasing in the cluster. Frame name describes the underlying
+    claim (stable); variant names describe specific phrasings (mutable as
+    the cluster shifts).
+    """
+    __tablename__ = "frame_variants"
+    id = Column(Integer, primary_key=True)
+    frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=False)
+    name = Column(String, nullable=False)
+    # JSON array of floats — centroid of member-quote embeddings.
+    # Used for fast nearest-variant lookup when new mentions arrive.
+    centroid_embedding = Column(Text, nullable=True)
+    first_seen_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    mention_count = Column(Integer, default=0)
+    # Generation marker — every full re-cluster bumps this. Useful when
+    # we want to invalidate old assignments without dropping the row.
+    generation = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FrameStageHistory(Base):
+    """Append-only log of frame stage transitions.
+
+    Stage is normally computed on-read from current mention counts (see
+    _narrative_stage), but transitions are the interesting events. This table
+    captures each transition so we can answer:
+      - When did frame X go from "emerging" to "spreading"?
+      - Which frames moved to "fading" this week?
+      - How long was frame X stuck at "mainstream"?
+
+    Populated by get_frames_with_counts when it detects a change from
+    NarrativeFrame.last_known_stage.
+    """
+    __tablename__ = "frame_stage_history"
+    id = Column(Integer, primary_key=True)
+    frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=False)
+    from_stage = Column(String, nullable=True)  # NULL = first observation
+    to_stage = Column(String, nullable=False)
+    transitioned_at = Column(DateTime, default=datetime.utcnow)
+    # JSON snapshot of supporting metrics at transition time:
+    # {"art_total": 47, "art_this_week": 12, "baseline_weekly": 3, "days_since_article": 1}
+    metrics_snapshot = Column(Text, nullable=True)
 
 
 class NarrativeFrameMention(Base):
@@ -303,6 +385,15 @@ class NarrativeFrameMention(Base):
     confidence = Column(Integer, default=70)
     matched_by = Column(String, default="llm")  # llm | human
     extracted_text = Column(Text, nullable=True)  # specific claim/quote from article for this frame
+    # JSON blob: full extracted-claim metadata (claim_type, actor, intensity,
+    # temporal, attribution, rebuttal_quote). See campaign_analysis._validate_v2_claim.
+    claim_meta = Column(Text, nullable=True)
+    # Which variant of the parent frame this quote belongs to. NULL until
+    # the variant clustering job runs. See frame_variants.py.
+    variant_id = Column(Integer, ForeignKey("frame_variants.id"), nullable=True)
+    # Cached embedding of extracted_text (JSON array of floats). Optional —
+    # variant clustering can re-compute on demand if missing.
+    quote_embedding = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     frame = relationship("NarrativeFrame", back_populates="mentions")
@@ -385,3 +476,76 @@ class ClusterOpponentActivity(Base):
     source_type = Column(String, default="cluster_runtime")
     first_seen_at = Column(DateTime, default=datetime.utcnow)
     last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class GoogleTrendSnapshot(Base):
+    """Daily Google Trends interest score (0–100) for a tracked search term.
+
+    Pulled via pytrends. The same term/date is stored once per geography
+    (statewide US-PA and the Scranton/Wilkes-Barre DMA US-PA-577), so the
+    Analytics page can toggle between them.
+    Interest is relative within the query batch — 100 = peak interest for that
+    term over the trailing 90 days. Stored per term per day for sparkline display.
+    """
+    __tablename__ = "google_trend_snapshots"
+    __table_args__ = (
+        UniqueConstraint("term", "snapshot_date", "geo", name="uq_google_trend_daily"),
+    )
+    id = Column(Integer, primary_key=True)
+    term = Column(String, nullable=False)
+    snapshot_date = Column(DateTime, nullable=False)
+    interest = Column(Integer, nullable=True)  # 0–100, None if Google returned no data
+    geo = Column(String, nullable=False, default="US-PA")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GdeltToneSnapshot(Base):
+    """Daily aggregate tone snapshot from GDELT timelinetone API.
+
+    Tracks how positive/negative media coverage is for the candidate and each
+    opponent over time. GDELT tone ranges from -100 (most negative) to +100
+    (most positive); neutral coverage sits near 0.
+    """
+    __tablename__ = "gdelt_tone_snapshots"
+    __table_args__ = (
+        UniqueConstraint("query_label", "snapshot_date", name="uq_gdelt_tone_daily"),
+    )
+    id = Column(Integer, primary_key=True)
+    # Human-readable label for what was searched, e.g. "Matt Cartwright" or "Rob Bresnahan"
+    query_label = Column(String, nullable=False)
+    # candidate | opponent
+    entity_type = Column(String, nullable=False, default="candidate")
+    # Date this snapshot covers (truncated to day, UTC)
+    snapshot_date = Column(DateTime, nullable=False)
+    # Average GDELT tone score for this day (-100 to +100)
+    avg_tone = Column(Float, nullable=True)
+    # Number of articles in the GDELT index that day
+    article_count = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CandidateFrame(Base):
+    """Staging table for emerging narratives the LLM proposed during scoring
+    but which don't match any existing NarrativeFrame.
+
+    Populated per-claim during analysis. A periodic auto-promotion job clusters
+    semantically similar candidate frames; clusters with enough cross-article
+    and cross-outlet support get promoted into real NarrativeFrames.
+
+    Lifecycle:
+      - inserted when extracted_claims[i].candidate_new_frame is set
+      - resolved_to_frame_id set when auto-promoted (or merged into existing)
+      - rows are kept indefinitely as audit trail
+    """
+    __tablename__ = "candidate_frames"
+    id = Column(Integer, primary_key=True)
+    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
+    suggested_name = Column(String, nullable=False)
+    owner_type_hint = Column(String, nullable=False, default="media")
+    evidence_quote = Column(Text, nullable=False)
+    reasoning = Column(Text, nullable=True)
+    # Set when the auto-promoter merges this candidate into a real frame
+    # (either newly created or matched to an existing one).
+    resolved_to_frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

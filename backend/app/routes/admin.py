@@ -108,9 +108,25 @@ def reanalyze_sources_endpoint(body: ReanalyzeSourcesRequest, db: Session = Depe
 
 
 @router.post("/admin/rescore-articles")
-def start_rescore(db: Session = Depends(get_db)):
-    """Start background LLM rescoring of all articles. Returns immediately."""
-    return rescore_svc.start_rescore(db)
+def start_rescore(
+    only_unscored: bool = False,
+    auto_rematch: bool = False,
+    max_workers: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Start background LLM rescoring of articles. Returns immediately.
+
+    only_unscored=true skips articles that already have a summary, so a
+    rescore can resume without redoing work already completed.
+    auto_rematch=true chains a frame-rematch job once rescoring finishes.
+    max_workers=null auto-sizes to one worker per loaded LLM key (default).
+    """
+    return rescore_svc.start_rescore(
+        db,
+        only_unscored=only_unscored,
+        auto_rematch=auto_rematch,
+        max_workers=max_workers,
+    )
 
 
 @router.get("/admin/rescore-status")
@@ -123,3 +139,44 @@ def rescore_status():
 def stop_rescore():
     """Stop the background rescore job early."""
     return rescore_svc.stop_rescore()
+
+
+@router.post("/admin/auto-review")
+def run_auto_review(db: Session = Depends(get_db)):
+    """Immediately triage the review queue: auto-approve high-confidence items,
+    auto-dismiss clearly irrelevant ones. Safe to call repeatedly."""
+    from app.services.auto_review import auto_review_queue
+    return auto_review_queue(db)
+
+
+@router.post("/admin/discover-outlets")
+def run_outlet_discovery(force: bool = False, db: Session = Depends(get_db)):
+    """Trigger LLM-based outlet discovery for the active campaign.
+
+    force=false (default): only runs for districts not in the hardcoded catalog
+                            and not already covered in the DB. No-op on PA-08.
+    force=true: runs LLM discovery even for curated districts to augment the
+                outlet list. Idempotent — skips outlets that already exist.
+    """
+    from app.models import CampaignConfig
+    from app.services.monitors import _auto_discover_outlets
+    from app.services.source_discovery import _parse_state_code
+
+    campaign = db.query(CampaignConfig).first()
+    if not campaign or not campaign.district:
+        return {"created": 0, "reason": "No campaign config or district not set"}
+
+    state_code = _parse_state_code(campaign.district, campaign.location)
+    created = _auto_discover_outlets(
+        db,
+        district=campaign.district,
+        state_code=state_code,
+        location=campaign.location,
+        candidate=campaign.candidate_name,
+        force=force,
+    )
+    return {
+        "created": created,
+        "district": campaign.district,
+        "force": force,
+    }

@@ -150,7 +150,7 @@ logger = logging.getLogger(__name__)
 
 # In-memory progress tracker for the current rematch run.
 # Safe for single-server use — reset each time rematch_all starts.
-_rematch_progress: dict = {"running": False, "done": 0, "total": 0}
+_rematch_progress: dict = {"running": False, "done": 0, "total": 0, "started_at": None}
 _rematch_lock = False  # guard against concurrent runs
 
 
@@ -205,13 +205,21 @@ def _validate_owner_type(
     candidate: str,
     opponents: list[str],
 ) -> str:
-    """Downgrade owner_type to 'media' when the frame text doesn't mention
-    the relevant party. Bug 6: the LLM kept labelling generic news as
-    'opponent' even when no opponent was named.
+    """Downgrade owner_type to 'media' only when the frame text names no
+    party at all. A frame that *attacks* the opponent legitimately favors
+    the candidate (and vice-versa), so checking only that the frame mentions
+    the same-side person was too strict — it was burying anti-opponent
+    frames under 'media' even though the LLM correctly tagged them as
+    candidate-favoring.
+
+    The rule now: if the LLM says this frame has an owner, the frame must
+    mention someone on either side. Otherwise it's truly neutral coverage.
     """
-    if owner_type == "candidate" and not _mentions_person(frame_text, candidate):
-        return "media"
-    if owner_type == "opponent" and not any(_mentions_person(frame_text, o) for o in opponents):
+    if owner_type not in ("candidate", "opponent"):
+        return owner_type
+    mentions_candidate = _mentions_person(frame_text, candidate)
+    mentions_any_opponent = any(_mentions_person(frame_text, o) for o in opponents)
+    if not mentions_candidate and not mentions_any_opponent:
         return "media"
     return owner_type
 
@@ -225,6 +233,71 @@ def _campaign_context(db: Session) -> dict:
         "location": (config.location or config.district or "Unknown") if config else "Unknown",
         "opponents": [o.name for o in opponents] if opponents else [],
     }
+
+
+def reclassify_media_frames(db: Session) -> dict:
+    """One-shot pass over every frame currently tagged 'media' — ask the LLM
+    whether the frame actually favors a side. Use only when the validation
+    rules change and existing frames may be misclassified (e.g. anti-opponent
+    frames that were previously buried under 'media').
+
+    Updates DB in place. Returns a summary dict.
+    """
+    from app.services.llm_provider import get_judge_provider
+
+    ctx = _campaign_context(db)
+    candidate = ctx["candidate"]
+    opponents = ", ".join(ctx["opponents"]) or "the opponent"
+
+    media_frames = (
+        db.query(NarrativeFrame)
+        .filter(NarrativeFrame.active == True, NarrativeFrame.owner_type == "media")  # noqa: E712
+        .all()
+    )
+    if not media_frames:
+        return {"checked": 0, "reclassified": 0}
+
+    llm = get_judge_provider()
+    reclassified = 0
+    for frame in media_frames:
+        prompt = f"""You are a political analyst classifying a narrative frame in a campaign.
+
+RACE: {candidate} vs {opponents}
+
+FRAME:
+- Name: {frame.name}
+- Description: {frame.description or ''}
+
+Decide who this narrative favors. Reply with exactly one word:
+- "candidate" if it promotes {candidate} or attacks/criticizes {opponents}
+- "opponent" if it promotes {opponents} or attacks/criticizes {candidate}
+- "media" if it's neutral news coverage that helps neither side
+
+ANSWER:"""
+        try:
+            ans = llm.complete(prompt).strip().lower()
+        except Exception as e:
+            logger.warning("reclassify_media_frames: LLM error for frame %d: %s", frame.id, e)
+            continue
+        # Take the first matching token in case the LLM adds explanation
+        new_type = next((t for t in ("candidate", "opponent", "media") if t in ans), None)
+        if not new_type or new_type == "media":
+            continue
+        # Sanity check via the same validator — make sure the chosen side is
+        # consistent with whose name is in the frame.
+        new_type = _validate_owner_type(
+            new_type, f"{frame.name} {frame.description or ''}",
+            candidate=candidate, opponents=ctx["opponents"],
+        )
+        if new_type == frame.owner_type:
+            continue
+        logger.info("reclassify_media_frames: frame %d '%s' media → %s",
+                    frame.id, frame.name, new_type)
+        frame.owner_type = new_type
+        reclassified += 1
+    if reclassified:
+        db.commit()
+    return {"checked": len(media_frames), "reclassified": reclassified}
 
 
 def _revalidate_all_frames(db: Session, ctx: dict) -> int:
@@ -539,8 +612,13 @@ def match_article_to_frames(db: Session, item: SourceItem) -> list[int]:
         logger.debug("narrative_frames.match_article: skipping item=%d (relevance=%d)", item.id, relevance)
         return []
 
+    OWNER_ROLE = {
+        "candidate": "OUR MESSAGE",
+        "opponent":  "OPPONENT ATTACK",
+        "media":     "MEDIA THEME",
+    }
     frames_list = "\n".join(
-        f"{i+1}. {f.name}: {f.description or ''}"
+        f"{i+1}. [{OWNER_ROLE.get(f.owner_type, f.owner_type.upper())}] {f.name}: {f.description or ''}"
         for i, f in enumerate(frames)
     )
 
@@ -579,29 +657,36 @@ Summary: {cached_summary}"""
 
     prompt = f"""You are a political research assistant tagging news articles with the campaign narratives they cover.
 
-NARRATIVES:
+NARRATIVES (each tagged with its perspective):
 {frames_list}
 
 ARTICLE:
 {article_section}
 
 TASK:
-For each narrative above, decide: does this article discuss or mention this topic, regardless of how it is framed or which side it favors?
+Decide which narratives this article meaningfully covers. The tag on each narrative matters:
 
-Rules:
-- Match based on TOPIC, not on tone or who benefits. An investigative piece about Bresnahan's stock trades counts the same as a Cognetti press release about it.
+[OUR MESSAGE] — Match ONLY if the article reports on or amplifies {ctx["candidate"]}'s own messaging/record on this topic. Do NOT match if the article attacks, mocks, or disputes this message — an attack piece from the opponent that merely mentions the topic does not count.
+
+[OPPONENT ATTACK] — Match if the article covers, repeats, or reports on this attack line, whether as criticism of the opponent or as the attack itself being made. Both "Bresnahan buys stocks" and "Cognetti attacks Bresnahan on stocks" count.
+
+[MEDIA THEME] — Match if the article covers this topic in any framing, from any outlet.
+
+Additional rules:
 - One article can match MULTIPLE narratives if it contains distinct information about each.
-- Do NOT match vague thematic overlap — only match when the article has specific information about that narrative topic.
-- For each match, extract the 1-2 most relevant sentences verbatim from the article. Do not paraphrase.
+- Do NOT match vague thematic overlap — only match when the article has specific, substantive information about that narrative.
+- For each match, extract the 1-2 most relevant sentences verbatim from the article.
 
 Return ONLY a JSON array. Each element: {{"frame": <number>, "snippet": "<exact quote from article>"}}
-Return [] if no narratives apply.
-
-Example: [{{"frame": 2, "snippet": "Bresnahan bought and sold stocks in healthcare companies while sitting on committees overseeing those industries."}}, {{"frame": 4, "snippet": "Cognetti pointed to her record cutting city contracts as evidence of her anti-corruption stance."}}]"""
+Return [] if no narratives apply."""
 
     try:
-        from app.services.llm_provider import get_ingestion_provider, MockLLMProvider
-        provider = get_ingestion_provider()
+        # Use the centralized judge provider (OpenAI gpt-4o-mini primary, Groq
+        # fallback). Frame matching benefits from gpt-4o-mini's better
+        # instruction-following on structured-JSON tasks. Cost is negligible —
+        # ~$0.0001 per article × low-volume callers.
+        from app.services.llm_provider import get_judge_provider, MockLLMProvider
+        provider = get_judge_provider()
         if isinstance(provider, MockLLMProvider):
             return []
 
@@ -679,6 +764,7 @@ Example: [{{"frame": 2, "snippet": "Bresnahan bought and sold stocks in healthca
                     confidence=75,
                     source_type="cluster_runtime",
                     matched_by="llm",
+                    article_date=item.published_at,
                 )
 
             matched_frame_ids.append(frame.id)
@@ -713,8 +799,10 @@ def rematch_all(db: Session, days_back: int = 365) -> int:
     import time
     from sqlalchemy import func
 
-    # Configurable via env — increase if still hitting limits, decrease if fast enough
-    delay = float(os.environ.get("REMATCH_DELAY_SECONDS", "2.5"))
+    # Configurable via env — was 2.5s tuned for free Groq tier (4-key
+    # round-robin). With OpenAI tier 2 we have 5K RPM headroom; a 0.1s
+    # courtesy delay between calls is plenty.
+    delay = float(os.environ.get("REMATCH_DELAY_SECONDS", "0.1"))
 
     try:
         cutoff = datetime.utcnow() - timedelta(days=days_back)
@@ -750,6 +838,7 @@ def rematch_all(db: Session, days_back: int = 365) -> int:
         _rematch_progress["running"] = True
         _rematch_progress["done"] = 0
         _rematch_progress["total"] = len(items)
+        _rematch_progress["started_at"] = datetime.utcnow().isoformat()
 
         total = 0
         for i, item in enumerate(items):
@@ -906,6 +995,56 @@ Each number is a frame ID from the list above. Do not include frames that have n
     return {"merged": merged, "groups": result_groups}
 
 
+_REFUSAL_MARKERS = (
+    "no information provided",
+    "not enough information",
+    "no context provided",
+    "no content provided",
+    "no summary available",
+    "cannot create a summary",
+    "unable to create a summary",
+    "no article text",
+    "no text was provided",
+    "i don't have enough",
+    "i do not have enough",
+)
+
+
+def is_refusal_summary(s: str | None) -> bool:
+    """True when a stored summary looks like an LLM refusal for empty input
+    (paywalled / unextractable article). These should be hidden in quotes
+    and ideally nulled in the DB so they get re-summarized later."""
+    s_norm = (s or "").strip().lower()
+    if not s_norm or len(s_norm) < 40:
+        return False
+    return any(m in s_norm for m in _REFUSAL_MARKERS)
+
+
+def clear_refusal_summaries(db: Session) -> dict:
+    """Null out source_items.summary rows that are LLM refusals. After this
+    runs, the next rescore/re-summary pass will regenerate them from the
+    (now possibly extracted) article text — or skip them if still empty,
+    which is cleaner than carrying a fake summary forever.
+
+    Returns counts: how many were checked, how many cleared.
+    """
+    from app.models import SourceItem
+
+    items = (
+        db.query(SourceItem)
+        .filter(SourceItem.summary.isnot(None), SourceItem.summary != "")
+        .all()
+    )
+    cleared = 0
+    for it in items:
+        if is_refusal_summary(it.summary):
+            it.summary = None
+            cleared += 1
+    if cleared:
+        db.commit()
+    return {"checked": len(items), "cleared": cleared}
+
+
 def repair_frame_data(db: Session) -> dict:
     """One-time (idempotent) cleanup of two known data quality problems.
 
@@ -996,16 +1135,115 @@ def repair_frame_data(db: Session) -> dict:
     return {"descriptions_fixed": desc_fixed, "quotes_nulled": mentions_fixed, "false_positives_removed": false_positives}
 
 
-def _narrative_stage(total: int, this_week: int, last_week: int, days_since_last: float | None) -> str:
-    if total == 0 or days_since_last is None or days_since_last > 14:
+# ── Reach weighting ──────────────────────────────────────────────────────────
+# Articles are weighted by their outlet's reach so a wire story carried by
+# major papers outweighs a burst of low-authority blogs. We use audience size
+# when known, else fall back to a curated authority score (1-10 scale).
+REACH_PER_MONTHLY_VISITOR = 0.003     # weight per monthly visitor
+REACH_DEFAULT_OUTLET_AUTHORITY = 5    # midpoint of the 1-10 scale
+REACH_AUTHORITY_SCALE = 10.0          # divisor → normalizes to ~0-1
+
+
+# ── Stage classification ─────────────────────────────────────────────────────
+# These thresholds split into two groups:
+#   1. Universal constants — campaign-size-invariant. Same for a presidential
+#      race or a city council seat: ratios and time windows.
+#   2. Volume thresholds — DERIVED from each campaign's own data (see
+#      _compute_stage_scale below). This is what lets the tool work at any
+#      scale: a frame that would be "high volume" in a House race might be
+#      noise in a presidential, so we compare each frame against the campaign's
+#      own median, not a hardcoded number.
+
+# Universal — same for any campaign.
+STAGE_DORMANT_DAYS = 14        # no activity in this many days → dormant
+STAGE_SPREADING_RATIO = 2.0    # this_week must be ≥ baseline × this to spread
+STAGE_FADING_RATIO = 0.5       # this_week must be < baseline × this to fade
+
+# Safe defaults used when the campaign has no data yet. These are floors;
+# derived per-campaign values only ever exceed them. The baseline_floor is
+# the statistical sample-size minimum — 3 is the conventional "enough events
+# to be more than noise" threshold, and it stays constant at any scale.
+_DEFAULT_STAGE_SCALE = {
+    "emerging_total_max": 5,
+    "resurfacing_total_min": 5,
+    "mainstream_total_min": 20,
+    "this_week_floor": 3,
+    "baseline_floor": 3,
+}
+
+
+def _compute_stage_scale(frame_data: list[tuple[int, int]]) -> dict:
+    """Return per-campaign volume thresholds derived from current data.
+
+    `frame_data` is a list of (article_total, articles_this_week) per active
+    frame. Thresholds anchor to percentiles of the campaign's own distribution
+    so the tool generalizes across race sizes:
+      • emerging_total_max    = bottom-quartile total (still building)
+      • resurfacing_total_min = same — a resurfacing frame just has to be
+                                past the "emerging" stage
+      • mainstream_total_min  = median total (top half is mainstream-eligible)
+      • this_week_floor       = half the median weekly (noise filter for spikes)
+      • baseline_floor        = constant 3 (statistical sample-size minimum —
+                                independent of campaign scale)
+    """
+    if not frame_data:
+        return dict(_DEFAULT_STAGE_SCALE)
+
+    totals = sorted(t for t, _ in frame_data)
+    weeks = sorted(w for _, w in frame_data)
+    n = len(totals)
+
+    def pct(arr: list[int], p: float) -> int:
+        return arr[min(n - 1, max(0, int(p * (n - 1))))]
+
+    median_total = pct(totals, 0.5)
+    q1_total = pct(totals, 0.25)
+    median_weekly = pct(weeks, 0.5)
+
+    return {
+        "emerging_total_max": max(_DEFAULT_STAGE_SCALE["emerging_total_max"], q1_total),
+        "resurfacing_total_min": max(_DEFAULT_STAGE_SCALE["resurfacing_total_min"], q1_total),
+        "mainstream_total_min": max(_DEFAULT_STAGE_SCALE["mainstream_total_min"], median_total),
+        "this_week_floor": max(_DEFAULT_STAGE_SCALE["this_week_floor"], median_weekly // 2),
+        "baseline_floor": _DEFAULT_STAGE_SCALE["baseline_floor"],
+    }
+
+
+def _narrative_stage(
+    total: int,
+    this_week: int,
+    baseline_weekly: int,
+    days_since_last: float | None,
+    scale: dict,
+) -> str:
+    """Classify a frame's lifecycle stage from article-level counts.
+
+    All volume comparisons use `scale` (derived per-campaign), so the same
+    logic produces sensible classifications for any race size. The exception
+    is dormant: 14 days of silence means silence at any scale.
+    """
+    if total == 0 or days_since_last is None or days_since_last > STAGE_DORMANT_DAYS:
         return "dormant"
-    if total <= 5:
+    if total <= scale["emerging_total_max"]:
         return "emerging"
-    if this_week >= max(2, last_week * 1.5):
+    # Resurfacing: established frame, currently active, but flatlined for the
+    # past 3+ weeks — distinct campaign-intel signal vs a normal surge. Uses
+    # a softer this-week threshold than spreading: a quiet frame just waking
+    # up to modest activity is the signal, not a huge surge.
+    if (total >= scale["resurfacing_total_min"]
+        and this_week >= max(2, scale["this_week_floor"] // 2)
+        and baseline_weekly == 0):
+        return "resurfacing"
+    # Spreading: real this-week volume AND a clear surge over a non-trivial baseline.
+    if (this_week >= scale["this_week_floor"]
+        and baseline_weekly >= scale["baseline_floor"]
+        and this_week >= baseline_weekly * STAGE_SPREADING_RATIO):
         return "spreading"
-    if last_week >= 3 and this_week < last_week * 0.5:
+    # Fading: a frame with established weekly coverage has dropped off.
+    if (baseline_weekly >= scale["baseline_floor"] * 2
+        and this_week < baseline_weekly * STAGE_FADING_RATIO):
         return "fading"
-    if total > 15:
+    if total >= scale["mainstream_total_min"]:
         return "mainstream"
     return "active"
 
@@ -1018,123 +1256,319 @@ def get_frames_with_counts(db: Session) -> list[dict]:
     numbers now count distinct story clusters, not raw article mentions, so
     wire syndication doesn't inflate them.
     """
-    from sqlalchemy import case, func
+    from collections import defaultdict
+
+    from sqlalchemy import and_, case, func
     from app.models import FrameClusterMatch, Outlet, StoryCluster
+
     now = datetime.utcnow()
     week_start = now - timedelta(days=7)
     prev_week_start = now - timedelta(days=14)
 
+    # Reach weighting — see REACH_* constants near the top of this file.
     reach_weight = case(
-        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * 0.003),
-        else_=func.coalesce(Outlet.authority_score, 5) / 10.0,
+        (Outlet.monthly_visitors.isnot(None), Outlet.monthly_visitors * REACH_PER_MONTHLY_VISITOR),
+        else_=func.coalesce(Outlet.authority_score, REACH_DEFAULT_OUTLET_AUTHORITY) / REACH_AUTHORITY_SCALE,
     )
 
-    def _cluster_count(frame_id: int, start=None, end=None) -> int:
-        q = db.query(func.count(FrameClusterMatch.id)).filter(
-            FrameClusterMatch.frame_id == frame_id
-        )
-        if start is not None:
-            q = q.filter(FrameClusterMatch.first_seen_at >= start)
-        if end is not None:
-            q = q.filter(FrameClusterMatch.first_seen_at < end)
-        return q.scalar() or 0
-
-    def _reach_for(frame_id: int, start=None, end=None) -> float:
-        """Sum reach_weight over every member article of every cluster matched
-        to this frame, optionally filtering by article publish window. Reach
-        is intentionally NOT cluster-deduped."""
-        q = (
-            db.query(func.round(func.sum(reach_weight), 1))
-            .select_from(FrameClusterMatch)
-            .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
-            .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
-            .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
-            .filter(FrameClusterMatch.frame_id == frame_id)
-        )
-        if start is not None:
-            q = q.filter(SourceItem.published_at >= start)
-        if end is not None:
-            q = q.filter(SourceItem.published_at < end)
-        return float(q.scalar() or 0)
-
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
+    if not frames:
+        return []
+
+    # This was an N+1: ~17 queries per frame. It is now a fixed set of batch
+    # queries grouped by frame_id, regardless of how many frames exist.
+
+    # ---- Query 1: every FrameClusterMatch row, plus the authority score of
+    # its cluster's representative article's outlet. One row per match — drives
+    # counts, first/last-seen, and the first/peak/latest "key" clusters.
+    fcm_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            FrameClusterMatch.story_cluster_id,
+            FrameClusterMatch.first_seen_at,
+            FrameClusterMatch.last_seen_at,
+            Outlet.authority_score.label("rep_authority"),
+        )
+        .select_from(FrameClusterMatch)
+        .outerjoin(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .outerjoin(SourceItem, SourceItem.id == StoryCluster.representative_source_item_id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
+        .all()
+    )
+
+    # ---- Query 2: weighted reach per frame for 3 windows, summed over every
+    # member article of every matched cluster (intentionally not deduped).
+    reach_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            func.round(func.sum(
+                case((SourceItem.published_at >= week_start, reach_weight))), 1),
+            func.round(func.sum(
+                case((and_(SourceItem.published_at >= prev_week_start,
+                           SourceItem.published_at < week_start), reach_weight))), 1),
+            func.round(func.sum(reach_weight), 1),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
+        .group_by(FrameClusterMatch.frame_id)
+        .all()
+    )
+    reach_by_frame = {
+        fid: (float(tw or 0), float(lw or 0), float(tot or 0))
+        for fid, tw, lw, tot in reach_rows
+    }
+
+    # ---- Query 3: distinct outlets per frame, this week and last week.
+    outlet_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            func.count(func.distinct(
+                case((SourceItem.published_at >= week_start, SourceItem.outlet_id)))),
+            func.count(func.distinct(
+                case((and_(SourceItem.published_at >= prev_week_start,
+                           SourceItem.published_at < week_start), SourceItem.outlet_id)))),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .filter(SourceItem.outlet_id.isnot(None))
+        .group_by(FrameClusterMatch.frame_id)
+        .all()
+    )
+    outlets_by_frame = {fid: (tw or 0, lw or 0) for fid, tw, lw in outlet_rows}
+
+    # ---- Query 4: distinct active publish-days in the last 7, per frame.
+    days_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            func.count(func.distinct(func.date(SourceItem.published_at))),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .filter(SourceItem.published_at >= week_start,
+                SourceItem.published_at.isnot(None))
+        .group_by(FrameClusterMatch.frame_id)
+        .all()
+    )
+    days_active_by_frame = {fid: (n or 0) for fid, n in days_rows}
+
+    # ---- Query 4b: article-level publish-date counts per frame, used only for
+    # stage classification. We count this_week and last_30_days (not last_week)
+    # — comparing to a 30-day rolling baseline smooths out the noise of a
+    # single sparse previous week and avoids the cluster-density artifact
+    # where every recent week looks like a flood. The cluster-based mentions_*
+    # in the response are unchanged.
+    baseline_start = now - timedelta(days=30)
+    article_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            func.count(func.distinct(
+                case((SourceItem.published_at >= week_start, SourceItem.id)))),
+            func.count(func.distinct(
+                case((SourceItem.published_at >= baseline_start, SourceItem.id)))),
+            func.count(func.distinct(SourceItem.id)),
+            func.max(SourceItem.published_at),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .filter(SourceItem.published_at.isnot(None))
+        .group_by(FrameClusterMatch.frame_id)
+        .all()
+    )
+    articles_by_frame = {
+        fid: (tw or 0, last_30d or 0, tot or 0, last_pub)
+        for fid, tw, last_30d, tot, last_pub in article_rows
+    }
+    # Stage classification adapts to each campaign's article volume — see
+    # _compute_stage_scale. Computed once from the current (total, this_week)
+    # distribution and reused for every frame.
+    stage_scale = _compute_stage_scale(
+        [(tot, tw) for tw, _, tot, _ in articles_by_frame.values()]
+    )
+
+    # ---- Query 4c: 30-day per-day article counts per frame, used for the
+    # always-visible sparkline on each Narratives card.
+    sparkline_cutoff = now - timedelta(days=30)
+    sparkline_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            func.date(SourceItem.published_at).label("d"),
+            func.count(func.distinct(SourceItem.id)),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .filter(
+            SourceItem.published_at >= sparkline_cutoff,
+            SourceItem.published_at.isnot(None),
+        )
+        .group_by(FrameClusterMatch.frame_id, "d")
+        .all()
+    )
+    sparkline_by_frame: dict = defaultdict(list)
+    for fid, d, c in sparkline_rows:
+        sparkline_by_frame[fid].append({"date": str(d), "count": c})
+    for fid in sparkline_by_frame:
+        sparkline_by_frame[fid].sort(key=lambda x: x["date"])
+
+    # ---- Query 5: outlet-tier breakdown per frame.
+    tier_rows = (
+        db.query(
+            FrameClusterMatch.frame_id,
+            Outlet.outlet_type,
+            func.count(func.distinct(Outlet.id)),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .join(Outlet, Outlet.id == SourceItem.outlet_id)
+        .group_by(FrameClusterMatch.frame_id, Outlet.outlet_type)
+        .all()
+    )
+    tiers_by_frame: dict = {}
+    for fid, outlet_type, count in tier_rows:
+        tiers = tiers_by_frame.setdefault(
+            fid, {"national": 0, "regional": 0, "local": 0, "blog": 0, "social": 0})
+        if outlet_type in ("national", "broadcast"):
+            tiers["national"] += count
+        elif outlet_type == "regional_news":
+            tiers["regional"] += count
+        elif outlet_type == "local_news":
+            tiers["local"] += count
+        elif outlet_type == "blog":
+            tiers["blog"] += count
+        elif outlet_type == "social":
+            tiers["social"] += count
+
+    # ---- Group the FCM rows per frame and resolve the first/peak/latest
+    # "key" clusters in Python (one pass, no per-frame queries).
+    fcm_by_frame: dict = defaultdict(list)
+    for row in fcm_rows:
+        fcm_by_frame[row.frame_id].append(row)
+
+    frame_key_clusters: dict = {}
+    needed_cluster_ids: set = set()
+    for fid, rows in fcm_by_frame.items():
+        first_row = min(rows, key=lambda r: r.first_seen_at or datetime.max)
+        latest_row = max(rows, key=lambda r: r.last_seen_at or datetime.min)
+        # Peak day = the calendar day with the most matches; on that day pick
+        # the cluster whose representative article has the highest-authority
+        # outlet (None authority sorts last).
+        by_day: dict = defaultdict(list)
+        for r in rows:
+            if r.first_seen_at:
+                by_day[r.first_seen_at.date()].append(r)
+        peak_cluster_id = None
+        if by_day:
+            _peak_day, peak_rows = max(by_day.items(), key=lambda kv: len(kv[1]))
+            best = max(peak_rows,
+                       key=lambda r: r.rep_authority if r.rep_authority is not None else -1)
+            peak_cluster_id = best.story_cluster_id
+        ordered = [
+            ("First mention", first_row.story_cluster_id),
+            ("Peak day", peak_cluster_id),
+            ("Latest", latest_row.story_cluster_id),
+        ]
+        frame_key_clusters[fid] = ordered
+        for _role, cid in ordered:
+            if cid:
+                needed_cluster_ids.add(cid)
+
+    # ---- Query 6 + 7: bulk-hydrate the key clusters and their representative
+    # articles (two queries total, not two per cluster).
+    clusters_by_id: dict = {}
+    reps_by_id: dict = {}
+    if needed_cluster_ids:
+        for c in (db.query(StoryCluster)
+                  .filter(StoryCluster.id.in_(needed_cluster_ids)).all()):
+            clusters_by_id[c.id] = c
+        rep_ids = {c.representative_source_item_id for c in clusters_by_id.values()
+                   if c.representative_source_item_id}
+        if rep_ids:
+            for r in db.query(SourceItem).filter(SourceItem.id.in_(rep_ids)).all():
+                reps_by_id[r.id] = r
+
+    # ---- Assemble the response (pure Python, no further queries).
     result = []
     for frame in frames:
-        this_week = _cluster_count(frame.id, start=week_start)
-        last_week = _cluster_count(frame.id, start=prev_week_start, end=week_start)
-        total = _cluster_count(frame.id)
+        rows = fcm_by_frame.get(frame.id, [])
+        total = len(rows)
+        this_week = sum(1 for r in rows
+                        if r.first_seen_at and r.first_seen_at >= week_start)
+        last_week = sum(1 for r in rows
+                        if r.first_seen_at
+                        and prev_week_start <= r.first_seen_at < week_start)
 
-        reach_this_week = _reach_for(frame.id, start=week_start)
-        reach_last_week = _reach_for(frame.id, start=prev_week_start, end=week_start)
-        reach_total = _reach_for(frame.id)
-
-        trend = "up" if this_week > last_week else ("down" if this_week < last_week else "flat")
-
-        # First / last cluster attachment timestamps
-        first_seen = (
-            db.query(func.min(FrameClusterMatch.first_seen_at))
-            .filter(FrameClusterMatch.frame_id == frame.id)
-            .scalar()
-        )
-        last_seen = (
-            db.query(func.max(FrameClusterMatch.last_seen_at))
-            .filter(FrameClusterMatch.frame_id == frame.id)
-            .scalar()
-        )
+        first_seen = min((r.first_seen_at for r in rows if r.first_seen_at),
+                         default=None)
+        last_seen = max((r.last_seen_at for r in rows if r.last_seen_at),
+                        default=None)
         days_since = (now - last_seen).days if last_seen else None
-        stage = _narrative_stage(total, this_week, last_week, days_since)
 
-        # Key articles: first cluster, peak-day cluster, latest cluster — each
-        # represented by its dynamically resolved representative article.
-        first_cluster_id = (
-            db.query(FrameClusterMatch.story_cluster_id)
-            .filter(FrameClusterMatch.frame_id == frame.id)
-            .order_by(FrameClusterMatch.first_seen_at.asc())
-            .limit(1).scalar()
-        )
-        latest_cluster_id = (
-            db.query(FrameClusterMatch.story_cluster_id)
-            .filter(FrameClusterMatch.frame_id == frame.id)
-            .order_by(FrameClusterMatch.last_seen_at.desc())
-            .limit(1).scalar()
-        )
-        peak_day_row = (
-            db.query(
-                func.date(FrameClusterMatch.first_seen_at).label("d"),
-                func.count(FrameClusterMatch.id).label("n"),
-            )
-            .filter(FrameClusterMatch.frame_id == frame.id)
-            .group_by(func.date(FrameClusterMatch.first_seen_at))
-            .order_by(func.count(FrameClusterMatch.id).desc())
-            .first()
-        )
-        peak_cluster_id = None
-        if peak_day_row:
-            # Pick the highest-authority representative on that peak day
-            peak_cluster_id = (
-                db.query(FrameClusterMatch.story_cluster_id)
-                .select_from(FrameClusterMatch)
-                .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
-                .join(SourceItem, SourceItem.id == StoryCluster.representative_source_item_id)
-                .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
-                .filter(
-                    FrameClusterMatch.frame_id == frame.id,
-                    func.date(FrameClusterMatch.first_seen_at) == peak_day_row.d,
-                )
-                .order_by(Outlet.authority_score.desc().nulls_last())
-                .limit(1).scalar()
-            )
+        # Stage classification uses article-level counts with a 30-day baseline
+        # to avoid the clustering-density and one-sparse-prior-week artifacts
+        # that made every frame look like it was spreading. The displayed
+        # mentions_* and trend stay cluster-based so the card metrics remain
+        # wire-syndication-deduped.
+        art_tw, art_last_30d, art_total, last_pub = articles_by_frame.get(
+            frame.id, (0, 0, 0, None))
+        # Baseline = the 23 days BEFORE this week, projected to a weekly rate.
+        baseline_weekly = int(round((art_last_30d - art_tw) / 23 * 7)) if art_last_30d > art_tw else 0
+        days_since_article = (now - last_pub).days if last_pub else None
+        stage = _narrative_stage(art_total, art_tw, baseline_weekly, days_since_article, stage_scale)
 
-        key_articles: list[dict] = []
+        # Stage transition detection — only writes when the stage actually
+        # changes vs the last recorded value. First observation (NULL → stage)
+        # also gets logged so we have a full history.
+        if frame.last_known_stage != stage:
+            try:
+                import json as _json
+                from app.models import FrameStageHistory
+                db.add(FrameStageHistory(
+                    frame_id=frame.id,
+                    from_stage=frame.last_known_stage,
+                    to_stage=stage,
+                    transitioned_at=now,
+                    metrics_snapshot=_json.dumps({
+                        "art_total": art_total,
+                        "art_this_week": art_tw,
+                        "art_last_30d": art_last_30d,
+                        "baseline_weekly": baseline_weekly,
+                        "days_since_article": days_since_article,
+                    }),
+                ))
+                frame.last_known_stage = stage
+                frame.last_stage_check_at = now
+                # Commit immediately so transitions are recorded even if a
+                # later frame in this loop raises. Cheap — single tiny insert.
+                db.commit()
+            except Exception as exc:
+                logger.warning("frame_stage_history: log failed for frame %d: %s", frame.id, exc)
+                db.rollback()
+
+        reach_this_week, reach_last_week, reach_total = \
+            reach_by_frame.get(frame.id, (0.0, 0.0, 0.0))
+        unique_outlets_this_week, unique_outlets_last_week = \
+            outlets_by_frame.get(frame.id, (0, 0))
+        days_active_last_7 = days_active_by_frame.get(frame.id, 0)
+        tiers = tiers_by_frame.get(
+            frame.id, {"national": 0, "regional": 0, "local": 0, "blog": 0, "social": 0})
+
+        # Key articles — first / peak / latest, deduped by cluster.
+        key_articles: list = []
         seen_cluster_ids: set = set()
-        for role, cid in [("First mention", first_cluster_id), ("Peak day", peak_cluster_id), ("Latest", latest_cluster_id)]:
+        for role, cid in frame_key_clusters.get(frame.id, []):
             if not cid or cid in seen_cluster_ids:
                 continue
             seen_cluster_ids.add(cid)
-            cluster = db.query(StoryCluster).filter_by(id=cid).first()
+            cluster = clusters_by_id.get(cid)
             if not cluster:
                 continue
-            rep = db.query(SourceItem).filter_by(id=cluster.representative_source_item_id).first()
+            rep = reps_by_id.get(cluster.representative_source_item_id)
             if not rep:
                 continue
             key_articles.append({
@@ -1145,72 +1579,8 @@ def get_frames_with_counts(db: Session) -> list[dict]:
                 "source_name": rep.source_name,
                 "source_url": rep.source_url,
                 "published_at": rep.published_at.isoformat() if rep.published_at else None,
-                # Legacy NFM stored an extracted_text snippet on the mention row;
-                # cluster-native doesn't (snippet is a per-article concept and
-                # the cluster has many articles). Leave as None for now.
                 "extracted_text": None,
             })
-
-        # Unique outlets this week / last week — across all member articles of
-        # any cluster matched to this frame, in the window.
-        def _unique_outlets(start, end=None) -> int:
-            q = (
-                db.query(func.count(func.distinct(SourceItem.outlet_id)))
-                .select_from(FrameClusterMatch)
-                .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
-                .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
-                .filter(
-                    FrameClusterMatch.frame_id == frame.id,
-                    SourceItem.outlet_id.isnot(None),
-                    SourceItem.published_at >= start,
-                    SourceItem.published_at.isnot(None),
-                )
-            )
-            if end is not None:
-                q = q.filter(SourceItem.published_at < end)
-            return q.scalar() or 0
-
-        unique_outlets_this_week = _unique_outlets(week_start)
-        unique_outlets_last_week = _unique_outlets(prev_week_start, week_start)
-
-        # Days active in last 7 — distinct publish dates across member articles
-        days_active_last_7 = (
-            db.query(func.count(func.distinct(func.date(SourceItem.published_at))))
-            .select_from(FrameClusterMatch)
-            .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
-            .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
-            .filter(
-                FrameClusterMatch.frame_id == frame.id,
-                SourceItem.published_at >= week_start,
-                SourceItem.published_at.isnot(None),
-            )
-            .scalar() or 0
-        )
-
-        # Outlet tier breakdown — distinct outlets across all member articles
-        # of all clusters matching this frame, grouped by outlet_type.
-        tier_rows = (
-            db.query(Outlet.outlet_type, func.count(func.distinct(Outlet.id)))
-            .select_from(FrameClusterMatch)
-            .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
-            .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
-            .join(Outlet, Outlet.id == SourceItem.outlet_id)
-            .filter(FrameClusterMatch.frame_id == frame.id)
-            .group_by(Outlet.outlet_type)
-            .all()
-        )
-        tiers: dict[str, int] = {"national": 0, "regional": 0, "local": 0, "blog": 0, "social": 0}
-        for outlet_type, count in tier_rows:
-            if outlet_type in ("national", "broadcast"):
-                tiers["national"] += count
-            elif outlet_type == "regional_news":
-                tiers["regional"] += count
-            elif outlet_type == "local_news":
-                tiers["local"] += count
-            elif outlet_type == "blog":
-                tiers["blog"] += count
-            elif outlet_type == "social":
-                tiers["social"] += count
 
         result.append({
             "id": frame.id,
@@ -1222,13 +1592,14 @@ def get_frames_with_counts(db: Session) -> list[dict]:
             "mentions_this_week": this_week,
             "mentions_last_week": last_week,
             "mentions_total": total,
+            "articles_last_30d": art_last_30d,
+            "activity_30d": sparkline_by_frame.get(frame.id, []),
             "unique_outlets_this_week": unique_outlets_this_week,
             "unique_outlets_last_week": unique_outlets_last_week,
             "days_active_last_7": days_active_last_7,
             "reach_this_week": reach_this_week,
             "reach_last_week": reach_last_week,
             "reach_total": reach_total,
-            "trend": trend,
             "stage": stage,
             "outlet_tiers": tiers,
             "first_seen_at": first_seen.isoformat() if first_seen else None,
@@ -1238,3 +1609,311 @@ def get_frames_with_counts(db: Session) -> list[dict]:
 
     result.sort(key=lambda x: x["mentions_this_week"], reverse=True)
     return result
+
+
+def get_frame_timeline(
+    db: "Session", frame_id: int, days_back: int = 90,
+) -> Optional[dict]:
+    """Variant-level mention timeline for a frame.
+
+    For each FrameVariant of the given frame, returns daily mention counts
+    over the past `days_back` days based on `source_items.published_at`.
+
+    Also returns per-day frame totals (sum across variants + un-clustered)
+    so the UI can overlay the frame's overall trajectory.
+
+    Returns None if the frame doesn't exist.
+    """
+    from app.models import NarrativeFrame, NarrativeFrameMention, FrameVariant, SourceItem
+    from sqlalchemy import func, and_
+
+    frame = db.query(NarrativeFrame).filter_by(id=frame_id).first()
+    if not frame:
+        return None
+
+    cutoff = datetime.utcnow() - timedelta(days=days_back)
+
+    # ── Per-variant daily counts ───────────────────────────────────────────────
+    # Join: NarrativeFrameMention → SourceItem (for the date)
+    variant_rows = (
+        db.query(
+            NarrativeFrameMention.variant_id,
+            func.date(SourceItem.published_at).label("day"),
+            func.count(NarrativeFrameMention.id).label("count"),
+        )
+        .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+        .filter(
+            NarrativeFrameMention.frame_id == frame_id,
+            NarrativeFrameMention.variant_id.isnot(None),
+            SourceItem.published_at >= cutoff,
+            SourceItem.published_at.isnot(None),
+        )
+        .group_by(NarrativeFrameMention.variant_id, func.date(SourceItem.published_at))
+        .all()
+    )
+    # Organize by variant_id → list of {date, count}
+    by_variant: dict[int, list[dict]] = {}
+    for variant_id, day, count in variant_rows:
+        by_variant.setdefault(variant_id, []).append({"date": str(day), "count": int(count)})
+    for v_id in by_variant:
+        by_variant[v_id].sort(key=lambda x: x["date"])
+
+    # ── Variant metadata ──────────────────────────────────────────────────────
+    variant_meta = {
+        v.id: v for v in
+        db.query(FrameVariant).filter(FrameVariant.frame_id == frame_id).all()
+    }
+
+    variants_out = []
+    for v_id, meta in variant_meta.items():
+        variants_out.append({
+            "id": v_id,
+            "name": meta.name,
+            "first_seen_at": meta.first_seen_at.isoformat() if meta.first_seen_at else None,
+            "last_seen_at": meta.last_seen_at.isoformat() if meta.last_seen_at else None,
+            "mention_count": meta.mention_count,
+            "daily_counts": by_variant.get(v_id, []),
+        })
+    # Sort by total mentions desc (biggest variants first)
+    variants_out.sort(key=lambda x: -x["mention_count"])
+
+    # ── Frame-wide daily totals (including un-clustered mentions) ─────────────
+    # This is mentions for the whole frame regardless of variant assignment.
+    total_rows = (
+        db.query(
+            func.date(SourceItem.published_at).label("day"),
+            func.count(NarrativeFrameMention.id).label("count"),
+        )
+        .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+        .filter(
+            NarrativeFrameMention.frame_id == frame_id,
+            SourceItem.published_at >= cutoff,
+            SourceItem.published_at.isnot(None),
+        )
+        .group_by(func.date(SourceItem.published_at))
+        .order_by(func.date(SourceItem.published_at))
+        .all()
+    )
+    totals_by_day = [
+        {"date": str(day), "count": int(count)}
+        for day, count in total_rows
+    ]
+
+    # ── Un-clustered mentions (no variant_id yet) ─────────────────────────────
+    unclustered_count = (
+        db.query(func.count(NarrativeFrameMention.id))
+        .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+        .filter(
+            NarrativeFrameMention.frame_id == frame_id,
+            NarrativeFrameMention.variant_id.is_(None),
+            SourceItem.published_at >= cutoff,
+        )
+        .scalar() or 0
+    )
+
+    return {
+        "frame": {
+            "id": frame.id,
+            "name": frame.name,
+            "owner_type": frame.owner_type,
+            "description": frame.description,
+            "stage": frame.last_known_stage,
+            "momentum_signal": frame.momentum_signal,
+        },
+        "window_days": days_back,
+        "variants": variants_out,
+        "totals_by_day": totals_by_day,
+        "unclustered_mention_count": int(unclustered_count),
+    }
+
+
+def get_frame_detail(db: "Session", frame_id: int) -> Optional[dict]:
+    """Full per-frame detail for the dedicated frame detail page.
+
+    Returns the frame's metadata plus everything a deep-dive view wants:
+      - All articles (joined via cluster → outlet), newest first
+      - Daily article counts for the last 90 days (activity chart)
+      - Outlet-tier breakdown
+      - Top quotes (representative-article summaries from highest-authority outlets)
+    Returns None if the frame doesn't exist.
+    """
+    from sqlalchemy import func
+    from app.models import FrameClusterMatch, Outlet, StoryCluster
+
+    frame = db.query(NarrativeFrame).filter_by(id=frame_id).first()
+    if not frame:
+        return None
+
+    now = datetime.utcnow()
+    week_start = now - timedelta(days=7)
+    # Activity goes back a full year so the detail page's "All time" toggle
+    # has meaningful data without re-fetching. 365 days × stacked-tier shape
+    # is still cheap to query and ship (~one row per day per active tier).
+    activity_cutoff = now - timedelta(days=365)
+
+    # Every article linked to this frame, with outlet metadata, newest-first.
+    rows = (
+        db.query(
+            SourceItem.id,
+            SourceItem.title,
+            SourceItem.summary,
+            SourceItem.source_name,
+            SourceItem.source_url,
+            SourceItem.published_at,
+            SourceItem.race_relevance_score,
+            SourceItem.sentiment,
+            Outlet.name.label("outlet_name"),
+            Outlet.outlet_type,
+            Outlet.authority_score,
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
+        .filter(FrameClusterMatch.frame_id == frame_id)
+        .order_by(SourceItem.published_at.desc().nulls_last())
+        .all()
+    )
+
+    # Defend against duplicates if the schema ever changes; in current design
+    # one article belongs to one cluster, which has one FCM per frame.
+    seen: set = set()
+    articles: list[dict] = []
+    for r in rows:
+        if r.id in seen:
+            continue
+        seen.add(r.id)
+        articles.append({
+            "id": r.id,
+            "title": r.title,
+            "summary": r.summary,
+            "source_name": r.source_name,
+            "source_url": r.source_url,
+            "outlet_name": r.outlet_name,
+            "outlet_type": r.outlet_type,
+            "outlet_authority": r.authority_score,
+            "published_at": r.published_at.isoformat() if r.published_at else None,
+            "race_relevance_score": r.race_relevance_score,
+            "sentiment": r.sentiment,
+        })
+
+    # Counts (article-based — detail view is a single-frame zoom-in).
+    articles_total = len(articles)
+    week_iso = week_start.isoformat()
+    articles_this_week = sum(1 for a in articles
+                             if a["published_at"] and a["published_at"] >= week_iso)
+
+    # Activity by day, broken out by outlet tier so the detail page can render
+    # stacked bars showing WHO is covering the story each day, not just volume.
+    # One row per (date, outlet_type); we pivot to a flat per-date shape below.
+    from collections import defaultdict as _defaultdict
+    daily_tier_rows = (
+        db.query(
+            func.date(SourceItem.published_at).label("d"),
+            Outlet.outlet_type,
+            func.count(func.distinct(SourceItem.id)),
+        )
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
+        .filter(
+            FrameClusterMatch.frame_id == frame_id,
+            SourceItem.published_at >= activity_cutoff,
+            SourceItem.published_at.isnot(None),
+        )
+        .group_by("d", Outlet.outlet_type)
+        .order_by("d")
+        .all()
+    )
+
+    _empty_tiers = lambda: {
+        "national": 0, "regional": 0, "local": 0,
+        "blog": 0, "social": 0, "unknown": 0,
+    }
+    by_date: dict = _defaultdict(_empty_tiers)
+    for d, outlet_type, c in daily_tier_rows:
+        bucket = "unknown"
+        if outlet_type in ("national", "broadcast"): bucket = "national"
+        elif outlet_type == "regional_news": bucket = "regional"
+        elif outlet_type == "local_news": bucket = "local"
+        elif outlet_type == "blog": bucket = "blog"
+        elif outlet_type == "social": bucket = "social"
+        by_date[str(d)][bucket] += c
+
+    activity = []
+    for date_str in sorted(by_date.keys()):
+        bucket = by_date[date_str]
+        total = sum(bucket.values())
+        activity.append({
+            "date": date_str,
+            "count": total,    # back-compat with the simple sparkline consumer
+            "total": total,
+            **bucket,
+        })
+
+    # Outlet-tier breakdown.
+    tier_rows = (
+        db.query(Outlet.outlet_type, func.count(func.distinct(Outlet.id)))
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .join(Outlet, Outlet.id == SourceItem.outlet_id)
+        .filter(FrameClusterMatch.frame_id == frame_id)
+        .group_by(Outlet.outlet_type)
+        .all()
+    )
+    tiers = {"national": 0, "regional": 0, "local": 0, "blog": 0, "social": 0}
+    for ot, c in tier_rows:
+        if ot in ("national", "broadcast"): tiers["national"] += c
+        elif ot == "regional_news": tiers["regional"] += c
+        elif ot == "local_news": tiers["local"] += c
+        elif ot == "blog": tiers["blog"] += c
+        elif ot == "social": tiers["social"] += c
+
+    # First/last seen from FCM rows.
+    fcm_dates = (
+        db.query(FrameClusterMatch.first_seen_at, FrameClusterMatch.last_seen_at)
+        .filter(FrameClusterMatch.frame_id == frame_id)
+        .all()
+    )
+    first_seen = min((r.first_seen_at for r in fcm_dates if r.first_seen_at), default=None)
+    last_seen = max((r.last_seen_at for r in fcm_dates if r.last_seen_at), default=None)
+
+    # Notable quotes — top 3 article summaries, ranked by outlet authority.
+    # Skip LLM-refusal placeholders (paywall / empty-body articles).
+    quotes_pool = [
+        a for a in articles
+        if (a.get("summary") or "").strip() and not is_refusal_summary(a.get("summary"))
+    ]
+    quotes_pool.sort(
+        key=lambda a: ((a.get("outlet_authority") or 0), a.get("published_at") or ""),
+        reverse=True,
+    )
+    quotes = [
+        {
+            "text": a["summary"],
+            "source_name": a["source_name"],
+            "source_url": a["source_url"],
+            "published_at": a["published_at"],
+            "outlet_name": a.get("outlet_name"),
+        }
+        for a in quotes_pool[:3]
+    ]
+
+    return {
+        "id": frame.id,
+        "name": frame.name,
+        "description": frame.description,
+        "owner_type": frame.owner_type,
+        "source": frame.source,
+        "created_at": frame.created_at.isoformat() if frame.created_at else None,
+        "first_seen_at": first_seen.isoformat() if first_seen else None,
+        "last_seen_at": last_seen.isoformat() if last_seen else None,
+        "articles_total": articles_total,
+        "articles_this_week": articles_this_week,
+        "outlet_tiers": tiers,
+        "activity": activity,
+        "quotes": quotes,
+        "articles": articles,
+    }
