@@ -379,3 +379,5 @@ aside[data-collapsed="true"] .sidebar-nav-link:hover::after {
   max-height: calc(100vh - 48px);
   overflow-y: auto;
 }
+
+
