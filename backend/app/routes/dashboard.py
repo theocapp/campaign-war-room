@@ -1,18 +1,50 @@
+import json
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, func, not_, or_
+from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
 from app.models import (
     CampaignConfig,
+    Issue,
+    IssueMention,
     NarrativeFrame,
-    NarrativeFrameMention,
     Opponent,
+    OpponentActivity,
+    Outlet,
     SourceItem,
 )
 from app.services import briefing_summary as briefing_svc
+from app.services.briefing_retrieval import (
+    overnight_changes,
+    top_claims_for_briefing,
+    top_entities_for_briefing,
+)
+from app.services.source_display import display_source_name, preload_outlets
+
+
+def _safe_json_list(raw):
+    """Parse a JSON-array column; return [] for null/empty/malformed values."""
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _safe_json_obj(raw):
+    """Parse a JSON-object column; return None for null/empty/malformed values."""
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def _compute_spikes(db: Session) -> list[dict]:
@@ -29,18 +61,95 @@ def _compute_spikes(db: Session) -> list[dict]:
 router = APIRouter()
 
 
-def _item_dict(item: SourceItem) -> dict:
+def _item_dict(item: SourceItem, outlet: Outlet | None = None) -> dict:
     return {
         "id": item.id,
         "title": item.title,
         "summary": item.summary,
-        "source_name": item.source_name,
+        "source_name": display_source_name(item, outlet),
         "source_url": item.source_url,
         "published_at": item.published_at.isoformat() if item.published_at else None,
         "race_relevance_score": item.race_relevance_score,
         "actionability_label": item.actionability_label,
         "framing": getattr(item, "framing", None),
     }
+
+
+def _duplicate_dict(item: SourceItem, outlet: Outlet | None = None) -> dict:
+    return {
+        "id": item.id,
+        "source_name": display_source_name(item, outlet),
+        "source_url": item.source_url,
+        "published_at": item.published_at.isoformat() if item.published_at else None,
+    }
+
+
+def _group_by_normalized_title(
+    items: list[SourceItem],
+    window_hours: int = 24,
+) -> list[tuple[SourceItem, list[SourceItem]]]:
+    """Group items whose normalized titles match exactly AND that publish within
+    `window_hours` of each other. Returns [(representative, [other_versions])].
+
+    "Normalized title" reuses the same cleanup the story-clustering pipeline
+    uses: trailing outlet suffix stripped, lowercased, punctuation removed,
+    stopwords dropped. So "Trump signs bill — AP" and "Trump signs bill |
+    Reuters" land in the same bucket but "Trump signs bill" and "Biden signs
+    bill" do not.
+
+    Representative is the highest race_relevance_score in the group, breaking
+    ties by longer body, then earliest published_at — so the row the user sees
+    is the strongest version of the story.
+
+    Items with empty normalized titles (junk like "Instagram", emoji-only,
+    placeholder rows) are each kept as their own group rather than collapsed
+    together — those are bugs to fix elsewhere, not wire-syndication.
+    """
+    from app.services.story_clustering import normalize_title
+
+    buckets: dict[str, list[SourceItem]] = {}
+    for it in items:
+        key = normalize_title(it.title)
+        if not key:
+            buckets[f"_unique_{it.id}"] = [it]
+            continue
+        buckets.setdefault(key, []).append(it)
+
+    result: list[tuple[SourceItem, list[SourceItem]]] = []
+    window_seconds = window_hours * 3600
+    for bucket in buckets.values():
+        if len(bucket) == 1:
+            result.append((bucket[0], []))
+            continue
+
+        bucket.sort(key=lambda i: i.published_at or i.created_at or datetime.min)
+        windows: list[list[SourceItem]] = []
+        current: list[SourceItem] = []
+        window_start: datetime | None = None
+        for it in bucket:
+            ts = it.published_at or it.created_at
+            if not current:
+                current = [it]
+                window_start = ts
+                continue
+            if ts and window_start and (ts - window_start).total_seconds() <= window_seconds:
+                current.append(it)
+            else:
+                windows.append(current)
+                current = [it]
+                window_start = ts
+        if current:
+            windows.append(current)
+
+        for window in windows:
+            window.sort(key=lambda i: (
+                -(i.race_relevance_score or 0),
+                -(len(i.raw_text or "")),
+                (i.published_at or i.created_at or datetime.max),
+            ))
+            result.append((window[0], window[1:]))
+
+    return result
 
 
 def _is_llm_scored(item: SourceItem) -> bool:
@@ -56,38 +165,80 @@ def _is_llm_scored(item: SourceItem) -> bool:
 
 
 @router.get("/briefing/morning")
-def get_morning_briefing(db: Session = Depends(get_db)):
+def get_morning_briefing(
+    db: Session = Depends(get_db),
+    v: int = 1,
+):
     """
     Single-page briefing: new articles, narrative pulse, needs-response, LLM race-situation memo.
+
+    Query params:
+      v=1 (default) — legacy prose memo (`race_memo` is a string).
+      v=2           — grounded memo (`race_memo` is an object with text +
+                      citations + sources_used) + `top_entities` activity card.
     """
     cutoff_24h = datetime.utcnow() - timedelta(hours=24)
     cutoff_48h = datetime.utcnow() - timedelta(hours=48)
     cutoff_7d = datetime.utcnow() - timedelta(days=7)
     cutoff_14d = datetime.utcnow() - timedelta(days=14)
 
-    # Section 1 — Needs a response right now (published in last 48h)
+    # Section 1 — Needs a response right now (published in last 48h).
+    #
+    # `actionability_label == 'respond'` is set by an LLM `framing` classifier
+    # (campaign_analysis.framing_to_action) — it's over-inclusive. False
+    # positives we've observed:
+    #   1. The candidate's OWN social posts (her tweet restating her message —
+    #      she doesn't need to "respond" to her own message)
+    #   2. Friendly local news (e.g. "Construction begins on D&L Trail" — gets
+    #      tagged respond because it mentions the district and is positive)
+    #   3. National-trend pieces about other races that happen to mention
+    #      a tracked entity (filtered by content_category != 'irrelevant')
+    #
+    # Layered filters below address all three:
+    #   - content_category != 'irrelevant' kills (3)
+    #   - source_owner_type NOT IN (candidate_statement, community/manual)
+    #     kills (1) — the candidate's own statements and her social channels
+    #   - exclude (party_committee_statement AND content_category=campaign)
+    #     kills (2) — friendly party-tagged + campaign-content combo (e.g.
+    #     a local outlet quoting a campaign press release)
+    #
+    # Note we deliberately keep party_committee_statement when content_category
+    # is something OTHER than 'campaign' — that's where opposition committee
+    # attacks (e.g. NRCC) tend to land.
     respond = (
         db.query(SourceItem)
         .filter(
             SourceItem.archived_as_irrelevant == False,  # noqa: E712
+            SourceItem.content_category != "irrelevant",
             SourceItem.published_at >= cutoff_48h,
             SourceItem.actionability_label == "respond",
+            SourceItem.source_owner_type.notin_(
+                ["candidate_statement", "community/manual"]
+            ),
+            not_(and_(
+                SourceItem.source_owner_type == "party_committee_statement",
+                SourceItem.content_category == "campaign",
+            )),
         )
         .order_by(SourceItem.race_relevance_score.desc())
         .limit(5)
         .all()
     )
 
-    # Section 2 — New since yesterday (published in last 48h, top relevant)
+    # Section 2 — Most recent race-relevant articles (no time-window
+    # filter; just the freshest N by published_at). Same content_category
+    # exclusion as needs_response — we don't want national-trend pieces
+    # crowding the local briefing.
     respond_ids = {i.id for i in respond}
     new_articles_raw = (
         db.query(SourceItem)
         .filter(
             SourceItem.archived_as_irrelevant == False,  # noqa: E712
-            SourceItem.published_at >= cutoff_48h,
+            SourceItem.content_category != "irrelevant",
             SourceItem.race_relevance_score >= 50,
+            SourceItem.published_at.isnot(None),
         )
-        .order_by(SourceItem.race_relevance_score.desc())
+        .order_by(SourceItem.published_at.desc())
         .limit(50)
         .all()
     )
@@ -97,34 +248,27 @@ def get_morning_briefing(db: Session = Depends(get_db)):
         if a.id not in respond_ids and _is_llm_scored(a)
     ][:5]
 
-    # Section 3 — Narrative pulse
+    # Section 3 — Narrative pulse. Uses the canonical Option-C definition
+    # (distinct clusters with any article in the window) via the shared
+    # frame_counts helper. Replaces a 2N-query loop over NarrativeFrameMention
+    # — that table is largely stale since Phase D and produced "0 this week"
+    # for nearly every frame even when coverage was active.
+    from app.services.frame_counts import frame_pulse_counts
+    from app.services.subject_classifier import get_subject_classifier
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()  # noqa: E712
-    pulse = []
-    for frame in frames:
-        this_week = (
-            db.query(func.count(NarrativeFrameMention.id))
-            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
-            .filter(NarrativeFrameMention.frame_id == frame.id,
-                    SourceItem.published_at >= cutoff_7d,
-                    SourceItem.published_at.isnot(None))
-            .scalar()
-        )
-        last_week = (
-            db.query(func.count(NarrativeFrameMention.id))
-            .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
-            .filter(NarrativeFrameMention.frame_id == frame.id,
-                    SourceItem.published_at >= cutoff_14d,
-                    SourceItem.published_at < cutoff_7d,
-                    SourceItem.published_at.isnot(None))
-            .scalar()
-        )
-        pulse.append({
-            "id": frame.id,
-            "name": frame.name,
-            "owner_type": frame.owner_type,
-            "this_week": this_week,
-            "last_week": last_week,
-        })
+    pulse_counts = frame_pulse_counts(db, [f.id for f in frames])
+    _classify_subject = get_subject_classifier(db)
+    pulse = [
+        {
+            "id": f.id,
+            "name": f.name,
+            "owner_type": f.owner_type,
+            "subject_type": _classify_subject(f.name),  # V13.21
+            "this_week": pulse_counts[f.id][0],
+            "last_week": pulse_counts[f.id][1],
+        }
+        for f in frames
+    ]
     pulse.sort(key=lambda x: x["this_week"], reverse=True)
 
     # Meta — ingested uses created_at, relevant uses published_at + same quality filter as new_articles
@@ -136,6 +280,7 @@ def get_morning_briefing(db: Session = Depends(get_db)):
     relevant_candidates = (
         db.query(SourceItem)
         .filter(SourceItem.archived_as_irrelevant == False,  # noqa: E712
+                SourceItem.content_category != "irrelevant",
                 SourceItem.published_at >= cutoff_48h,
                 SourceItem.race_relevance_score >= 50)
         .all()
@@ -145,43 +290,239 @@ def get_morning_briefing(db: Session = Depends(get_db)):
     # LLM race-situation memo
     campaign = db.query(CampaignConfig).first()
     opponents = db.query(Opponent).limit(3).all()
-    all_articles = [_item_dict(i) for i in respond] + [_item_dict(i) for i in new_articles]
-    race_memo = briefing_svc.get_or_generate(db, all_articles, campaign, opponents)
+    outlets_map = preload_outlets(db, respond + new_articles)
+    all_articles = (
+        [_item_dict(i, outlets_map.get(i.outlet_id)) for i in respond]
+        + [_item_dict(i, outlets_map.get(i.outlet_id)) for i in new_articles]
+    )
 
-    return {
+    response: dict = {
         "generated_at": datetime.utcnow().isoformat(),
         "meta": {
             "total_articles_today": total_today,
             "relevant_articles_today": relevant_today,
         },
-        "race_memo": race_memo,
-        "needs_response": [_item_dict(i) for i in respond],
-        "new_articles": [_item_dict(i) for i in new_articles],
+        "needs_response": [_item_dict(i, outlets_map.get(i.outlet_id)) for i in respond],
+        "new_articles": [_item_dict(i, outlets_map.get(i.outlet_id)) for i in new_articles],
         "narrative_pulse": pulse,
         "spike_alerts": _compute_spikes(db),
     }
+
+    if v == 2:
+        # Grounded memo + structured retrieval. The frontend renders this
+        # with citation superscript links and a "Sources used" expandable.
+        top_claims = top_claims_for_briefing(db, days=7, limit=15)
+        response["race_memo"] = briefing_svc.get_or_generate_grounded(
+            db, all_articles, campaign, opponents, top_claims
+        )
+        response["top_entities"] = top_entities_for_briefing(db, days=7)
+        # "What changed in the race" — labeled candidate-specific claims
+        # from the last 48h. May be empty in quiet windows; frontend hides.
+        response["overnight_changes"] = overnight_changes(db)
+    else:
+        # v1: legacy prose memo (string). Default for the current frontend.
+        response["race_memo"] = briefing_svc.get_or_generate(
+            db, all_articles, campaign, opponents
+        )
+
+    return response
 
 
 @router.get("/articles/recent")
 def get_recent_relevant_articles(limit: int = 10, db: Session = Depends(get_db)):
     """Most recent race-relevant articles for the Dashboard right rail.
 
-    Filters: not archived, LLM-scored (real summary, not raw RSS), score >= 50.
-    Ordered by published_at desc so the user sees what's actually new — the
-    review queue's priority sort buries fresh items behind older high-priority
-    ones, which is the wrong signal for "what's happening now."
+    This is the *confirmed-relevant* feed — only articles that have already
+    cleared review (either auto_review approved them, or a human marked them
+    reviewed in the queue). Pending review-queue items are intentionally
+    excluded so the right rail reflects "what's real and worth your time
+    right now," not "what we're still triaging."
+
+    Filters:
+        - not archived as irrelevant
+        - not user-dismissed
+        - reviewed == True  (auto-approved by auto_review OR manually reviewed)
+        - LLM-scored (real summary, not raw RSS)
+        - race_relevance_score >= 50
+        - published within the last 7 days
+
+    Ordered by published_at desc so freshest reviewed items surface first.
     """
     cutoff = datetime.utcnow() - timedelta(days=7)
+    # Over-fetch generously — both the LLM-scored filter AND the per-title
+    # grouping below can drop rows, so we want plenty of headroom to still
+    # return `limit` distinct stories.
     candidates = (
         db.query(SourceItem)
         .filter(
             SourceItem.archived_as_irrelevant == False,  # noqa: E712
+            SourceItem.dismissed == False,               # noqa: E712
+            SourceItem.reviewed == True,                 # noqa: E712 — cleared, not in queue
             SourceItem.published_at >= cutoff,
             SourceItem.race_relevance_score >= 50,
         )
         .order_by(SourceItem.published_at.desc())
-        .limit(limit * 3)  # over-fetch so the LLM-scored filter has headroom
+        .limit(limit * 6)
         .all()
     )
-    items = [a for a in candidates if _is_llm_scored(a)][:limit]
-    return {"items": [_item_dict(a) for a in items]}
+    llm_scored = [a for a in candidates if _is_llm_scored(a)]
+    groups = _group_by_normalized_title(llm_scored, window_hours=24)
+    groups.sort(
+        key=lambda g: g[0].published_at or g[0].created_at or datetime.min,
+        reverse=True,
+    )
+    groups = groups[:limit]
+    # Preload outlets for both representatives and their duplicates.
+    all_items: list[SourceItem] = []
+    for rep, dupes in groups:
+        all_items.append(rep)
+        all_items.extend(dupes)
+    outlets_map = preload_outlets(db, all_items)
+    return {
+        "items": [
+            {
+                **_item_dict(rep, outlets_map.get(rep.outlet_id)),
+                "duplicates": [
+                    _duplicate_dict(d, outlets_map.get(d.outlet_id)) for d in dupes
+                ],
+            }
+            for rep, dupes in groups
+        ]
+    }
+
+
+@router.get("/articles/{article_id}")
+def get_article_detail(article_id: int, db: Session = Depends(get_db)):
+    """Everything we know about a single article.
+
+    Powers the article-detail modal opened from the Dashboard's right rail.
+    Returns the article plus eagerly-loaded related issues and opponent
+    activities (attacks/claims/promises the AI extracted). JSON-blob fields
+    (relevance_reasons, gdelt_themes, gdelt_tone, structured_extraction)
+    are parsed so the UI doesn't need to know about the wire format.
+
+    404 if the article doesn't exist.
+    """
+    a = (
+        db.query(SourceItem)
+        .options(
+            joinedload(SourceItem.issue_mentions).joinedload(IssueMention.issue),
+            joinedload(SourceItem.opponent_activities).joinedload(OpponentActivity.opponent),
+        )
+        .filter(SourceItem.id == article_id)
+        .first()
+    )
+    if not a:
+        raise HTTPException(status_code=404, detail=f"Article {article_id} not found")
+
+    outlet = db.query(Outlet).get(a.outlet_id) if a.outlet_id else None
+    return {
+        "id": a.id,
+        "title": a.title,
+
+        # Source / authorship
+        "source_name": display_source_name(a, outlet),
+        "source_url": a.source_url,
+        "source_type": a.source_type,
+        "source_author": a.source_author,
+        "source_owner_type": a.source_owner_type,
+        "source_owner_confidence": a.source_owner_confidence,
+        "publisher_domain": a.publisher_domain,
+
+        # Timestamps
+        "published_at": a.published_at.isoformat() if a.published_at else None,
+        "ingested_at": a.ingested_at.isoformat() if a.ingested_at else None,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+
+        # Body
+        "summary": a.summary,
+        "raw_text": a.raw_text,
+
+        # Scoring
+        "race_relevance_score": a.race_relevance_score,
+        "race_relevance_label": a.race_relevance_label,
+        "relevance_reasons": _safe_json_list(a.relevance_reasons),
+        "actionability_score": a.actionability_score,
+        "actionability_label": a.actionability_label,
+        "priority_score": a.priority_score,
+        "urgency": a.urgency,
+        "sentiment": a.sentiment,
+        "content_category": a.content_category,
+        "geo_relevance": a.geo_relevance,
+
+        # Mentions / flags
+        "candidate_mentioned": a.candidate_mentioned,
+        "opponent_mentioned": a.opponent_mentioned,
+        "district_mentioned": a.district_mentioned,
+        "priority_issue_mentioned": a.priority_issue_mentioned,
+
+        # Perspective classifier
+        "perspective": a.perspective,
+        "perspective_method": a.perspective_method,
+        "perspective_confidence": a.perspective_confidence,
+        "perspective_reason": a.perspective_reason,
+
+        # Credibility / extraction quality
+        "credibility_score": a.credibility_score,
+        "source_credibility": a.source_credibility,
+        "credibility_note": a.credibility_note,
+        "extraction_quality_score": a.extraction_quality_score,
+        "extraction_quality_label": a.extraction_quality_label,
+        "extraction_quality_reasons": _safe_json_list(a.extraction_quality_reasons),
+
+        # GDELT-derived data (when ingested from BigQuery)
+        "gdelt_themes": _safe_json_list(a.gdelt_themes),
+        "gdelt_tone": _safe_json_obj(a.gdelt_tone),
+
+        # Full LLM analysis result (when present). Shape varies — the UI
+        # renders it generically since it can include framing, claim
+        # extracts, and other LLM-extracted bits beyond what we've
+        # promoted to first-class columns.
+        "structured_extraction": _safe_json_obj(a.structured_extraction),
+
+        # `framing` is the LLM's judgment of how the article positions our
+        # candidate — helps_candidate / hurts_candidate / opponent_news /
+        # background / irrelevant. Surfaced top-level so the UI can show
+        # it prominently instead of digging into structured_extraction.
+        # This is a more precise signal than `perspective` (which only has
+        # 3 buckets and is computed by a separate cascading classifier
+        # primarily for landscape dot color).
+        "framing": (
+            (_safe_json_obj(a.structured_extraction) or {}).get("framing")
+        ),
+
+        # Lifecycle
+        "reviewed": a.reviewed,
+        "dismissed": a.dismissed,
+        "archived_as_irrelevant": a.archived_as_irrelevant,
+        "review_note": a.review_note,
+
+        # Related issues (with link strength + reasons the AI flagged them)
+        "issue_mentions": [
+            {
+                "issue_id": im.issue_id,
+                "name": im.issue.name if im.issue else None,
+                "summary": im.issue.summary if im.issue else None,
+                "link_strength": im.link_strength,
+                "link_reasons": _safe_json_list(im.link_reasons),
+            }
+            for im in a.issue_mentions
+        ],
+
+        # Opponent activities extracted from this article — claims,
+        # attacks, promises. The Opponent UI uses these too.
+        "opponent_activities": [
+            {
+                "id": oa.id,
+                "opponent_id": oa.opponent_id,
+                "opponent_name": oa.opponent.name if oa.opponent else None,
+                "claim": oa.claim,
+                "attack": oa.attack,
+                "promise": oa.promise,
+                "contradiction_note": oa.contradiction_note,
+                "repeated_theme": oa.repeated_theme,
+                "created_at": oa.created_at.isoformat() if oa.created_at else None,
+            }
+            for oa in a.opponent_activities
+        ],
+    }

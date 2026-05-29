@@ -15,9 +15,10 @@ the unit of language change tracking.
 
 Strategy: full re-cluster on each run.
   1. Wipe existing FrameVariant rows for the frame (and NULL NFM.variant_id)
-  2. Embed all NFM quotes via Gemini (cache in NFM.quote_embedding)
-  3. Cluster by incremental cosine similarity (centroid match → assign or new)
-  4. Name each cluster via Groq llama-3.3-70b-versatile
+  2. Embed all NFM quotes (cache in NFM.quote_embedding)
+  3. Cluster via agglomerative complete linkage on cosine distance.
+     Threshold is calibrated per-campaign — see scripts/calibrate_variant_threshold.py.
+  4. Name each cluster via the judge LLM provider (gpt-4o-mini / Groq fallback)
   5. Persist FrameVariant rows + assign NFM.variant_id
 
 Idempotent. Safe to re-run. Future enhancement: incremental re-cluster that
@@ -37,7 +38,20 @@ logger = logging.getLogger(__name__)
 
 
 # ── Knobs ─────────────────────────────────────────────────────────────────────
-DEFAULT_SIMILARITY_THRESHOLD = 0.88  # cosine sim for "same variant"
+# CLUSTER_DISTANCE_THRESHOLD: cosine distance threshold for agglomerative
+# clustering with complete linkage. Calibrated via SimHash-supervised
+# threshold search — see app/scripts/calibrate_variant_threshold.py and
+# verify_calibrated_threshold.py. The calibration:
+#   1. Treats within-frame, same story_cluster_id pairs as positive labels
+#   2. Treats cross-frame pairs as truly-negative labels
+#   3. Sweeps thresholds; picks the loosest where cross-frame FPR ≤ 1%
+#   4. Grid-searches linkage × threshold combos; complete linkage at 0.42
+#      maximized wire-sync purity (64%) without producing mega-clusters
+#
+# This is a starting default. Each campaign should recalibrate against its
+# own data once ≥200 NFMs have accumulated — re-run the calibration script.
+CLUSTER_DISTANCE_THRESHOLD = 0.42
+CLUSTER_LINKAGE = "complete"
 MIN_FRAME_QUOTES_TO_CLUSTER = 3      # frames with fewer quotes skipped
 EMBED_BATCH_SIZE = 100
 
@@ -62,262 +76,48 @@ def _cosine(a, b) -> float:
     return s / (math.sqrt(na) * math.sqrt(nb))
 
 
-def _hdbscan_cluster(
-    items: list[dict], min_cluster_size: int = 2,
+def _agglomerative_cluster(
+    items: list[dict],
+    distance_threshold: float = CLUSTER_DISTANCE_THRESHOLD,
+    linkage: str = CLUSTER_LINKAGE,
 ) -> list[list[dict]]:
-    """Density-based clustering with HDBSCAN.
+    """Agglomerative clustering with cosine distance.
 
-    Why HDBSCAN: no global similarity threshold. Clusters emerge from local
-    density, so wire-syndicated near-duplicates cluster tightly (high
-    density), genuine variants cluster more loosely, and one-off quotes
-    fall out as noise singletons. The only knob (`min_cluster_size`) is a
-    domain choice — "a variant must recur in at least N quotes" — not a
-    similarity number.
+    Why agglomerative complete linkage (not HDBSCAN): on this corpus, HDBSCAN
+    produced mixed clusters in dense frames — it would chain through density
+    regions that share vocabulary but contain distinct claims. Complete
+    linkage requires every pair within a merged cluster to be within the
+    distance threshold, which prevents that chaining.
 
-    Implementation note: HDBSCAN's `cosine` metric requires precomputing
-    a distance matrix. Faster alternative: L2-normalize embeddings, then
-    Euclidean distance ≈ cosine distance up to a monotonic transformation.
+    The threshold is calibrated against SimHash-supervised wire-sync pairs;
+    see app/scripts/calibrate_variant_threshold.py for the calibration
+    procedure. Each campaign should recalibrate against its own data once
+    ≥200 NFMs accumulate.
     """
+    from sklearn.cluster import AgglomerativeClustering
     import numpy as np
-    from hdbscan import HDBSCAN
 
     items_with_emb = [it for it in items if it.get("embedding")]
-    if len(items_with_emb) < min_cluster_size:
+    if len(items_with_emb) < 2:
         return [[it] for it in items_with_emb]
 
-    embs = np.array([it["embedding"] for it in items_with_emb], dtype=np.float32)
-    # L2-normalize so Euclidean distance is monotonic in cosine distance.
-    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    X = np.array([it["embedding"] for it in items_with_emb], dtype=np.float32)
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    embs_norm = embs / norms
+    Xn = X / norms
 
-    clusterer = HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        # min_samples defaults to min_cluster_size — controls how conservative
-        # the noise classification is. Lower means more cluster assignments.
-        min_samples=1,
-        metric="euclidean",
-        cluster_selection_method="leaf",  # 'leaf' produces finer-grained clusters
-                                          # vs 'eom' (excess of mass) which over-merges
+    model = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=distance_threshold,
+        metric="cosine",
+        linkage=linkage,
     )
-    labels = clusterer.fit_predict(embs_norm)
+    labels = model.fit_predict(Xn)
 
-    # Group items by cluster label. -1 = noise → each becomes its own singleton.
-    by_label: dict = {}
-    noise_singletons: list[list[dict]] = []
-    for idx, label in enumerate(labels):
-        if label == -1:
-            noise_singletons.append([items_with_emb[idx]])
-        else:
-            by_label.setdefault(int(label), []).append(items_with_emb[idx])
-
-    return list(by_label.values()) + noise_singletons
-
-
-def _llm_group_quotes(
-    items: list[dict], frame_name: str, batch_size: int = 40,
-) -> list[list[dict]]:
-    """LLM-as-judge clustering. Asks Groq 70B to group quotes by underlying
-    claim. No similarity threshold — the LLM makes the call.
-
-    For frames with > batch_size quotes, splits into batches by embedding
-    similarity (so related quotes go in the same batch), then runs the LLM
-    on each batch, then does a final cross-batch merge pass.
-
-    Returns list of clusters, each being a list of items.
-    """
-    import os, json as _json
-    from openai import OpenAI
-
-    key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not key:
-        logger.warning("variant clustering: no GROQ_API_KEY; each quote becomes a singleton")
-        return [[it] for it in items]
-    client = OpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
-
-    # Step 1: chunk items into batches the LLM can handle in one call.
-    # For small frames, one batch. For large frames, group by embedding
-    # similarity so related quotes batch together (better LLM grouping context).
-    if len(items) <= batch_size:
-        batches = [items]
-    else:
-        # Order by embedding similarity to first item (cheap proxy for "related").
-        # Within a batch, the LLM sees similar-ish quotes and can group accurately.
-        # Cross-batch merging handles cases where a variant spans batches.
-        sorted_items = sorted(
-            items,
-            key=lambda it: -_cosine(it.get("embedding") or [], items[0].get("embedding") or []),
-        )
-        batches = [
-            sorted_items[i:i + batch_size]
-            for i in range(0, len(sorted_items), batch_size)
-        ]
-
-    # Step 2: ask the LLM to group each batch.
-    def _group_batch(batch: list[dict]) -> list[list[dict]]:
-        quotes_block = "\n".join(
-            f"{i + 1}. \"{(it['nfm'].extracted_text or '').strip()[:300]}\""
-            for i, it in enumerate(batch)
-        )
-        prompt = f"""You are analyzing quotes extracted from political news articles about a campaign in PA-08 (Cognetti vs Bresnahan). All quotes below relate to the narrative frame: "{frame_name}".
-
-A VARIANT is a specific PHRASING or argument within a frame. Different ways of making the SAME specific claim should be grouped together. Different specific claims (even within the same frame) should be kept separate.
-
-Examples:
-  Group together (same variant — same specific claim, different wording):
-    - "Bresnahan voted against ACA expansion"
-    - "Bresnahan opposed expanding the Affordable Care Act"
-    - "Bresnahan blocked the ACA bill"
-
-  Keep SEPARATE (different specific claims):
-    Variant A: "Bresnahan voted against ACA expansion"  (about a specific vote)
-    Variant B: "Bresnahan accepted pharma donations"   (about funding)
-    Variant C: "Bresnahan killed Medicaid"              (about a different policy)
-
-QUOTES TO GROUP:
-{quotes_block}
-
-Return a JSON object with the groupings. Quote numbers are 1-indexed.
-
-{{
-  "groups": [
-    {{"quote_indices": [1, 5, 12]}},
-    {{"quote_indices": [2]}},
-    {{"quote_indices": [3, 8]}}
-  ]
-}}
-
-Rules:
-- Be conservative — only group quotes making the SAME SPECIFIC claim. When unsure, keep separate.
-- Singleton groups (size 1) are fine and expected. Many quotes will be their own variant.
-- Every quote number must appear in exactly one group.
-- Order doesn't matter."""
-
-        try:
-            r = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                temperature=0,
-                max_tokens=2000,
-            )
-            data = _json.loads(r.choices[0].message.content)
-            groups_raw = data.get("groups", [])
-            # Validate + build clusters
-            seen = set()
-            clusters: list[list[dict]] = []
-            for g in groups_raw:
-                indices = g.get("quote_indices") or []
-                cluster = []
-                for idx in indices:
-                    if not isinstance(idx, int):
-                        continue
-                    if idx < 1 or idx > len(batch):
-                        continue
-                    if idx in seen:
-                        continue
-                    seen.add(idx)
-                    cluster.append(batch[idx - 1])
-                if cluster:
-                    clusters.append(cluster)
-            # Any quotes the LLM didn't assign get individual singletons
-            for i, it in enumerate(batch, start=1):
-                if i not in seen:
-                    clusters.append([it])
-            return clusters
-        except Exception as exc:
-            logger.warning("LLM group batch failed: %s — using singletons", exc)
-            return [[it] for it in batch]
-
-    batch_clusters: list[list[dict]] = []
-    for batch in batches:
-        batch_clusters.extend(_group_batch(batch))
-    logger.info(
-        "  LLM grouped %d quotes into %d initial clusters (across %d batches)",
-        len(items), len(batch_clusters), len(batches),
-    )
-
-    # Step 3: cross-batch merge — for pairs of clusters with highly similar
-    # centroids, ask the LLM if they're really the same variant.
-    if len(batches) <= 1 or len(batch_clusters) <= 1:
-        return batch_clusters
-
-    # Compute centroids
-    def _centroid(cluster: list[dict]) -> list[float]:
-        embs = [it.get("embedding") for it in cluster if it.get("embedding")]
-        if not embs:
-            return []
-        n = len(embs)
-        return [sum(e[i] for e in embs) / n for i in range(len(embs[0]))]
-
-    cluster_centroids = [_centroid(c) for c in batch_clusters]
-
-    # For each pair with centroid similarity > 0.85 (loose retrieval threshold),
-    # ask the LLM if they should be merged.
-    MERGE_RETRIEVAL = 0.85
-    merge_pairs: list[tuple[int, int]] = []
-    for i in range(len(batch_clusters)):
-        for j in range(i + 1, len(batch_clusters)):
-            if not cluster_centroids[i] or not cluster_centroids[j]:
-                continue
-            sim = _cosine(cluster_centroids[i], cluster_centroids[j])
-            if sim >= MERGE_RETRIEVAL:
-                merge_pairs.append((i, j))
-
-    if not merge_pairs:
-        return batch_clusters
-
-    # Union-Find for merge decisions
-    parent = list(range(len(batch_clusters)))
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    def union(x, y):
-        rx, ry = find(x), find(y)
-        if rx != ry:
-            parent[rx] = ry
-
-    # LLM verify each candidate merge
-    for i, j in merge_pairs:
-        if find(i) == find(j):
-            continue  # already merged transitively
-        rep_i = batch_clusters[i][0]["nfm"].extracted_text[:250]
-        rep_j = batch_clusters[j][0]["nfm"].extracted_text[:250]
-        prompt = (
-            f"These two quotes are from articles about the campaign frame "
-            f"'{frame_name}'. Do they express the SAME SPECIFIC CLAIM (just "
-            f"worded differently), or are they about DIFFERENT specific claims?\n\n"
-            f"Quote A: \"{rep_i}\"\nQuote B: \"{rep_j}\"\n\n"
-            "Return JSON: {\"same_claim\": true} or {\"same_claim\": false}"
-        )
-        try:
-            r = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                temperature=0,
-                max_tokens=50,
-            )
-            data = _json.loads(r.choices[0].message.content)
-            if data.get("same_claim") is True:
-                union(i, j)
-        except Exception as exc:
-            logger.debug("merge verify failed for %d,%d: %s", i, j, exc)
-
-    # Apply merges
-    final_groups: dict[int, list[dict]] = {}
-    for i, cluster in enumerate(batch_clusters):
-        root = find(i)
-        final_groups.setdefault(root, []).extend(cluster)
-    final = list(final_groups.values())
-    if len(final) != len(batch_clusters):
-        logger.info(
-            "  cross-batch merge: %d clusters → %d (merged %d)",
-            len(batch_clusters), len(final), len(batch_clusters) - len(final),
-        )
-    return final
+    groups: dict = {}
+    for it, lbl in zip(items_with_emb, labels):
+        groups.setdefault(int(lbl), []).append(it)
+    return list(groups.values())
 
 
 def _name_cluster(quotes: list[str], frame_name: str) -> str:
@@ -380,7 +180,6 @@ def _name_cluster(quotes: list[str], frame_name: str) -> str:
 def cluster_all_frames(
     db: Session,
     *,
-    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     min_quotes: int = MIN_FRAME_QUOTES_TO_CLUSTER,
     only_frame_ids: Optional[list[int]] = None,
 ) -> dict:
@@ -475,11 +274,10 @@ def cluster_all_frames(
             continue
         summary["total_quotes_embedded"] += len(items)
 
-        # Cluster via HDBSCAN — density-based, no global similarity threshold.
-        # Wire-syndicated near-duplicates form tight high-density clusters;
-        # genuine variants form looser clusters; unique quotes fall out as
-        # noise singletons. Only knob is min_cluster_size (default 2).
-        raw_clusters = _hdbscan_cluster(items, min_cluster_size=2)
+        # Cluster via agglomerative complete linkage on cosine distance.
+        # Threshold (CLUSTER_DISTANCE_THRESHOLD) is calibrated against
+        # SimHash-supervised wire-sync pairs — see calibrate_variant_threshold.py.
+        raw_clusters = _agglomerative_cluster(items)
         # Wrap raw clusters in the expected {centroid, members} format for downstream code.
         clusters = []
         for raw in raw_clusters:

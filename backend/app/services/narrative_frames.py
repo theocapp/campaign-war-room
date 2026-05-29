@@ -2,13 +2,181 @@
 Narrative frame management: auto-suggest frames from article summaries,
 match articles to frames.
 """
+import hashlib
 import html
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
+
+
+logger = logging.getLogger(__name__)
+
+
+# ── Rematch gate (embedding pre-filter) ──────────────────────────────────────
+# match_article_to_frames used to ask the LLM about every active frame for
+# every article. Calibration showed the LLM rejects ~60% of those pairs based
+# on similarity alone — work an embedding cosine can do for free.
+#
+# We cache frame embeddings in-memory (frames don't change often). The
+# per-frame thresholds come from app/scripts/calibrate_rematch_gate.py and
+# live in backend/data/rematch_thresholds.json. Calibration is manual; this
+# code consumes whatever the calibration produced.
+_FRAME_EMBEDDING_CACHE: dict = {}  # frame_id -> (content_hash, embedding)
+_FRAME_THRESHOLDS_CACHE: Optional[dict] = None  # str(frame_id) -> threshold
+_GLOBAL_FLOOR_DEFAULT = 0.30  # used when no calibration file or new frame
+_REMATCH_THRESHOLDS_PATH = (
+    Path(__file__).parent.parent.parent / "data" / "rematch_thresholds.json"
+)
+
+
+def _frame_content_hash(frame) -> str:
+    """SHA1 of frame's matching-relevant content, used to invalidate the
+    embedding cache when a frame is edited.
+    """
+    src = f"{frame.name}|||{frame.description or ''}"
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()
+
+
+def _load_rematch_thresholds() -> dict:
+    """Read the calibrated per-frame thresholds. Cached after first load."""
+    global _FRAME_THRESHOLDS_CACHE
+    if _FRAME_THRESHOLDS_CACHE is not None:
+        return _FRAME_THRESHOLDS_CACHE
+    if not _REMATCH_THRESHOLDS_PATH.exists():
+        logger.warning(
+            "narrative_frames: no calibration file at %s — using global floor %.2f for all frames",
+            _REMATCH_THRESHOLDS_PATH, _GLOBAL_FLOOR_DEFAULT,
+        )
+        _FRAME_THRESHOLDS_CACHE = {}
+        return _FRAME_THRESHOLDS_CACHE
+    try:
+        data = json.loads(_REMATCH_THRESHOLDS_PATH.read_text())
+        _FRAME_THRESHOLDS_CACHE = data.get("frame_thresholds", {})
+        return _FRAME_THRESHOLDS_CACHE
+    except Exception as e:
+        logger.warning("narrative_frames: failed to load rematch thresholds: %s", e)
+        _FRAME_THRESHOLDS_CACHE = {}
+        return _FRAME_THRESHOLDS_CACHE
+
+
+def invalidate_rematch_thresholds_cache() -> None:
+    """Force the next call to re-read the calibration file. Call after
+    re-running the calibration script."""
+    global _FRAME_THRESHOLDS_CACHE
+    _FRAME_THRESHOLDS_CACHE = None
+
+
+def _cosine(a: list, b: list) -> float:
+    if not a or not b:
+        return 0.0
+    s = 0.0; na = 0.0; nb = 0.0
+    for x, y in zip(a, b):
+        s += x * y; na += x * x; nb += y * y
+    if na == 0 or nb == 0:
+        return 0.0
+    return s / (math.sqrt(na) * math.sqrt(nb))
+
+
+def _ensure_frame_embeddings(frames: list) -> None:
+    """Embed any frames whose content has changed (or whose embedding isn't
+    cached yet). Mutates _FRAME_EMBEDDING_CACHE.
+    """
+    from app.services.embeddings import embed_texts
+    needs: list = []
+    for f in frames:
+        h = _frame_content_hash(f)
+        cached = _FRAME_EMBEDDING_CACHE.get(f.id)
+        if cached is None or cached[0] != h:
+            needs.append((f, h))
+    if not needs:
+        return
+    texts = [f"{f.name}\n\n{f.description or ''}".strip() for f, _ in needs]
+    embs = embed_texts(texts, task_type="SEMANTIC_SIMILARITY")
+    for (f, h), e in zip(needs, embs):
+        if e is not None:
+            _FRAME_EMBEDDING_CACHE[f.id] = (h, e)
+
+
+def _get_or_compute_article_embedding(item) -> Optional[list]:
+    """Read the article's cached frame_match_embedding if it was computed
+    with the currently-configured embedding model. Otherwise compute it
+    fresh and write it back to the cache.
+
+    Returns None on embedding failure (caller falls back to full frame list).
+    """
+    from app.services.embeddings import current_primary_model_name, embed_texts
+
+    current_model = current_primary_model_name()
+
+    cached_blob = getattr(item, "frame_match_embedding", None)
+    cached_model = getattr(item, "frame_match_embedding_model", None)
+    if cached_blob and cached_model == current_model:
+        try:
+            return json.loads(cached_blob)
+        except Exception:
+            # Corrupt cache — fall through to re-embed
+            pass
+
+    article_text = (item.title or "") + "\n\n" + ((item.raw_text or item.summary or "")[:1500])
+    article_text = article_text.strip()
+    if not article_text:
+        return None
+
+    try:
+        emb = embed_texts([article_text], task_type="SEMANTIC_SIMILARITY")[0]
+    except Exception as e:
+        logger.debug("rematch gate: article embed failed for item=%d: %s", item.id, e)
+        return None
+    if emb is None:
+        return None
+
+    # Write-through cache. Only set the attributes when the SQLAlchemy session
+    # tracks this object; standalone (e.g. test) objects just get the values
+    # set without persistence.
+    try:
+        item.frame_match_embedding = json.dumps(emb)
+        item.frame_match_embedding_model = current_model
+        # Caller's session will commit (or not). We avoid committing here so
+        # this stays composable inside the broader rematch transaction.
+    except Exception:
+        # Non-ORM dict-like test object — ignore.
+        pass
+    return emb
+
+
+def _shortlist_frames_for_article(item, frames: list) -> list:
+    """Embedding-gated shortlist. Returns the subset of `frames` whose
+    per-frame similarity threshold the article's embedding clears.
+
+    On any embedding failure, falls back to the full frame list (safe — the
+    LLM step will still filter). Returns [] only when embedding succeeds AND
+    no frame clears its threshold.
+    """
+    article_emb = _get_or_compute_article_embedding(item)
+    if article_emb is None:
+        return frames
+
+    _ensure_frame_embeddings(frames)
+    thresholds = _load_rematch_thresholds()
+
+    shortlist: list = []
+    for f in frames:
+        entry = _FRAME_EMBEDDING_CACHE.get(f.id)
+        if entry is None:
+            # Couldn't embed this frame — include it (LLM will judge).
+            shortlist.append(f)
+            continue
+        _, frame_emb = entry
+        sim = _cosine(article_emb, frame_emb)
+        threshold = thresholds.get(str(f.id), _GLOBAL_FLOOR_DEFAULT)
+        if sim >= threshold:
+            shortlist.append(f)
+    return shortlist
 
 
 def _repair_json(text: str) -> str:
@@ -46,6 +214,44 @@ def _clean_description(description: str) -> str:
 
 
 _MIN_BODY_FOR_QUOTE = 200  # articles shorter than this are thin/paywalled — skip quote extraction
+
+# Articles published before this date are almost certainly date-parsing
+# artifacts (related-links, sidebar evergreen, malformed feed pubDates).
+# 398 articles in the live DB have published_at < 2024 — including one
+# stamped 0001-01-01. Using a hard floor here keeps frame "first_seen"
+# displays from being poisoned by these outliers. NOT a substitute for
+# fixing the ingest path that creates them.
+_PLAUSIBLE_DATE_FLOOR = datetime(2024, 1, 1)
+
+
+def _parse_momentum_data(raw: Optional[str]) -> Optional[dict]:
+    """Decode the momentum_data column safely.
+
+    Stored as a JSON string by services/frame_momentum.py. Returns None if
+    the column is empty OR if the JSON is malformed — we'd rather show no
+    tooltip than crash the list endpoint over a single bad row.
+    """
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("narrative_frames: malformed momentum_data — skipping")
+        return None
+
+
+def _compute_strategic_lens(frame) -> Optional[dict]:
+    """Wrap services.strategic_lens.strategic_lens() with safe import.
+
+    Inline import so a broken `strategic_lens` module never 500s the list
+    endpoint (the rest of the response is still useful without this field).
+    """
+    try:
+        from app.services.strategic_lens import strategic_lens
+    except Exception as exc:
+        logger.warning("strategic_lens import failed: %s", exc)
+        return None
+    return strategic_lens(frame.momentum_signal, frame.owner_type)
 
 
 def _frame_topic_keywords(frame_name: str, frame_desc: str, ctx: dict) -> list[str]:
@@ -145,8 +351,6 @@ def _validate_snippet(snippet: str, item: "SourceItem") -> Optional[str]:
 from sqlalchemy.orm import Session
 
 from app.models import NarrativeFrame, NarrativeFrameMention, SourceItem, CampaignConfig, Opponent
-
-logger = logging.getLogger(__name__)
 
 # In-memory progress tracker for the current rematch run.
 # Safe for single-server use — reset each time rematch_all starts.
@@ -612,6 +816,24 @@ def match_article_to_frames(db: Session, item: SourceItem) -> list[int]:
         logger.debug("narrative_frames.match_article: skipping item=%d (relevance=%d)", item.id, relevance)
         return []
 
+    # Embedding-gated shortlist: drop frames whose calibrated per-frame
+    # similarity threshold the article doesn't clear. Lets us skip the LLM
+    # entirely when no frame is plausibly relevant, and shortens the prompt
+    # when only a few frames are. See _shortlist_frames_for_article above.
+    n_total_frames = len(frames)
+    frames = _shortlist_frames_for_article(item, frames)
+    if not frames:
+        logger.debug(
+            "narrative_frames.match_article: item=%d — embedding gate found no candidate frames (was %d)",
+            item.id, n_total_frames,
+        )
+        return []
+    if len(frames) < n_total_frames:
+        logger.debug(
+            "narrative_frames.match_article: item=%d — shortlist %d/%d frames",
+            item.id, len(frames), n_total_frames,
+        )
+
     OWNER_ROLE = {
         "candidate": "OUR MESSAGE",
         "opponent":  "OPPONENT ATTACK",
@@ -642,12 +864,27 @@ def match_article_to_frames(db: Session, item: SourceItem) -> list[int]:
         except Exception:
             used_cache = False
 
+    # Include a truncated chunk of the article body so the LLM can ground its
+    # match in the actual reporting, not just the one-sentence LLM summary.
+    # The summary alone often mentions "PA-08" / "the district" / "campaign"
+    # and triggers false-positive frame matches on tangential national stories.
+    _MAX_BODY_CHARS = 2000
+    body_excerpt = ""
+    if item.raw_text:
+        body_clean = item.raw_text.strip()
+        if len(body_clean) > _MAX_BODY_CHARS:
+            body_excerpt = body_clean[:_MAX_BODY_CHARS].rstrip() + " …[truncated]"
+        else:
+            body_excerpt = body_clean
+
     article_section = f"""Title: {item.title or "No title"}
 Summary: {cached_summary}"""
     if cached_framing:
         article_section += f"\nFraming: {cached_framing}"
     if cached_attacks:
         article_section += f"\nOpponent statements:\n{cached_attacks}"
+    if body_excerpt:
+        article_section += f"\n\nArticle body:\n{body_excerpt}"
 
     if used_cache:
         logger.debug(
@@ -670,14 +907,21 @@ Decide which narratives this article meaningfully covers. The tag on each narrat
 
 [OPPONENT ATTACK] — Match if the article covers, repeats, or reports on this attack line, whether as criticism of the opponent or as the attack itself being made. Both "Bresnahan buys stocks" and "Cognetti attacks Bresnahan on stocks" count.
 
-[MEDIA THEME] — Match if the article covers this topic in any framing, from any outlet.
+[MEDIA THEME] — Match ONLY if the article discusses this theme specifically in the context of the {ctx["race"]} race — that is, it names {ctx["candidate"]}, an opponent, the district, or the race itself while covering this theme. Generic national coverage of the same topic does NOT count as a match.
 
 Additional rules:
-- One article can match MULTIPLE narratives if it contains distinct information about each.
-- Do NOT match vague thematic overlap — only match when the article has specific, substantive information about that narrative.
-- For each match, extract the 1-2 most relevant sentences verbatim from the article.
+- MOST articles match 0 or 1 narratives. Match more than one narrative ONLY when the article body contains substantively distinct information about each.
+- Do NOT match on vague thematic overlap, shared keywords, or topical adjacency — match only when the article has specific, substantive information about that narrative.
+- HARD REQUIREMENT: For each match you propose, you must quote a verbatim sentence from the "Article body" section above that directly supports the match. If no such sentence exists in the body, do NOT include the match. Snippets cannot be paraphrased or summarized — they must be copied character-for-character from the body.
+- Rate your confidence (0-100) per match:
+    90-100 — central topic of the article, named explicitly with detail
+    75-89  — covered as a clear secondary topic with substantive detail
+    60-74  — mentioned with some specificity but not the article's focus
+    40-59  — loose thematic overlap or passing reference only — DO NOT INCLUDE
+    0-39   — DO NOT INCLUDE
+- If you are uncertain whether the article truly covers a narrative, omit it.
 
-Return ONLY a JSON array. Each element: {{"frame": <number>, "snippet": "<exact quote from article>"}}
+Return ONLY a JSON array. Each element: {{"frame": <number>, "confidence": <0-100>, "snippet": "<verbatim sentence from the article body>"}}
 Return [] if no narratives apply."""
 
     try:
@@ -722,10 +966,18 @@ Return [] if no narratives apply."""
             # "snippet" field that the legacy NarrativeFrameMention used to
             # store; cluster-native FrameClusterMatch has no per-article
             # snippet so we just take the frame index.
+            confidence: Optional[int] = None
+            snippet: Optional[str] = None
             if isinstance(entry, int):
                 idx = entry
             elif isinstance(entry, dict):
                 idx = entry.get("frame")
+                raw_conf = entry.get("confidence")
+                if isinstance(raw_conf, (int, float)):
+                    confidence = max(0, min(100, int(raw_conf)))
+                raw_snip = entry.get("snippet")
+                if isinstance(raw_snip, str):
+                    snippet = raw_snip
             else:
                 continue
 
@@ -737,35 +989,109 @@ Return [] if no narratives apply."""
                 continue
             seen_frame_ids.add(frame.id)
 
-            # Reject the match if the article doesn't contain any topic-specific
-            # keywords from this frame. Catches general roundup articles that the
-            # LLM tags to specific frames because they broadly cover the race.
-            if not _article_passes_keyword_gate(item, frame.name, frame.description or "", ctx):
-                logger.debug(
-                    "narrative_frames.match_article: item=%d frame=%d '%s' rejected by keyword gate",
+            # Snippet validation: an LLM match without a verifiable verbatim
+            # quote from the article body is a thematic hallucination. Drop
+            # the match entirely. This replaces the brittle keyword gate —
+            # snippet validation catches the same false positives without
+            # killing legitimate matches whose frame name uses abstract verbs
+            # ("Delivers Funding") that don't appear verbatim in news copy.
+            verified = _validate_snippet(snippet or "", item)
+            if verified is None:
+                logger.info(
+                    "narrative_frames.match_article: item=%d frame=%d '%s' "
+                    "rejected — snippet failed verbatim check (conf=%s)",
                     item.id, frame.id, frame.name,
+                    confidence if confidence is not None else "?",
                 )
                 continue
 
-            # Cluster-native only (Phase D). UPSERT a FrameClusterMatch keyed
-            # on the item's cluster. The per-article snippet (extracted_text)
-            # that the legacy NarrativeFrameMention stored has no analogue at
-            # the cluster level — clusters have many articles, and the snippet
-            # was always article-scoped — so it disappears with the legacy
-            # write. The snippet validation logic remains available for
-            # diagnostic logging if future work re-introduces per-article
-            # provenance on a side table.
+            # Second-pass verifier: after the snippet's verbatim check passes,
+            # ask a focused LLM whether the extract is actually about this
+            # frame's topic. Catches the "topically adjacent but wrong"
+            # failure mode (e.g. a Cognetti traffic-plan quote getting
+            # matched to Bresnahan's Healthcare Record because both mention
+            # PA-08). Same V5 prompt that won the bake-off and purged 552
+            # bad assignments during the V12 cleanup pass.
+            from app.services.extract_verifier import verify_match
+            verifier_result = verify_match(
+                extract=verified,
+                frame_id=frame.id,
+                frame_name=frame.name,
+                frame_description=frame.description,
+                source_item_id=item.id,
+            )
+            if not verifier_result.keep:
+                # The verifier already logged the rejection at INFO.
+                continue
+
+            # Confidence is a hard requirement of the prompt. In the v3
+            # precision dry-run every LLM response included one — if a
+            # response omits it, that's a signal the model glitched, NOT a
+            # signal we should manufacture a moderate-confidence number.
+            # Previously we fell back to 75, which placed unconfident
+            # matches squarely in the "covered as a clear secondary topic
+            # with substantive detail" band of our own rubric. That was an
+            # unsupported claim. Now we drop the match instead.
+            if confidence is None:
+                logger.warning(
+                    "narrative_frames.match_article: item=%d frame=%d '%s' "
+                    "rejected — LLM omitted confidence field",
+                    item.id, frame.id, frame.name,
+                )
+                continue
+            effective_conf = confidence
+            logger.info(
+                "narrative_frames.match_article: item=%d frame=%d '%s' confidence=%d",
+                item.id, frame.id, frame.name, confidence,
+            )
+
+            # Cluster-native: UPSERT a FrameClusterMatch keyed on the item's
+            # cluster. This is what powers all the read-side counts
+            # (dashboard, briefing, detail page — see services/frame_counts).
             if item.story_cluster_id:
                 from app.services import cluster_writes
                 cluster_writes.upsert_frame_match(
                     db,
                     frame_id=frame.id,
                     cluster_id=item.story_cluster_id,
-                    confidence=75,
+                    confidence=effective_conf,
                     source_type="cluster_runtime",
                     matched_by="llm",
                     article_date=item.published_at,
+                    frame_content_hash=_frame_content_hash(frame),
                 )
+
+            # Phase-D-gap fix (A2): also write a NarrativeFrameMention so
+            # the per-article snippet and confidence are available to:
+            #   - frame_variants clustering (reads NFM.extracted_text)
+            #   - detail page NOTABLE QUOTES (reads NFM.extracted_text)
+            #   - audit / repair maintenance jobs
+            # Earlier Phase D removed this write because FCM has no per-article
+            # snippet column; we kept the snippet in NFM as the right place.
+            # `verified` is the validated verbatim quote from the body.
+            existing_nfm = (
+                db.query(NarrativeFrameMention)
+                .filter(
+                    NarrativeFrameMention.frame_id == frame.id,
+                    NarrativeFrameMention.source_item_id == item.id,
+                )
+                .first()
+            )
+            if existing_nfm:
+                existing_nfm.confidence = effective_conf
+                existing_nfm.extracted_text = verified
+                existing_nfm.matched_by = "llm"
+            else:
+                db.add(NarrativeFrameMention(
+                    frame_id=frame.id,
+                    source_item_id=item.id,
+                    confidence=effective_conf,
+                    matched_by="llm",
+                    extracted_text=verified,
+                    # claim_meta is rescore-only (per-claim metadata) — the
+                    # runtime matcher prompt doesn't extract those fields.
+                    claim_meta=None,
+                ))
 
             matched_frame_ids.append(frame.id)
 
@@ -773,8 +1099,68 @@ Return [] if no narratives apply."""
         return matched_frame_ids
 
     except Exception as e:
-        logger.warning("narrative_frames.match_article: item=%d failed: %s", item.id, e)
+        # B3: log the full traceback so matcher failures don't disappear
+        # silently. Caller still gets [] so a single broken article doesn't
+        # break the ingest loop.
+        logger.exception(
+            "narrative_frames.match_article: item=%d failed: %s", item.id, e,
+        )
         return []
+
+
+def rematch_recent(db: Session, days_back: int = 7) -> int:
+    """Lightweight rematch: re-score recent articles against current frames.
+
+    Used by the hands-off auto-promote workflow. After auto-execute creates
+    new tracked frames, those frames start at "0 this week" because no
+    recent articles have been scored against them yet (the article scorer
+    runs at ingest time, against whatever frames existed then). This
+    helper sweeps the last N days of articles and re-runs the scorer.
+
+    Differences from `rematch_all`:
+      - Does NOT prune empty frames (the new frames already have some
+        mentions from promote_cluster's backfill).
+      - Does NOT use the global _rematch_lock (this is a small targeted
+        pass that runs after auto-promote, not a hours-long full rescore).
+      - Default 7-day window — fast (~$0.50 in LLM cost on typical volume).
+
+    Returns the number of new mentions/cluster-matches created.
+    """
+    import time
+    from sqlalchemy import func
+    from app.models import FrameClusterMatch, StoryCluster
+
+    delay = float(os.environ.get("REMATCH_DELAY_SECONDS", "0.1"))
+    cutoff = datetime.utcnow() - timedelta(days=days_back)
+
+    # Cluster-native iteration like rematch_all — score one representative
+    # article per story cluster instead of every article. Much cheaper.
+    candidate_clusters = (
+        db.query(StoryCluster, SourceItem)
+        .join(SourceItem, SourceItem.id == StoryCluster.representative_source_item_id)
+        .filter(
+            StoryCluster.last_seen_at >= cutoff,
+            SourceItem.archived_as_irrelevant == False,
+        )
+        .all()
+    )
+
+    total = 0
+    for _, item in candidate_clusters:
+        try:
+            matched = match_article_to_frames(db, item)
+            total += len(matched)
+        except Exception as exc:
+            logger.warning(
+                "rematch_recent: item=%d failed: %s", item.id, exc,
+            )
+        if delay > 0:
+            time.sleep(delay)
+    logger.info(
+        "rematch_recent: scored %d recent clusters, %d frame matches created",
+        len(candidate_clusters), total,
+    )
+    return total
 
 
 def rematch_all(db: Session, days_back: int = 365) -> int:
@@ -840,13 +1226,43 @@ def rematch_all(db: Session, days_back: int = 365) -> int:
         _rematch_progress["total"] = len(items)
         _rematch_progress["started_at"] = datetime.utcnow().isoformat()
 
+        # Parallelize: LLM/embedding calls are I/O-bound, so threads are fine.
+        # Each worker gets its own DB session so SQLAlchemy isn't shared.
+        # Worker count tunable via env; default 8 is comfortably below OpenAI
+        # tier 2's 5K RPM and gpt-4o-mini's per-key limits.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from app.db import SessionLocal
+
+        workers = int(os.environ.get("REMATCH_PARALLEL_WORKERS", "8"))
+        logger.info("rematch_all: using %d worker threads", workers)
+
+        item_ids = [it.id for it in items]
         total = 0
-        for i, item in enumerate(items):
-            matched = match_article_to_frames(db, item)
-            total += len(matched)
-            _rematch_progress["done"] = i + 1
-            if i < len(items) - 1:
-                time.sleep(delay)
+        completed = 0
+
+        def _worker(item_id: int) -> int:
+            with SessionLocal() as worker_db:
+                worker_item = worker_db.get(SourceItem, item_id)
+                if worker_item is None:
+                    return 0
+                try:
+                    matched = match_article_to_frames(worker_db, worker_item)
+                    return len(matched)
+                except Exception as exc:
+                    logger.warning("rematch_all: item=%d failed: %s", item_id, exc)
+                    return 0
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_worker, iid): iid for iid in item_ids}
+            for fut in as_completed(futures):
+                total += fut.result()
+                completed += 1
+                _rematch_progress["done"] = completed
+                # Light pacing — only matters if the worker pool is much
+                # larger than the API's TPM headroom. With 8 workers and
+                # OpenAI tier 2 we don't need it, but keep the knob.
+                if delay > 0 and workers == 1:
+                    time.sleep(delay)
 
         _rematch_progress["running"] = False
 
@@ -868,7 +1284,10 @@ def rematch_all(db: Session, days_back: int = 365) -> int:
                     "narrative_frames: pruning empty frame %d '%s' (0 cluster matches in archive)",
                     frame.id, frame.name,
                 )
-                db.delete(frame)
+                # Cascade-aware delete — prevents the orphan-variant /
+                # orphan-candidate_frame patterns we found in tonight's audit.
+                from app.services.safe_deletes import safe_delete_frame
+                safe_delete_frame(db, frame.id)
                 pruned += 1
         if pruned:
             db.commit()
@@ -972,13 +1391,16 @@ Each number is a frame ID from the list above. Do not include frames that have n
             "deleted": [],
         }
 
+        from app.services.safe_deletes import safe_delete_frame
         for dup in to_delete:
             mention_count = counts.get(dup.id, 0)
-            # Cluster-native FrameClusterMatch rows pointing at the merged
-            # frame are the analytics-relevant ones; sweep them up so the
-            # surviving frame is the only carrier post-merge.
-            db.query(FrameClusterMatch).filter(FrameClusterMatch.frame_id == dup.id).delete()
-            db.delete(dup)
+            # Cascade-aware delete: FCM + NFM + FrameVariant + FrameStageHistory
+            # all get cleaned, and CandidateFrame.resolved_to_frame_id pointers
+            # get SET NULL. The previous code only deleted FCM + the frame
+            # itself, leaving FrameVariant / FrameStageHistory / CandidateFrame
+            # as orphans (the 13 + 4 orphans found in tonight's audit
+            # originated here on the daily run).
+            safe_delete_frame(db, dup.id)
             group_info["deleted"].append({"id": dup.id, "name": dup.name, "mentions": mention_count})
             merged += 1
             logger.info(
@@ -1007,7 +1429,36 @@ _REFUSAL_MARKERS = (
     "no text was provided",
     "i don't have enough",
     "i do not have enough",
+    # Added after seeing these surface as "Notable Quotes" on the detail page.
+    # NOTE: "but the article does not contain direct mention of X" is a
+    # LEGITIMATE informative summary, not a refusal — so we don't match on
+    # the generic substring "does not contain".
+    "no one-sentence summary",
+    "does not contain a sentence",
+    "no relevant information",
 )
+
+
+_SHORT_REFUSAL_PHRASES = {
+    "no summary available.",
+    "no summary available",
+    "no summary.",
+    "no summary",
+    "n/a",
+    "no content.",
+    "no content",
+    "no information.",
+    "no information",
+    # Short LLM refusal verbatims (under the 40-char substring-match floor):
+    "i do not have enough.",
+    "i do not have enough info.",
+    "i do not have enough information.",
+    "i don't have enough.",
+    "i don't have enough info.",
+    "not enough info.",
+    "unable to summarize.",
+    "cannot summarize.",
+}
 
 
 def is_refusal_summary(s: str | None) -> bool:
@@ -1015,7 +1466,15 @@ def is_refusal_summary(s: str | None) -> bool:
     (paywalled / unextractable article). These should be hidden in quotes
     and ideally nulled in the DB so they get re-summarized later."""
     s_norm = (s or "").strip().lower()
-    if not s_norm or len(s_norm) < 40:
+    if not s_norm:
+        return False
+    # Exact-match short refusals — these are below the substring-match floor
+    # but are unambiguous as a whole-string.
+    if s_norm.rstrip(".") in {p.rstrip(".") for p in _SHORT_REFUSAL_PHRASES}:
+        return True
+    # For longer summaries, look for known refusal substrings. The 40-char
+    # floor prevents false positives on short legitimate summaries.
+    if len(s_norm) < 40:
         return False
     return any(m in s_norm for m in _REFUSAL_MARKERS)
 
@@ -1058,75 +1517,76 @@ def repair_frame_data(db: Session) -> dict:
 
     Safe to call on every startup — cheap when there is nothing to fix.
     """
+    # Single-transaction repair: previously 3 sequential commits would
+    # leave partial state if any midway step failed. Now everything
+    # happens in one BEGIN/COMMIT — either all changes land or none do.
     desc_fixed = 0
-    frames = db.query(NarrativeFrame).all()
-    for frame in frames:
-        if not frame.description:
-            continue
-        cleaned = _clean_description(frame.description)
-        if cleaned != frame.description:
-            logger.info(
-                "repair_frame_data: cleaned description for frame %d '%s'",
-                frame.id, frame.name,
-            )
-            frame.description = cleaned
-            desc_fixed += 1
-    if desc_fixed:
-        db.commit()
-
-    # Null out unverifiable extracted_text in batches
     mentions_fixed = 0
-    mentions = (
-        db.query(NarrativeFrameMention)
-        .filter(NarrativeFrameMention.extracted_text.isnot(None))
-        .all()
-    )
-    item_cache: dict[int, SourceItem] = {}
-    for mention in mentions:
-        item = item_cache.get(mention.source_item_id)
-        if item is None:
-            item = db.query(SourceItem).filter(SourceItem.id == mention.source_item_id).first()
-            if item:
-                item_cache[mention.source_item_id] = item
-        if not item:
-            continue
-        verified = _validate_snippet(mention.extracted_text, item)
-        if verified is None:
-            mention.extracted_text = None
-            mentions_fixed += 1
-
-    if mentions_fixed:
-        db.commit()
-
-    # Remove existing false-positive matches: articles that score below the
-    # relevance threshold or fail the keyword gate are almost certainly noise.
-    ctx = _campaign_context(db)
-    all_frames = {f.id: f for f in db.query(NarrativeFrame).all()}
     false_positives = 0
-    all_mentions = db.query(NarrativeFrameMention).all()
-    for mention in all_mentions:
-        item = item_cache.get(mention.source_item_id)
-        if item is None:
-            item = db.query(SourceItem).filter(SourceItem.id == mention.source_item_id).first()
-            if item:
-                item_cache[mention.source_item_id] = item
-        if not item:
-            continue
-        frame = all_frames.get(mention.frame_id)
-        if not frame:
-            continue
-        # Drop if article is below the relevance floor
-        if (item.race_relevance_score or 0) < 55:
-            db.delete(mention)
-            false_positives += 1
-            continue
-        # Drop if article fails the keyword gate for this frame
-        if not _article_passes_keyword_gate(item, frame.name, frame.description or "", ctx):
-            db.delete(mention)
-            false_positives += 1
+    try:
+        # Pass 1: clean leaked-prompt-scaffolding from descriptions
+        frames = db.query(NarrativeFrame).all()
+        for frame in frames:
+            if not frame.description:
+                continue
+            cleaned = _clean_description(frame.description)
+            if cleaned != frame.description:
+                logger.info(
+                    "repair_frame_data: cleaned description for frame %d '%s'",
+                    frame.id, frame.name,
+                )
+                frame.description = cleaned
+                desc_fixed += 1
 
-    if false_positives:
+        # Pass 2: null unverifiable extracted_text
+        mentions = (
+            db.query(NarrativeFrameMention)
+            .filter(NarrativeFrameMention.extracted_text.isnot(None))
+            .all()
+        )
+        item_cache: dict[int, SourceItem] = {}
+        for mention in mentions:
+            item = item_cache.get(mention.source_item_id)
+            if item is None:
+                item = db.query(SourceItem).filter(SourceItem.id == mention.source_item_id).first()
+                if item:
+                    item_cache[mention.source_item_id] = item
+            if not item:
+                continue
+            verified = _validate_snippet(mention.extracted_text, item)
+            if verified is None:
+                mention.extracted_text = None
+                mentions_fixed += 1
+
+        # Pass 3: remove false-positive matches
+        ctx = _campaign_context(db)
+        all_frames = {f.id: f for f in db.query(NarrativeFrame).all()}
+        all_mentions = db.query(NarrativeFrameMention).all()
+        for mention in all_mentions:
+            item = item_cache.get(mention.source_item_id)
+            if item is None:
+                item = db.query(SourceItem).filter(SourceItem.id == mention.source_item_id).first()
+                if item:
+                    item_cache[mention.source_item_id] = item
+            if not item:
+                continue
+            frame = all_frames.get(mention.frame_id)
+            if not frame:
+                continue
+            if (item.race_relevance_score or 0) < 55:
+                db.delete(mention)
+                false_positives += 1
+                continue
+            if not _article_passes_keyword_gate(item, frame.name, frame.description or "", ctx):
+                db.delete(mention)
+                false_positives += 1
+
+        # Single commit at the end — atomic for the whole repair pass.
         db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("repair_frame_data: failed mid-pass, rolled back all changes")
+        raise
 
     logger.info(
         "repair_frame_data: fixed %d frame descriptions, nulled %d unverifiable quotes, removed %d false-positive matches",
@@ -1255,15 +1715,21 @@ def get_frames_with_counts(db: Session) -> list[dict]:
     (`mentions_this_week`, etc.) so the frontend keeps working — but the
     numbers now count distinct story clusters, not raw article mentions, so
     wire syndication doesn't inflate them.
+
+    V13.21 — also includes `subject_type` (who the frame is ABOUT —
+    candidate/opponent/media) so frontend can render the 4-quadrant
+    color scheme consistent with the landscape. Computed from frame
+    name via the shared subject_classifier; no schema change.
     """
     from collections import defaultdict
 
-    from sqlalchemy import and_, case, func
+    from sqlalchemy import and_, case, cast, func, Numeric
     from app.models import FrameClusterMatch, Outlet, StoryCluster
+    from app.services.frame_counts import frame_pulse_counts, week_window
+    from app.services.subject_classifier import get_subject_classifier
+    classify_subject = get_subject_classifier(db)
 
-    now = datetime.utcnow()
-    week_start = now - timedelta(days=7)
-    prev_week_start = now - timedelta(days=14)
+    week_start, prev_week_start, now = week_window()
 
     # Reach weighting — see REACH_* constants near the top of this file.
     reach_weight = case(
@@ -1274,6 +1740,11 @@ def get_frames_with_counts(db: Session) -> list[dict]:
     frames = db.query(NarrativeFrame).filter(NarrativeFrame.active == True).all()
     if not frames:
         return []
+
+    # Canonical "this week" / "last week" counts (Option C — distinct
+    # clusters with any article in the window). One GROUP BY query for all
+    # frames; see services/frame_counts.py for the definition.
+    pulse = frame_pulse_counts(db, [f.id for f in frames])
 
     # This was an N+1: ~17 queries per frame. It is now a fixed set of batch
     # queries grouped by frame_id, regardless of how many frames exist.
@@ -1301,12 +1772,17 @@ def get_frames_with_counts(db: Session) -> list[dict]:
     reach_rows = (
         db.query(
             FrameClusterMatch.frame_id,
-            func.round(func.sum(
-                case((SourceItem.published_at >= week_start, reach_weight))), 1),
-            func.round(func.sum(
+            # round(numeric, int) — cast to Numeric so this works on both
+            # SQLite (which doesn't care about the type) AND Postgres
+            # (where round(double, int) doesn't exist).
+            func.round(cast(func.sum(
+                case((SourceItem.published_at >= week_start, reach_weight))),
+                Numeric), 1),
+            func.round(cast(func.sum(
                 case((and_(SourceItem.published_at >= prev_week_start,
-                           SourceItem.published_at < week_start), reach_weight))), 1),
-            func.round(func.sum(reach_weight), 1),
+                           SourceItem.published_at < week_start), reach_weight))),
+                Numeric), 1),
+            func.round(cast(func.sum(reach_weight), Numeric), 1),
         )
         .select_from(FrameClusterMatch)
         .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
@@ -1496,17 +1972,22 @@ def get_frames_with_counts(db: Session) -> list[dict]:
     result = []
     for frame in frames:
         rows = fcm_by_frame.get(frame.id, [])
-        total = len(rows)
-        this_week = sum(1 for r in rows
-                        if r.first_seen_at and r.first_seen_at >= week_start)
-        last_week = sum(1 for r in rows
-                        if r.first_seen_at
-                        and prev_week_start <= r.first_seen_at < week_start)
+        # Counts come from frame_pulse_counts (canonical Option-C definition:
+        # distinct clusters with any article published in the window). The
+        # previous logic counted FCM rows by their first_seen_at, which under-
+        # reported recent activity on clusters whose match arrived earlier.
+        this_week, last_week, total = pulse.get(frame.id, (0, 0, 0))
 
-        first_seen = min((r.first_seen_at for r in rows if r.first_seen_at),
-                         default=None)
-        last_seen = max((r.last_seen_at for r in rows if r.last_seen_at),
-                        default=None)
+        first_seen = min(
+            (r.first_seen_at for r in rows
+             if r.first_seen_at and r.first_seen_at >= _PLAUSIBLE_DATE_FLOOR),
+            default=None,
+        )
+        last_seen = max(
+            (r.last_seen_at for r in rows
+             if r.last_seen_at and r.last_seen_at >= _PLAUSIBLE_DATE_FLOOR),
+            default=None,
+        )
         days_since = (now - last_seen).days if last_seen else None
 
         # Stage classification uses article-level counts with a 30-day baseline
@@ -1517,7 +1998,14 @@ def get_frames_with_counts(db: Session) -> list[dict]:
         art_tw, art_last_30d, art_total, last_pub = articles_by_frame.get(
             frame.id, (0, 0, 0, None))
         # Baseline = the 23 days BEFORE this week, projected to a weekly rate.
-        baseline_weekly = int(round((art_last_30d - art_tw) / 23 * 7)) if art_last_30d > art_tw else 0
+        # When art_last_30d == art_tw (all activity is recent, no prior baseline),
+        # use >= not > so we don't force baseline_weekly=0 — which would falsely
+        # signal "explosive growth from nothing." For brand-new frames whose
+        # entire history fits in this week, baseline_weekly stays 0 (correct:
+        # no baseline exists). For established frames where the 30d window just
+        # happens to equal this-week (rare), the formula above gives 0 anyway,
+        # which is still correct.
+        baseline_weekly = int(round((art_last_30d - art_tw) / 23 * 7)) if art_last_30d >= art_tw else 0
         days_since_article = (now - last_pub).days if last_pub else None
         stage = _narrative_stage(art_total, art_tw, baseline_weekly, days_since_article, stage_scale)
 
@@ -1587,6 +2075,10 @@ def get_frames_with_counts(db: Session) -> list[dict]:
             "name": frame.name,
             "description": frame.description,
             "owner_type": frame.owner_type,
+            # Stored value (user-picked quadrant) wins over heuristic. NULL
+            # in the column = no explicit choice → fall back to name-based
+            # inference. See subject_classifier.py for the heuristic logic.
+            "subject_type": frame.subject_type or classify_subject(frame.name),
             "source": frame.source,
             "created_at": frame.created_at.isoformat() if frame.created_at else None,
             "mentions_this_week": this_week,
@@ -1605,6 +2097,18 @@ def get_frames_with_counts(db: Session) -> list[dict]:
             "first_seen_at": first_seen.isoformat() if first_seen else None,
             "last_seen_at": last_seen.isoformat() if last_seen else None,
             "key_articles": key_articles,
+            # Momentum signal from services/frame_momentum.py. One of
+            # viral / missing_coverage / elite_only / stable / no_trend_signal,
+            # or None for frames below MIN_ACTIVE_ARTICLES. momentum_data is
+            # the raw classifier inputs (parsed from the stored JSON) so the
+            # UI can build tooltips like "13 articles this week vs baseline 1/week".
+            "momentum_signal": frame.momentum_signal,
+            "momentum_data": _parse_momentum_data(frame.momentum_data),
+            # Strategic interpretation layer — converts the (signal, owner_type)
+            # pair into a posture/action/urgency triple via the matrix in
+            # services/strategic_lens.py. None when either input is missing
+            # or the combination isn't recognized — UI hides the chip cleanly.
+            "strategic_lens": _compute_strategic_lens(frame),
         })
 
     result.sort(key=lambda x: x["mentions_this_week"], reverse=True)
@@ -1711,11 +2215,14 @@ def get_frame_timeline(
         .scalar() or 0
     )
 
+    from app.services.subject_classifier import get_subject_classifier
+    _classify_subject = get_subject_classifier(db)
     return {
         "frame": {
             "id": frame.id,
             "name": frame.name,
             "owner_type": frame.owner_type,
+            "subject_type": frame.subject_type or _classify_subject(frame.name),
             "description": frame.description,
             "stage": frame.last_known_stage,
             "momentum_signal": frame.momentum_signal,
@@ -1725,6 +2232,73 @@ def get_frame_timeline(
         "totals_by_day": totals_by_day,
         "unclustered_mention_count": int(unclustered_count),
     }
+
+
+def get_variant_articles(
+    db: "Session",
+    frame_id: int,
+    variant_id: int,
+    date: Optional[str] = None,
+) -> list[dict]:
+    """Articles supporting a given (frame_id, variant_id), optionally one day only.
+
+    Powers the Variant-Evolution chart's click-to-drill-down behavior in the
+    UI — the user clicks a spike on a given day and we surface the actual
+    articles that built that height. Returns the same DetailArticle shape as
+    get_frame_detail() so the frontend can render them with the same component.
+
+    `date` (YYYY-MM-DD) filters to articles whose published_at falls on that
+    calendar day. When omitted, returns every article tagged with this variant.
+    """
+    from app.models import NarrativeFrameMention, SourceItem, Outlet
+    from sqlalchemy import func
+
+    q = (
+        db.query(
+            SourceItem.id,
+            SourceItem.title,
+            SourceItem.summary,
+            SourceItem.source_name,
+            SourceItem.source_url,
+            SourceItem.published_at,
+            SourceItem.race_relevance_score,
+            SourceItem.sentiment,
+            Outlet.name.label("outlet_name"),
+            Outlet.outlet_type,
+            Outlet.authority_score,
+        )
+        .select_from(NarrativeFrameMention)
+        .join(SourceItem, SourceItem.id == NarrativeFrameMention.source_item_id)
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
+        .filter(
+            NarrativeFrameMention.frame_id == frame_id,
+            NarrativeFrameMention.variant_id == variant_id,
+        )
+    )
+    if date:
+        q = q.filter(func.date(SourceItem.published_at) == date)
+    rows = q.order_by(SourceItem.published_at.desc().nulls_last()).all()
+
+    seen: set = set()
+    out: list[dict] = []
+    for r in rows:
+        if r.id in seen:
+            continue
+        seen.add(r.id)
+        out.append({
+            "id": r.id,
+            "title": r.title,
+            "summary": r.summary,
+            "source_name": r.source_name,
+            "source_url": r.source_url,
+            "outlet_name": r.outlet_name,
+            "outlet_type": r.outlet_type,
+            "outlet_authority": r.authority_score,
+            "published_at": r.published_at.isoformat() if r.published_at else None,
+            "race_relevance_score": r.race_relevance_score,
+            "sentiment": r.sentiment,
+        })
+    return out
 
 
 def get_frame_detail(db: "Session", frame_id: int) -> Optional[dict]:
@@ -1797,11 +2371,15 @@ def get_frame_detail(db: "Session", frame_id: int) -> Optional[dict]:
             "sentiment": r.sentiment,
         })
 
-    # Counts (article-based — detail view is a single-frame zoom-in).
-    articles_total = len(articles)
-    week_iso = week_start.isoformat()
-    articles_this_week = sum(1 for a in articles
-                             if a["published_at"] and a["published_at"] >= week_iso)
+    # Counts — use the canonical Option-C definition so the detail page
+    # agrees with the list endpoint. `articles_this_week` is now the count
+    # of distinct CLUSTERS with any article in the last 7 days, not the raw
+    # article count (which over-counted by ~wire-syndication factor).
+    from app.services.frame_counts import frame_pulse_counts
+    _pulse = frame_pulse_counts(db, [frame_id], now=now)
+    this_week_c, _last_week_c, total_c = _pulse.get(frame_id, (0, 0, 0))
+    articles_total = total_c
+    articles_this_week = this_week_c
 
     # Activity by day, broken out by outlet tier so the detail page can render
     # stacked bars showing WHO is covering the story each day, not just volume.
@@ -1871,14 +2449,25 @@ def get_frame_detail(db: "Session", frame_id: int) -> Optional[dict]:
         elif ot == "blog": tiers["blog"] += c
         elif ot == "social": tiers["social"] += c
 
-    # First/last seen from FCM rows.
+    # First/last seen from FCM rows. Skip dates earlier than the plausibility
+    # floor — those come from articles whose feed pubDate was misparsed
+    # (some as far back as year 0001), which would otherwise show as
+    # "First Seen Sep 2, 2016" for a 2026-era frame.
     fcm_dates = (
         db.query(FrameClusterMatch.first_seen_at, FrameClusterMatch.last_seen_at)
         .filter(FrameClusterMatch.frame_id == frame_id)
         .all()
     )
-    first_seen = min((r.first_seen_at for r in fcm_dates if r.first_seen_at), default=None)
-    last_seen = max((r.last_seen_at for r in fcm_dates if r.last_seen_at), default=None)
+    first_seen = min(
+        (r.first_seen_at for r in fcm_dates
+         if r.first_seen_at and r.first_seen_at >= _PLAUSIBLE_DATE_FLOOR),
+        default=None,
+    )
+    last_seen = max(
+        (r.last_seen_at for r in fcm_dates
+         if r.last_seen_at and r.last_seen_at >= _PLAUSIBLE_DATE_FLOOR),
+        default=None,
+    )
 
     # Notable quotes — top 3 article summaries, ranked by outlet authority.
     # Skip LLM-refusal placeholders (paywall / empty-body articles).
@@ -1901,11 +2490,13 @@ def get_frame_detail(db: "Session", frame_id: int) -> Optional[dict]:
         for a in quotes_pool[:3]
     ]
 
+    from app.services.subject_classifier import get_subject_classifier
     return {
         "id": frame.id,
         "name": frame.name,
         "description": frame.description,
         "owner_type": frame.owner_type,
+        "subject_type": frame.subject_type or get_subject_classifier(db)(frame.name),
         "source": frame.source,
         "created_at": frame.created_at.isoformat() if frame.created_at else None,
         "first_seen_at": first_seen.isoformat() if first_seen else None,

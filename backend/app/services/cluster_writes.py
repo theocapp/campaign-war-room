@@ -51,6 +51,7 @@ def upsert_frame_match(
     matched_by: str = "llm",
     representative_snapshot_ts: Optional[datetime] = None,
     article_date: Optional[datetime] = None,
+    frame_content_hash: Optional[str] = None,
 ) -> None:
     """Insert a FrameClusterMatch row, or update confidence/timestamps on an
     existing one. Idempotent.
@@ -60,6 +61,9 @@ def upsert_frame_match(
     `last_seen_at` uses MAX — never regresses to an older date.
     `article_date` should be the article's published_at so historical coverage
     is dated correctly rather than stamped with today's ingestion time.
+    `frame_content_hash` is the SHA1 of the frame's name+description at match
+    time. Overwrites on conflict — the latest matcher wins, since a re-match
+    against the current frame text is the most authoritative record.
     """
     snapshot = _dt_str(representative_snapshot_ts or datetime.utcnow())
     match_date = _dt_str(article_date or datetime.utcnow())
@@ -68,16 +72,19 @@ def upsert_frame_match(
             """
             INSERT INTO frame_cluster_matches
               (frame_id, story_cluster_id, confidence, matched_by, source_type,
-               representative_snapshot_ts, first_seen_at, last_seen_at)
+               representative_snapshot_ts, first_seen_at, last_seen_at,
+               frame_content_hash)
             VALUES
               (:frame_id, :cluster_id, :confidence, :matched_by, :source_type,
-               :snapshot, :match_date, :match_date)
+               :snapshot, :match_date, :match_date, :frame_content_hash)
             ON CONFLICT(frame_id, story_cluster_id) DO UPDATE SET
               confidence = MAX(excluded.confidence, frame_cluster_matches.confidence),
               first_seen_at = MIN(excluded.first_seen_at, frame_cluster_matches.first_seen_at),
               last_seen_at = MAX(excluded.last_seen_at, frame_cluster_matches.last_seen_at),
               source_type = excluded.source_type,
-              representative_snapshot_ts = excluded.representative_snapshot_ts
+              representative_snapshot_ts = excluded.representative_snapshot_ts,
+              frame_content_hash = COALESCE(excluded.frame_content_hash,
+                                            frame_cluster_matches.frame_content_hash)
             """
         ),
         {
@@ -88,6 +95,7 @@ def upsert_frame_match(
             "source_type": source_type,
             "snapshot": snapshot,
             "match_date": match_date,
+            "frame_content_hash": frame_content_hash,
         },
     )
 

@@ -1,13 +1,60 @@
+import re
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, UniqueConstraint
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, validates
 from app.db import Base
+
+
+def _humanize_name(name):
+    """Normalize a person's name to "First [Middle] Last" form.
+
+    Handles the FEC SHOUTY "LAST, FIRST [MIDDLE]" format ("COGNETTI, PAIGE")
+    that the FEC catalog uses everywhere. Also handles already-human names
+    idempotently. Used by @validates hooks on CampaignConfig.candidate_name
+    and Opponent.name so every consumer downstream sees the clean form,
+    regardless of which write path created the row.
+
+    Examples:
+      "COGNETTI, PAIGE"       -> "Paige Cognetti"
+      "BRESNAHAN, ROBERT P."  -> "Robert P. Bresnahan"
+      "Paige Cognetti"        -> "Paige Cognetti" (idempotent)
+      "paige  cognetti"       -> "Paige Cognetti" (whitespace + case)
+      None / ""               -> None / ""
+    """
+    if name is None:
+        return None
+    s = str(name).strip()
+    if not s:
+        return s
+    if "," in s:
+        last, _, rest = s.partition(",")
+        first = rest.strip()
+        last = last.strip()
+        if first and last:
+            s = f"{first} {last}"
+    # Collapse multiple spaces, title-case each component.
+    s = re.sub(r"\s+", " ", s).strip()
+    # Use a custom title-case so "Robert P." doesn't lose the period and
+    # "Mc"/"O'" capitalization isn't mangled — Python's .title() is wrong
+    # for "Mcdonald" → "Mcdonald" instead of "McDonald", but that's
+    # acceptable trade-off versus the risk of over-cleverness.
+    return " ".join(w[:1].upper() + w[1:].lower() if w else w for w in s.split(" "))
 
 
 class CampaignConfig(Base):
     __tablename__ = "campaign_config"
     id = Column(Integer, primary_key=True)
     candidate_name = Column(String, nullable=False)
+
+    @validates("candidate_name")
+    def _normalize_candidate_name(self, _key, value):
+        # Storage-time normalization: every write goes through this hook,
+        # regardless of which route/service/seed created the row. So
+        # downstream consumers (search-query monitors, Bluesky firehose
+        # keyword set, Mastodon hashtag derivation, LLM prompts, UI
+        # display) always see the clean "Paige Cognetti" form, not the
+        # FEC SHOUTY "COGNETTI, PAIGE".
+        return _humanize_name(value)
     party = Column(String)
     race = Column(String)
     district = Column(String)
@@ -27,6 +74,14 @@ class CampaignConfig(Base):
     trends_keywords = Column(Text)  # JSON array of extra Google Trends terms
     historical_backfill_completed = Column(Boolean, default=False)
     extended_backfill_completed = Column(Boolean, default=False)
+    # JSON-encoded list[str] of bare social identifiers (the part AFTER
+    # the platform URL prefix, e.g. ["mayorpaigecognetti", "paigegcognetti"]).
+    # The RSSHub adapter in source_discovery.py iterates each and emits one
+    # feed per handle — politicians routinely run multiple parallel accounts
+    # (campaign / office / personal) and we want signal from all of them.
+    # NULL or empty list = no social feeds get generated for that platform.
+    instagram_handles = Column(Text, nullable=True)
+    facebook_pages = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -59,6 +114,10 @@ class RaceCandidate(Base):
     id = Column(Integer, primary_key=True)
     race_id = Column(Integer, ForeignKey("race_directory.id"), nullable=False)
     candidate_name = Column(String, nullable=False)
+
+    @validates("candidate_name")
+    def _normalize_race_candidate_name(self, _key, value):
+        return _humanize_name(value)
     party = Column(String, nullable=True)
     is_incumbent = Column(Boolean, default=False)
     role = Column(String, default="other")
@@ -126,6 +185,25 @@ class SourceItem(Base):
     # opponent_attacks, etc.) cached so rematch can skip re-reading article text.
     structured_extraction = Column(Text, nullable=True)
     outlet_id = Column(Integer, ForeignKey("outlets.id"), nullable=True)
+    # For aggregator-sourced items (Google News, etc.), the underlying
+    # publisher's bare domain extracted from the feed entry. Used by
+    # feed_discovery_yield to find outlets worth pulling directly.
+    publisher_domain = Column(String, nullable=True, index=True)
+    # V13.21 — per-article perspective classification cache. Populated
+    # by article_perspective.classify() (cascading outlet bias →
+    # attribution → LLM fallback). Drives dot-level color on the
+    # narrative landscape; falls back to narrative-level owner_type
+    # when NULL. See app/services/article_perspective.py.
+    perspective = Column(String, nullable=True)             # pro_candidate | pro_opponent | neutral | NULL
+    perspective_method = Column(String, nullable=True)      # existing | outlet_bias | attribution | llm | fallback
+    perspective_confidence = Column(String, nullable=True)  # high | medium | low
+    perspective_reason = Column(String, nullable=True)      # one-line justification (for debugging)
+    # Cached embedding used by the rematch gate (narrative_frames._shortlist_frames_for_article).
+    # JSON-encoded float list, populated lazily on first rematch or via the backfill script
+    # (app/scripts/backfill_frame_match_embeddings.py). Model column lets the gate detect
+    # stale embeddings when the provider changes — see embeddings.py provider policy.
+    frame_match_embedding = Column(Text, nullable=True)
+    frame_match_embedding_model = Column(String, nullable=True)
 
     issue_mentions = relationship("IssueMention", back_populates="source_item", cascade="all, delete-orphan")
     opponent_activities = relationship("OpponentActivity", back_populates="source_item", cascade="all, delete-orphan")
@@ -162,6 +240,11 @@ class Opponent(Base):
     __tablename__ = "opponents"
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
+
+    @validates("name")
+    def _normalize_opponent_name(self, _key, value):
+        # See _normalize_candidate_name on CampaignConfig for rationale.
+        return _humanize_name(value)
     office = Column(String)
     party = Column(String)
     notes = Column(Text)
@@ -170,6 +253,10 @@ class Opponent(Base):
     # name-format changes don't create duplicate rows. Nullable for
     # manually-created opponents.
     fec_candidate_id = Column(String, unique=True)
+    # See CampaignConfig.instagram_handles for the storage convention —
+    # JSON-encoded list[str] of bare identifiers, no URL prefix.
+    instagram_handles = Column(Text, nullable=True)
+    facebook_pages = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     activities = relationship("OpponentActivity", back_populates="opponent", cascade="all, delete-orphan")
@@ -200,6 +287,74 @@ class RssFeed(Base):
     active = Column(Boolean, default=True)
     last_fetched_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TrackedThirdPartyAccount(Base):
+    """User-confirmed third-party accounts that talk about this race.
+
+    Distinct from the candidate's own and opponents' own social handles
+    (those live as JSON-list columns on CampaignConfig and Opponent).
+    These are local news on FB, county committees, PACs, statewide
+    subreddits, journalists covering the race — anyone whose posts the
+    user wants ingested even though they're not the candidate or
+    opponent themselves.
+
+    Each row preserves the discovery context (snippet, role) so the
+    user remembers why they added it. The (platform, identifier) unique
+    constraint prevents re-runs of the discovery flow from creating
+    duplicate rows.
+    """
+    __tablename__ = "tracked_third_party_accounts"
+    id = Column(Integer, primary_key=True)
+    # Matches the discovery service's sub_platform vocab:
+    # instagram | facebook | bluesky | reddit_subreddit | reddit_user | youtube
+    platform = Column(String, nullable=False)
+    # Bare identifier — handle / page slug / subreddit name / @handle / UCxxxx
+    identifier = Column(String, nullable=False)
+    display_name = Column(String, nullable=True)
+    url = Column(String, nullable=False)
+    inferred_role = Column(String, nullable=True)
+    snippet = Column(Text, nullable=True)
+    # NULL when the platform needs IG/FB gating OR a second lookup to
+    # resolve a channel_id (YouTube @handle form).
+    rss_url = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("platform", "identifier", name="uq_tracked_account"),
+    )
+
+
+class SearchResultCache(Base):
+    """Disk-backed cache for web-search results.
+
+    Wraps every `search_provider.search()` call so dev iteration and
+    repeated user clicks don't burn through the Tavily free-tier quota
+    (1000 credits/month per key). TTL defaults to 7 days — handles and
+    page slugs change rarely, and the only real cost of staleness is
+    that a brand-new account created in the last week wouldn't surface
+    yet in cached results.
+
+    Key: (provider, query, limit_n). The `limit_n` is part of the key
+    because the same query at limit=4 and limit=8 returns different
+    result sets — truncating limit=8 to a cached limit=4 would silently
+    drop hits.
+    """
+    __tablename__ = "search_result_cache"
+    id = Column(Integer, primary_key=True)
+    provider = Column(String, nullable=False)
+    query = Column(Text, nullable=False)
+    limit_n = Column(Integer, nullable=False)
+    cached_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    # JSON-encoded list of SearchResult records.
+    results_json = Column(Text, nullable=False)
+    # Inner provider's status message if any (e.g. "all keys exhausted").
+    message = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("provider", "query", "limit_n", name="uq_search_cache_key"),
+    )
 
 
 class SourceMonitor(Base):
@@ -280,6 +435,12 @@ class Outlet(Base):
     # Used to calculate reach: reach = monthly_visitors * per_article_factor (default 0.003).
     # NULL means fall back to authority_score-based weighting.
     monthly_visitors = Column(Integer, nullable=True)
+    # Source reliability tagging (GKG principle #1 — provenance).
+    # bias_label: 'left' | 'center-left' | 'center' | 'center-right' | 'right' | null
+    # reliability_score: 0–100, Ad Fontes-style. 64+ = good factual reporting,
+    # 32–63 = analysis/opinion mix, <32 = inaccurate or fabricated content.
+    bias_label = Column(String, nullable=True)
+    reliability_score = Column(Integer, nullable=True)
     active = Column(Boolean, default=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -292,6 +453,11 @@ class NarrativeFrame(Base):
     name = Column(String, nullable=False)
     description = Column(Text)
     owner_type = Column(String, default="candidate")  # candidate | opponent | media
+    # Explicit subject classification — who the frame is ABOUT (vs owner_type
+    # which is who BENEFITS). NULL = fall back to the name-based heuristic in
+    # subject_classifier.py. Set explicitly when the user picks a quadrant in
+    # the UI (e.g. "Cognetti's Offense" = owner=candidate, subject=opponent).
+    subject_type = Column(String, nullable=True)  # candidate | opponent | media | NULL
     active = Column(Boolean, default=True)
     source = Column(String, default="human")  # human | llm
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -455,6 +621,11 @@ class FrameClusterMatch(Base):
     representative_snapshot_ts = Column(DateTime, nullable=True)
     first_seen_at = Column(DateTime, default=datetime.utcnow)
     last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # SHA1 of the frame's name+description at the time this match was made.
+    # When the frame is edited, the hash changes and this match becomes stale —
+    # callers can query for matches whose frame_content_hash doesn't equal
+    # the frame's current hash to find/clean stale data.
+    frame_content_hash = Column(String, nullable=True)
 
 
 class ClusterOpponentActivity(Base):
@@ -549,3 +720,571 @@ class CandidateFrame(Base):
     resolved_to_frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=True)
     resolved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TopicRegionLabel(Base):
+    """Persistent topic-region label for the Landscape page.
+
+    A "topic region" is a HDBSCAN cluster over established narrative-frame
+    UMAP positions (see services/topic_regions.py). The label is an LLM-
+    generated short phrase like "Healthcare" or "Insider Trading" — or a
+    user-edited override.
+
+    Identity problem: HDBSCAN cluster IDs are not stable across recomputes.
+    Frame membership IS stable. So we identify a region by its sorted set
+    of member frame IDs; on recompute we fuzzy-match new clusters against
+    persisted rows by Jaccard overlap.
+
+    Why a separate table (not a column on NarrativeFrame):
+      - A frame can belong to a region; a region is a SET of frames. 1:many.
+      - User-edited labels need to survive frame add/remove with only minor
+        membership shift — Jaccard ≥ 0.5 preserves the label.
+      - Cheap to wipe and rebuild if HDBSCAN params change.
+    """
+    __tablename__ = "topic_region_labels"
+    id = Column(Integer, primary_key=True)
+    # JSON-encoded sorted list of frame_ids that defined this region at
+    # creation time. SQLite can't enforce list ordering, so we sort + JSON
+    # at write time and parse at read time.
+    member_frame_ids_json = Column(Text, nullable=False)
+    label = Column(String, nullable=False)
+    # True if a user edited this label. When true, the label survives all
+    # recomputes via Jaccard match and never gets overwritten by the LLM.
+    edited_by_user = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProposedClusterTriage(Base):
+    """AI triage verdict for a proposed HDBSCAN cluster.
+
+    Per Phase B of the proposed-narrative auto-triage work. The
+    narrative_triage service walks the current proposed clusters and,
+    for each one, decides one of:
+
+      - auto_reject           Noise heuristic (single outlet, tiny cluster).
+                              Hides it from the review queue.
+      - auto_merge            LLM judged this cluster IS a tracked narrative
+                              already. suggested_merge_frame_id points at it.
+      - auto_promote_suggested LLM judged it's clearly worth tracking. The UI
+                              should pre-fill the Promote modal with the
+                              suggested name/description/owner so the human
+                              just hits Confirm.
+      - human_review          Ambiguous. The UI shows it un-pre-filled.
+
+    Same identity problem as TopicRegionLabel: HDBSCAN cluster IDs reshuffle
+    every run, but the SET of candidate_frame_ids in a cluster is stable
+    across runs unless the AI re-scores something. We fingerprint by sorted
+    member candidate_frame_ids (sha256 hex) so a cluster keeps its triage
+    verdict across landscape recomputes.
+
+    Additive-only — no changes to existing tables. SQLite auto-creates via
+    Base.metadata.create_all() in db.init_db().
+    """
+    __tablename__ = "proposed_cluster_triage"
+    id = Column(Integer, primary_key=True)
+    # sha256 hex of "|".join(sorted str(candidate_frame_ids)) — the cluster's
+    # stable identity across landscape recomputes.
+    cluster_fingerprint = Column(String, nullable=False, unique=True, index=True)
+    # JSON-encoded sorted list of member candidate_frame_ids, kept for
+    # debugging + future "did the membership drift?" checks.
+    member_candidate_frame_ids_json = Column(Text, nullable=False)
+    # auto_reject | auto_merge | auto_promote_suggested | human_review
+    verdict = Column(String, nullable=False, index=True)
+    # 0.0–1.0 model-reported confidence. For auto_reject (heuristic) we use
+    # 1.0 to signal "decided without LLM."
+    confidence = Column(Float, nullable=False, default=0.0)
+    # Free-text explanation from the LLM (or "noise heuristic" for auto_reject)
+    reasoning = Column(Text, nullable=True)
+    # Set when verdict == auto_merge. FK is loose (no constraint) so deleting
+    # a tracked frame doesn't orphan-error this row; the consumer should
+    # re-validate.
+    suggested_merge_frame_id = Column(Integer, nullable=True, index=True)
+    # Set when verdict == auto_promote_suggested. The LLM's improved
+    # naming/description; the UI pre-fills the Promote modal with these.
+    suggested_name = Column(String, nullable=True)
+    suggested_description = Column(Text, nullable=True)
+    suggested_owner_type = Column(String, nullable=True)  # candidate|opponent|media
+    # User actions: applying or overriding the verdict.
+    # dismissed_at: user said "ignore this proposal" (acts like auto_reject).
+    # applied_at:   user accepted the verdict (e.g. confirmed a suggested
+    #               promote/merge). Triage row stays so we can audit later.
+    dismissed_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    # Which LLM made the verdict (e.g. "gpt-4o", "claude-sonnet-4-5"). Useful
+    # for the Phase C A/B test bookkeeping.
+    judged_by_model = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProposedClusterSnapshot(Base):
+    """Persistent snapshot of a proposed-narrative cluster.
+
+    Stops the Review Queue's Proposed Narratives list from mutating between
+    user visits. Previously the list was a live HDBSCAN compute over a 21-day
+    rolling window — clusters appeared, disappeared, and reshuffled as new
+    articles arrived. The user reported (correctly) that this made the
+    workflow untrustworthy: promote a cluster, come back later, and the
+    list has changed without action.
+
+    This table persists the most recent snapshot the user has seen. The
+    Review Queue reads from here; new HDBSCAN runs only insert/update rows
+    when explicitly triggered (manual refresh or scheduled job). User
+    actions (promote / merge / dismiss) stamp the snapshot row so it
+    disappears from the open list but stays in the table for audit.
+
+    Identity is by cluster_fingerprint (same sha256 the triage layer uses),
+    so a re-snapshot finds existing rows by overlap of member ids rather
+    than creating duplicates.
+    """
+    __tablename__ = "proposed_cluster_snapshots"
+    id = Column(Integer, primary_key=True)
+    # sha256 of "|".join(sorted candidate_frame_ids). Same shape as triage.
+    cluster_fingerprint = Column(String, nullable=False, unique=True, index=True)
+    # Original HDBSCAN cluster_id from the snapshot pass that wrote this row.
+    # Not stable across recomputes — kept for debugging.
+    cluster_id = Column(Integer, nullable=False)
+    representative_name = Column(String, nullable=False)
+    size = Column(Integer, nullable=False)
+    outlet_count = Column(Integer, nullable=False)
+    # JSON: list[str] of outlet names.
+    outlet_names_json = Column(Text, nullable=False)
+    # JSON: dict with national/regional/local/blog/social int counts.
+    outlet_tier_counts_json = Column(Text, nullable=False)
+    owner_type_hint = Column(String, nullable=False)
+    subject_type_hint = Column(String, nullable=True)
+    # JSON: sorted list[int] of contributing candidate_frame_ids.
+    member_candidate_frame_ids_json = Column(Text, nullable=False)
+    # JSON: list of NarrativeLandscapePoint dicts (x/y/cluster_id/quote/etc).
+    # Kept so the frontend's existing rendering code works unchanged — we
+    # serve the same shape the live landscape produces.
+    points_json = Column(Text, nullable=False)
+    # Cluster centroid in UMAP space — used by the landscape map view.
+    x = Column(Float, nullable=True)
+    y = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Updated when a re-snapshot pass finds this cluster again (size may
+    # have grown, etc.). The user-visible "this cluster has been here since"
+    # is `created_at`; `refreshed_at` is just bookkeeping.
+    refreshed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # User-action stamps. A row with either non-null disappears from the
+    # open snapshot list. Both null = still pending in the queue.
+    dismissed_at = Column(DateTime, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    # When applied: which narrative frame the user promoted/merged this into.
+    applied_to_frame_id = Column(Integer, nullable=True, index=True)
+
+
+# ─── Feature A: Knowledge-graph entity extraction (V14 — Phase 2 schema) ─────
+# Per backend/docs/entity_schema.md — 6 entity types, 11 relationship verbs,
+# per-race seeded canonical entities. These tables are write-empty until the
+# extraction pipeline (Phase 3) runs over the article corpus. Existing data is
+# untouched; the new tables add to the schema, they don't modify it.
+
+class Entity(Base):
+    """Canonical entity — a person, organization, bill, event, location, or
+    issue tracked across articles. Pre-seeded from
+    backend/data/canonical_entities.<DISTRICT>.json; the extraction layer
+    auto-discovers new ones and adds them with a generated canonical_id."""
+    __tablename__ = "entities"
+    id = Column(Integer, primary_key=True)
+    # Stable string ID like "person:cognetti" or auto-generated "person:auto:<n>".
+    # UNIQUE — drives canonicalization and is the FK target from relations.
+    canonical_id = Column(String, unique=True, nullable=False, index=True)
+    type = Column(String, nullable=False, index=True)  # person|organization|bill|event|location|issue
+    name = Column(String, nullable=False)
+    # JSON list of strings — every other surface form this entity is known by.
+    # Used by the extractor's seed-match step before falling back to embedding.
+    aliases = Column(Text, nullable=True)  # JSON-encoded list
+    description = Column(Text, nullable=True)
+    affiliation = Column(String, nullable=True)  # D|R|I|null
+    # Optional type-specific metadata (JSON-encoded). Avoids per-type tables.
+    # Examples: person → {"role": "mayor", "city": "Scranton"}
+    #           bill → {"status": "pending", "congress_session": "119"}
+    metadata_json = Column(Text, nullable=True)
+    # Auto-updated by the extraction layer:
+    mention_count = Column(Integer, default=0)
+    source_count = Column(Integer, default=0)  # distinct articles
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True)
+    # Seed-vs-discovered:
+    seeded = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class EntityMention(Base):
+    """One row per (article, entity) pair. Records the surface text the
+    entity appeared as in that article, plus the extractor's confidence.
+    Used to compute mention counts and to find supporting evidence for
+    relations."""
+    __tablename__ = "entity_mentions"
+    id = Column(Integer, primary_key=True)
+    article_id = Column(Integer, ForeignKey("source_items.id"), index=True, nullable=False)
+    entity_id = Column(Integer, ForeignKey("entities.id"), index=True, nullable=False)
+    surface_text = Column(String, nullable=True)  # what the article actually said
+    confidence = Column(String, nullable=False, default="medium")  # high|medium|low
+    extraction_method = Column(String, nullable=False, default="llm")  # seed|alias|embedding|llm
+    created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("article_id", "entity_id", name="uq_entity_mention_article_entity"),
+    )
+
+
+class Claim(Base):
+    """⚠️ LEGACY — DEPRECATED AFTER v15.0 ⚠️
+
+    Triple-shaped claim layer from extractor versions v14.1 → v14.7.
+    DO NOT write to this table going forward. New extractions write to
+    ClaimRecord (claim_records) instead — a quote-anchored shape that
+    avoids the structural hallucination problems we hit forcing the LLM
+    to emit (subject, predicate, object) triples.
+
+    Failure mode that retired this design (documented at v14.7):
+      The LLM systematically projects triple-shaped content onto articles
+      whether or not the article contains it — e.g. tagging "Cognetti's
+      office did not respond" as Cognetti→attended→rally because the
+      schema demands a subject-event edge. Tightening the prompt makes
+      this worse, not better. The shape itself fights the corpus.
+
+    Original docstring follows (for historical context only).
+    ────────────────────────────────────────────────────────────────────
+
+    A single, identifiable assertion about (subject, predicate, object).
+
+    The claim is the unit between extraction and the entity-relation graph.
+    Articles support (or contest) claims; the entity_relations row for the
+    same (subject, predicate, object) is now a derived denormalization of
+    the underlying claim — weight = count of supporting articles, evidence
+    aggregated from supporting articles, etc.
+
+    Lifecycle (`status`):
+      - active     : the claim stands; supported by ≥1 article
+      - contested  : at least one article disputes the claim
+      - retracted  : human review marked this as wrong / extraction error
+
+    The (subject_id, predicate, object_id) triple is unique — same logical
+    fact = same claim, regardless of how many articles support it.
+    """
+    __tablename__ = "claims"
+    id = Column(Integer, primary_key=True)
+    subject_id = Column(Integer, ForeignKey("entities.id"), index=True, nullable=False)
+    predicate = Column(String, nullable=False, index=True)
+    object_id = Column(Integer, ForeignKey("entities.id"), index=True, nullable=False)
+    # Dimensional decomposition derived from predicate (stance.py).
+    # Stored explicitly so contradictions can be queried directly.
+    procedural = Column(String, nullable=True)
+    rhetorical = Column(String, nullable=True)
+    ideological = Column(String, nullable=True)
+    # Lifecycle
+    status = Column(String, nullable=False, default="active")  # active | contested | retracted
+    retracted_at = Column(DateTime, nullable=True)
+    retracted_by = Column(String, nullable=True)
+    retracted_reason = Column(Text, nullable=True)
+    # Provenance — first/last article that asserted this claim
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True)
+    # Best representative quote (UI-facing); per-article quotes live in claim_supports
+    sample_quote = Column(Text, nullable=True)
+    confidence = Column(String, nullable=False, default="medium")
+    extractor_version = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("subject_id", "predicate", "object_id", name="uq_claim_triple"),
+    )
+
+
+class ClaimSupport(Base):
+    """⚠️ LEGACY — DEPRECATED AFTER v15.0 (paired with Claim) ⚠️
+
+    Per-article stance rows for the triple-shaped Claim layer.
+    Replaced by ClaimRecord (claim_records), which collapses
+    "claim + per-article support" into a single quote-anchored row.
+
+    N-to-N between claims and articles. Each row = one article either
+    supporting or contesting a claim.
+
+    `stance` = 'supporting' (default) — article asserts the claim
+    `stance` = 'contesting' — article disputes the claim (e.g., fact-check)
+    """
+    __tablename__ = "claim_supports"
+    id = Column(Integer, primary_key=True)
+    claim_id = Column(Integer, ForeignKey("claims.id"), index=True, nullable=False)
+    article_id = Column(Integer, ForeignKey("source_items.id"), index=True, nullable=False)
+    stance = Column(String, nullable=False, default="supporting")  # supporting | contesting
+    sample_quote = Column(Text, nullable=True)
+    confidence = Column(String, nullable=False, default="medium")
+    extractor_version = Column(String, nullable=True)
+    extracted_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("claim_id", "article_id", name="uq_claim_support_pair"),
+    )
+
+
+class ClaimRecord(Base):
+    """v15.0+ — Quote-anchored claim record. The new source-of-truth
+    extraction output, replacing the triple-shaped Claim/ClaimSupport
+    pair.
+
+    DESIGN PRINCIPLE: every claim is grounded in a verbatim text span
+    from a single article. There is NO inferred predicate, NO synthesized
+    subject/object edge. The LLM's job is reduced to selecting a span
+    of text and identifying which canonical entities appear in it.
+
+    Quality invariants enforced at persist time:
+      - evidence_span must be a verbatim substring of source article text
+      - every entity in claim_record_entities must appear in evidence_span
+        (by name OR alias)
+      - evidence_start_char / evidence_end_char locate the span in
+        source_items.raw_text for deterministic UI highlighting + audit
+
+    Quote deduplication: evidence_hash is sha1(normalized_evidence_span),
+    UNIQUE across the table. Identical AP-style syndicated phrasing
+    naturally collapses to one row, regardless of which outlets repeated
+    it (article_id of the FIRST observation wins; later observations
+    add an entity_mention but don't duplicate the quote claim).
+
+    Labels are SHALLOW (statement, attack, defense, endorsement,
+    policy_position, vote, announcement, commitment) and OPTIONAL. The
+    model is encouraged to leave label=NULL when uncertain. We deliberately
+    avoid relational predicates here — if you find yourself adding "target"
+    or "directionality" fields, you are reintroducing the v14.x failure
+    mode. RESIST.
+
+    Future clustering layer (post-v15.0): claim_record embeddings get
+    HDBSCAN-clustered the same way frame_variants are. Each cluster
+    becomes a "narrative assertion" — the real intelligence object.
+    Until then, individual claim_records are the unit of evidence.
+    """
+    __tablename__ = "claim_records"
+    id = Column(Integer, primary_key=True)
+    article_id = Column(Integer, ForeignKey("source_items.id"), index=True, nullable=False)
+    # The verbatim quote span from source_items.raw_text. Must be a substring.
+    evidence_span = Column(Text, nullable=False)
+    # Character offsets locating evidence_span in source_items.raw_text.
+    # Used for exact UI highlighting + provenance audit + future span-based
+    # training/eval. Computed at persist time, not by the LLM.
+    evidence_start_char = Column(Integer, nullable=True)
+    evidence_end_char = Column(Integer, nullable=True)
+    # SHA1 of normalized evidence_span (lowercased, whitespace-collapsed,
+    # quote-marks-unified). UNIQUE — natural dedup of syndicated phrasing.
+    evidence_hash = Column(String(40), nullable=False, index=True)
+    # Optional shallow label. One of {statement, attack, defense, endorsement,
+    # policy_position, vote, announcement, commitment} or NULL.
+    label = Column(String, nullable=True, index=True)
+    confidence = Column(String, nullable=False, default="medium")  # high|medium|low
+    extractor_version = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("evidence_hash", name="uq_claim_record_evidence_hash"),
+    )
+
+
+class ClaimRecordEntity(Base):
+    """v15.0+ — Many-to-many between claim_records and entities.
+
+    Each row says: this entity appears in this claim's evidence_span.
+    The role/directionality of that appearance is NOT represented —
+    we deliberately do not record "this entity is the subject" or
+    "this entity is the target". If you need that, the quote itself
+    is the source of truth; do not re-derive a predicate.
+    """
+    __tablename__ = "claim_record_entities"
+    id = Column(Integer, primary_key=True)
+    claim_record_id = Column(Integer, ForeignKey("claim_records.id"), index=True, nullable=False)
+    entity_id = Column(Integer, ForeignKey("entities.id"), index=True, nullable=False)
+    # The surface text the entity appeared as in this quote (e.g. "the mayor"
+    # for entity_id pointing at Cognetti). Useful for span-level highlighting.
+    surface_text = Column(String, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("claim_record_id", "entity_id", name="uq_claim_record_entity_pair"),
+    )
+
+
+class EntityReviewDecision(Base):
+    """Human review decisions on entity-level review-queue items.
+
+    item_type identifies the surfaced pattern (contradiction, canonicalization
+    match, partisan suspect, domain/range violation, etc.). item_key is a
+    deterministic identifier for the specific item — e.g. for a contradiction
+    it might be "contradiction-{subj_id}-{obj_id}". Decisions are sticky:
+    once recorded, the listing endpoint stops surfacing that item.
+
+    decision values: "approve", "reject", "skip"
+      - approve: the surfaced item is correct, leave it / apply the action
+      - reject: the surfaced item is wrong, action should not be applied
+      - skip: user deferred — may surface again later
+    """
+    __tablename__ = "entity_review_decisions"
+    id = Column(Integer, primary_key=True)
+    item_type = Column(String, nullable=False, index=True)
+    item_key = Column(String, nullable=False, index=True)
+    decision = Column(String, nullable=False)  # approve|reject|skip
+    notes = Column(Text, nullable=True)
+    decided_at = Column(DateTime, default=datetime.utcnow)
+    decided_by = Column(String, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("item_type", "item_key", name="uq_entity_review_decision_item"),
+    )
+
+
+class EntityRelation(Base):
+    """⚠️ DEPRECATED FOR ACTION PREDICATES AFTER v15.0 ⚠️
+
+    After v15.0 this table is FROZEN for the action predicates
+    (endorses, criticizes, attacks, voted_for, voted_against, co_sponsored,
+    attended). New LLM extractions do NOT write action-predicate rows here.
+
+    Structural predicates (`represents`, `member_of`, `predecessor_of`)
+    sourced from curated seed files (e.g. role_transitions.PA-08.json)
+    continue to land here — those are stable, auditable facts that don't
+    suffer the LLM-extraction failure mode.
+
+    All 1,786 existing rows remain readable; the EntityNetwork canvas
+    still displays them as edges. The triage status is:
+      - row written by seed/curated source → live
+      - row written by v14.x LLM extraction → frozen, may decay in
+        usefulness as the claim_records system supersedes it
+
+    Original docstring follows (for historical context only).
+    ────────────────────────────────────────────────────────────────────
+
+    A subject-predicate-object fact extracted from articles. Weight is
+    incremented as more articles support the same relation. sample_quote
+    holds the best supporting excerpt; source_articles holds the full list.
+
+    Temporal validity (GKG principle #8 — facts decay):
+      - For role-type predicates (`represents`, `member_of`, `predecessor_of`):
+        valid_from / valid_to bracket the duration of the role.
+      - For event-type predicates (`voted_for`, `endorses`, etc.): valid_from
+        is the event date; valid_to is normally NULL (events don't expire).
+      - NULL valid_from means "validity unknown" (most extracted relations).
+      - NULL valid_to means "still valid as of last observation."
+    """
+    __tablename__ = "entity_relations"
+    id = Column(Integer, primary_key=True)
+    subject_id = Column(Integer, ForeignKey("entities.id"), index=True, nullable=False)
+    predicate = Column(String, nullable=False, index=True)  # endorses|criticizes|attacks|voted_for|voted_against|co_sponsored|represents|member_of|attended|donated_to|predecessor_of
+    object_id = Column(Integer, ForeignKey("entities.id"), index=True, nullable=False)
+    weight = Column(Integer, default=1)  # # supporting articles
+    first_seen = Column(DateTime, nullable=True)
+    last_seen = Column(DateTime, nullable=True)
+    valid_from = Column(DateTime, nullable=True)  # role start / event date
+    valid_to = Column(DateTime, nullable=True)    # role end (NULL = current)
+    sample_quote = Column(Text, nullable=True)
+    # JSON list of source_item ids supporting this relation, capped to 50
+    # most-recent. Beyond 50 we just rely on weight.
+    source_articles = Column(Text, nullable=True)  # JSON list of int
+    # GKG principle #6 — per-edge provenance. JSON array of evidence dicts:
+    # [{article_id, sample_quote, confidence, extracted_at, extractor_version}].
+    # Capped at 50 most-recent entries. New persists write here; old persists
+    # (pre-V14.2) populated only source_articles + sample_quote — those rows
+    # are migrated lossy by scripts/entity_evidence_migrate.py.
+    evidence_json = Column(Text, nullable=True)  # JSON list of dicts
+    confidence = Column(String, nullable=False, default="medium")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("subject_id", "predicate", "object_id", name="uq_entity_relation_triple"),
+    )
+
+
+class RaceSentiment(Base):
+    """External 'how the race is going' signals: prediction markets + forecaster ratings.
+
+    Stores the CURRENT value per source (one row per source). History lives
+    in `race_sentiment_snapshots` so this row can be read cheaply by the
+    Dashboard without scanning a time-series. Kept deliberately flat:
+    markets populate (candidate_pct, opponent_pct, delta_7d) and leave the
+    rating fields null; forecasters populate (rating_label, rating_min_pct,
+    rating_max_pct, favors) and leave the market fields null. The card
+    renders by inspecting source_type.
+
+    No blended/composite number is ever stored — that's a deliberate
+    design choice. Markets and forecasters measure different things.
+
+    `external_id` + `external_metadata`: connector configuration. For
+    Polymarket: external_id is the event slug ("pa-08-house-election-winner");
+    metadata is a JSON blob holding the per-side market IDs / token IDs so the
+    fetcher knows which Yes-token corresponds to the candidate vs opponent.
+    For Cook etc.: external_id is the ratings-page URL; metadata can hold
+    any scraper hints. NULL when the row is manually-entered only.
+    """
+    __tablename__ = "race_sentiment"
+    id = Column(Integer, primary_key=True)
+    source = Column(String, nullable=False, unique=True)  # slug: polymarket | kalshi | cook | sabato | inside_elections | ddhq
+    source_type = Column(String, nullable=False)          # 'market' | 'rating'
+    display_name = Column(String, nullable=False)
+
+    # Markets — numeric percentages from the contract prices.
+    candidate_pct = Column(Float, nullable=True)
+    opponent_pct = Column(Float, nullable=True)
+    delta_7d = Column(Float, nullable=True)   # change in candidate_pct vs ~7 days ago
+
+    # Ratings — categorical band. min/max bracket the rating's implied range
+    # (e.g. Lean R ≈ 55–65). Stored as a band, never as a single fake percent.
+    rating_label = Column(String, nullable=True)     # "Toss-up" | "Lean R" | "Likely D" | etc.
+    rating_min_pct = Column(Float, nullable=True)
+    rating_max_pct = Column(Float, nullable=True)
+    favors = Column(String, nullable=True)           # 'candidate' | 'opponent' | 'tossup'
+
+    # Common metadata
+    source_url = Column(String, nullable=True)
+    as_of = Column(DateTime, nullable=True)          # when the source itself published this value
+    notes = Column(Text, nullable=True)
+
+    # Connector configuration (Phase 2). NULL = manual-entry source.
+    external_id = Column(String, nullable=True)        # event slug / ratings URL / etc.
+    external_metadata = Column(Text, nullable=True)    # JSON: per-connector config
+    last_synced_at = Column(DateTime, nullable=True)   # last successful auto-sync
+    last_sync_error = Column(Text, nullable=True)      # null on success, else short error string
+
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RaceSentimentSnapshot(Base):
+    """Time-series history of race-sentiment values.
+
+    Written by the daily scheduler job AND by the one-shot history backfill
+    that runs when a connector is first configured. The chart on the
+    forecast page reads from here. The Dashboard card reads from the
+    `race_sentiment` current-value row instead, since it doesn't need history.
+
+    Snapshots are NEVER updated in place — even if the source publishes a
+    correction. That preserves a faithful log of what we observed when.
+    """
+    __tablename__ = "race_sentiment_snapshots"
+    id = Column(Integer, primary_key=True)
+    source = Column(String, nullable=False, index=True)
+    source_type = Column(String, nullable=False)
+
+    # Market shape
+    candidate_pct = Column(Float, nullable=True)
+    opponent_pct = Column(Float, nullable=True)
+
+    # Rating shape
+    rating_label = Column(String, nullable=True)
+    rating_min_pct = Column(Float, nullable=True)
+    rating_max_pct = Column(Float, nullable=True)
+    favors = Column(String, nullable=True)
+
+    captured_at = Column(DateTime, default=datetime.utcnow, index=True)
+    source_as_of = Column(DateTime, nullable=True)   # source's own timestamp, if known
+    raw_response = Column(Text, nullable=True)        # JSON dump of the upstream payload (debug)
+
+    # Data-quality flag set at write time. True when the snapshot fails the
+    # coherence check (candidate_pct + opponent_pct outside ~100% ± spread).
+    # Real catastrophic market moves keep the two sides in sync — the only
+    # way to break coherence is desynchronized / stale / glitched scrape
+    # data. Suspect rows stay in the DB for audit but are filtered out of
+    # charts and impact computations by default.
+    suspect = Column(Boolean, default=False, nullable=False, index=True)
+    # Human-readable reason for the suspect flag, e.g. "incoherent pricing:
+    # cand+opp=103.5". Helps audit later.
+    suspect_reason = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("source", "captured_at", name="uq_race_sentiment_snapshot"),
+    )

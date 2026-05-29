@@ -54,7 +54,7 @@ def _rescore_one(db: Session, item_id: int):
     from app.models import (
         SourceItem, NarrativeFrameMention, CandidateFrame,
     )
-    from app.services import campaign_analysis
+    from app.services import campaign_analysis, race_relevance
     from app.services.campaign_analysis import framing_to_action
     from app.services.ingestion import _compute_priority_score
     from app.services import scoring
@@ -72,7 +72,12 @@ def _rescore_one(db: Session, item_id: int):
         item.summary = analysis["one_sentence"]
 
     item.race_relevance_score = analysis["relevance_score"]
+    item.race_relevance_label = race_relevance._label(analysis["relevance_score"])
     item.archived_as_irrelevant = not analysis["relevant"]
+    # Rescore may upgrade a previously-dismissed item back to relevant — clear
+    # the stale dismiss flag so it reappears in the review queue.
+    if analysis["relevant"] and item.dismissed:
+        item.dismissed = False
     item.actionability_label = framing_to_action(analysis["framing"])
     item.sentiment = analysis.get("sentiment", "neutral")
     item.source_credibility = analysis.get("source_credibility", "medium")
@@ -111,7 +116,29 @@ def _rescore_one(db: Session, item_id: int):
         db.query(NarrativeFrameMention).filter(
             NarrativeFrameMention.source_item_id == item.id
         ).delete(synchronize_session=False)
+        # Cache the active frames by id so the verifier can look up the
+        # frame name/description without an extra query per claim.
+        from app.models import NarrativeFrame
+        from app.services.extract_verifier import verify_match
+        frame_meta_cache: dict[int, NarrativeFrame] = {
+            f.id: f for f in db.query(NarrativeFrame)
+            .filter(NarrativeFrame.id.in_(per_frame_best.keys())).all()
+        }
         for fid, c in per_frame_best.items():
+            # V5 verifier — catches "topically adjacent but wrong" matches
+            # that the per-claim matcher missed. Same prompt that purged
+            # 552 bad assignments during the V12 cleanup pass.
+            frame_meta = frame_meta_cache.get(fid)
+            if frame_meta is not None:
+                verdict = verify_match(
+                    extract=c["quote"],
+                    frame_id=fid,
+                    frame_name=frame_meta.name,
+                    frame_description=frame_meta.description,
+                    source_item_id=item.id,
+                )
+                if not verdict.keep:
+                    continue  # verifier already logged the rejection
             db.add(NarrativeFrameMention(
                 frame_id=fid,
                 source_item_id=item.id,
@@ -140,11 +167,41 @@ def _rescore_one(db: Session, item_id: int):
             CandidateFrame.source_item_id == item.id,
             CandidateFrame.resolved_to_frame_id.is_(None),  # only unresolved
         ).delete(synchronize_session=False)
+
+        # Owner-type sanity check: the LLM periodically inverts the
+        # candidate↔opponent assignment (tagging an opponent-attack frame
+        # as owner=opponent because Bresnahan IS the opponent, even though
+        # the rule is "owner = who BENEFITS"). The heuristic flips clear
+        # inversions and leaves ambiguous cases alone.
+        from app.services.owner_type_correction import correct_owner_inversion
+        from app.services.narrative_frames import _campaign_context as _ctx_fn
+        try:
+            _ctx = _ctx_fn(db)
+            _candidate_name = _ctx.get("candidate") or ""
+            _opponent_names = _ctx.get("opponents") or []
+        except Exception as _exc:
+            # Context fetch failed (test DB, etc.) — fall back to no-correction.
+            logger.debug("rescore: campaign-context fetch failed: %s", _exc)
+            _candidate_name, _opponent_names = "", []
+
         for cnf in cnfs:
+            corrected_owner, correction_reason = correct_owner_inversion(
+                suggested_name=cnf["suggested_name"],
+                proposed_owner_type=cnf["owner_type"],
+                candidate_name=_candidate_name,
+                opponent_names=_opponent_names,
+            )
+            if correction_reason:
+                logger.info(
+                    "rescore: corrected owner_type for proposed frame %r "
+                    "(article %d): %s → %s — %s",
+                    cnf["suggested_name"], item.id, cnf["owner_type"],
+                    corrected_owner, correction_reason,
+                )
             db.add(CandidateFrame(
                 source_item_id=item.id,
                 suggested_name=cnf["suggested_name"],
-                owner_type_hint=cnf["owner_type"],
+                owner_type_hint=corrected_owner,
                 evidence_quote=cnf["evidence_quote"],
                 reasoning=cnf["reasoning"],
             ))

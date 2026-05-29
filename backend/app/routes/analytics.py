@@ -14,7 +14,7 @@ cluster equals one story.
 from datetime import datetime, timedelta, date
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, func
+from sqlalchemy import case, cast, func, Numeric
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -76,7 +76,8 @@ def frame_timeseries(
     reach_q = (
         db.query(
             func.date(SourceItem.published_at).label("day"),
-            func.round(func.sum(_reach_weight()), 1).label("weighted_reach"),
+            # cast to Numeric — Postgres round(double, int) doesn't exist.
+            func.round(cast(func.sum(_reach_weight()), Numeric), 1).label("weighted_reach"),
         )
         .select_from(FrameClusterMatch)
         .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
@@ -202,6 +203,10 @@ def detect_spike_alerts(db: Session) -> list[dict]:
 
         daily_avg_7d = reach_7d / 7.0
         if reach_24h >= 1.5 and daily_avg_7d > 0 and reach_24h >= daily_avg_7d * 2:
+            # Pinpoint when the burst peaked — latest article publish time
+            # among articles in this frame's matched clusters within the 24h
+            # window. Drives the Timeline view's spike-event placement.
+            peak_at = _frame_latest_article_at(db, frame.id, cutoff_24h)
             spikes.append({
                 "frame_id": frame.id,
                 "frame_name": frame.name,
@@ -209,6 +214,7 @@ def detect_spike_alerts(db: Session) -> list[dict]:
                 "count_24h": round(float(reach_24h), 1),
                 "daily_avg_7d": round(float(daily_avg_7d), 1),
                 "ratio": round(float(reach_24h) / float(daily_avg_7d), 1),
+                "peak_at": peak_at.isoformat() if peak_at else None,
             })
 
     spikes.sort(key=lambda x: x["ratio"], reverse=True)
@@ -220,13 +226,39 @@ def spike_report(db: Session = Depends(get_db)):
     return {"spikes": detect_spike_alerts(db)}
 
 
+def _frame_latest_article_at(db: Session, frame_id: int, cutoff: datetime) -> datetime | None:
+    """Return the latest published_at of any article in this frame's matched
+    clusters since `cutoff`. Used to pinpoint when a spike actually peaked.
+
+    Falls back to FrameClusterMatch.first_seen_at if no article carries a
+    published_at (some ingestion paths leave it null)."""
+    val = (
+        db.query(func.max(func.coalesce(SourceItem.published_at, FrameClusterMatch.first_seen_at)))
+        .select_from(FrameClusterMatch)
+        .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
+        .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        .filter(
+            FrameClusterMatch.frame_id == frame_id,
+            FrameClusterMatch.first_seen_at >= cutoff,
+        )
+        .scalar()
+    )
+    return val
+
+
 def _frame_reach_in_window(db: Session, frame_id: int, cutoff: datetime) -> float:
     """Sum reach_weight over every member article (any cluster matched to this
     frame) that arrived after `cutoff`. Bucket by FrameClusterMatch.first_seen_at
     so a cluster that's been attached to the frame for months doesn't keep
-    re-triggering spikes on new article evidence."""
+    re-triggering spikes on new article evidence.
+
+    Archived-as-irrelevant items are excluded — a cluster that was originally
+    relevant but whose members got archived (e.g., turned out to be image-
+    gallery pages, scraper artifacts) should not keep contributing reach to
+    spike detection.
+    """
     val = (
-        db.query(func.round(func.sum(_reach_weight()), 2))
+        db.query(func.round(cast(func.sum(_reach_weight()), Numeric), 2))
         .select_from(FrameClusterMatch)
         .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
         .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
@@ -234,6 +266,7 @@ def _frame_reach_in_window(db: Session, frame_id: int, cutoff: datetime) -> floa
         .filter(
             FrameClusterMatch.frame_id == frame_id,
             FrameClusterMatch.first_seen_at >= cutoff,
+            SourceItem.archived_as_irrelevant == False,  # noqa: E712
         )
         .scalar()
     )

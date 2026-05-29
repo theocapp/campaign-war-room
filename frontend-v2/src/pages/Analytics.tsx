@@ -16,34 +16,35 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/api/client'
+import { InfoTooltip } from '@/components/InfoTooltip'
 import type { Spike, ToneSeries, TrendSeries } from '@/api/types'
 
 const CHART_TOOLTIP_STYLE = {
   contentStyle: {
-    background: '#0e1422',
+    background: 'var(--bg-4)',
     border: '1px solid #2a3f5c',
     borderRadius: 3,
     fontSize: 11,
-    fontFamily: "'IBM Plex Mono', monospace",
-    color: '#dce7f3',
+    color: 'var(--text-1)',
   },
-  labelStyle: { color: '#7d8fa8' },
+  labelStyle: { color: 'var(--text-2)' },
 }
 
-function SectionTitle({ children }: { children: React.ReactNode }) {
+function SectionTitle({ children, tooltip }: { children: React.ReactNode; tooltip?: string }) {
   return (
     <div style={{
-      fontFamily: "'Barlow Condensed', sans-serif",
       fontSize: 14,
       fontWeight: 700,
       letterSpacing: '0.1em',
-      color: '#7d8fa8',
+      color: 'var(--text-2)',
       textTransform: 'uppercase',
       marginBottom: 14,
       paddingBottom: 8,
-      borderBottom: '1px solid #1c2a3f',
+      borderBottom: '1px solid var(--bg-3)',
+      display: 'inline-flex', alignItems: 'center',
     }}>
       {children}
+      {tooltip && <InfoTooltip text={tooltip} />}
     </div>
   )
 }
@@ -57,12 +58,12 @@ function EmptyChart({ label }: { label: string }) {
       alignItems: 'center',
       justifyContent: 'center',
       color: '#525252',
-      border: '1px solid #262626',
+      border: '1px solid var(--bg-3)',
       borderRadius: 12,
-      background: '#0f0f0f',
+      background: 'var(--bg-4)',
     }}>
       <TrendingUp size={28} style={{ marginBottom: 10, opacity: 0.3 }} />
-      <div style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>{label}</div>
+      <div style={{ fontSize: 12 }}>{label}</div>
     </div>
   )
 }
@@ -85,15 +86,14 @@ function PillToggle<T extends string | number>({ options, value, onChange }: {
           key={String(val)}
           onClick={() => onChange(val)}
           style={{
-            fontFamily: "'IBM Plex Mono', monospace",
             fontSize: 10,
             letterSpacing: '0.05em',
             padding: '4px 10px',
             borderRadius: 3,
             cursor: 'pointer',
-            border: `1px solid ${value === val ? '#4f8ef7' : '#1c2a3f'}`,
+            border: `1px solid ${value === val ? '#4f8ef7' : 'var(--bg-3)'}`,
             background: value === val ? 'rgba(79,142,247,0.15)' : 'transparent',
-            color: value === val ? '#4f8ef7' : '#7d8fa8',
+            color: value === val ? '#4f8ef7' : 'var(--text-2)',
           }}
         >
           {label}
@@ -161,8 +161,8 @@ export function Analytics() {
   const PIE_COLORS = ['#f05050', '#f07030', '#f0a020', '#4f8ef7', '#2db866']
 
   // Card styling tokens — dark grey panels (was dark navy)
-  const CARD_BG = '#171717'
-  const CARD_BORDER = '1px solid #262626'
+  const CARD_BG = 'var(--bg-2)'
+  const CARD_BORDER = '1px solid var(--bg-3)'
 
   return (
     <div style={{ minHeight: '100vh' }}>
@@ -171,7 +171,18 @@ export function Analytics() {
 
             {/* GDELT Tone — moved to top-left */}
             <div style={{ background: CARD_BG, border: CARD_BORDER, borderRadius: 12, padding: '18px 20px' }}>
-              <SectionTitle>Media Tone</SectionTitle>
+              <SectionTitle tooltip={
+                'Average emotional tone of news coverage that mentions your candidate ' +
+                '(blue) or opponent (red), scored by GDELT. The score runs roughly from ' +
+                '-10 (very negative) to +10 (very positive), aggregated daily.\n\n' +
+                'GDELT computes this by counting positive and negative words in each ' +
+                'article — so the score drops when articles include words like ' +
+                '"scandal", "loss", "attack", "failure", and rises with words like ' +
+                '"win", "success", "praise", "endorse". A spike up or down usually ' +
+                'tracks a specific news event.\n\nUse it as a vibes-check: a sudden ' +
+                'dip on one side typically means a bad-news cycle for them; check the ' +
+                'Articles feed for that day to see which story drove it.'
+              }>Media Tone</SectionTitle>
               <div style={{ marginBottom: 12 }}>
                 <PillToggle options={TIMEFRAME_OPTIONS} value={toneDays} onChange={setToneDays} />
               </div>
@@ -183,17 +194,17 @@ export function Analytics() {
                 <>
                   <ResponsiveContainer width="100%" height={180}>
                     <AreaChart data={mergedTone} margin={{ top: 5, right: 10, bottom: 0, left: -25 }}>
-                      <CartesianGrid strokeDasharray="2 4" stroke="#1c2a3f" />
+                      <CartesianGrid strokeDasharray="2 4" stroke="var(--bg-3)" />
                       <XAxis
                         dataKey="date"
                         minTickGap={28}
-                        tick={{ fontSize: 9, fill: '#3d4f63', fontFamily: "'IBM Plex Mono', monospace" }}
+                        tick={{ fontSize: 9, fill: 'var(--text-3)' }}
                         tickFormatter={v => v.slice(5)}
                         axisLine={false}
                         tickLine={false}
                       />
                       <YAxis
-                        tick={{ fontSize: 9, fill: '#3d4f63', fontFamily: "'IBM Plex Mono', monospace" }}
+                        tick={{ fontSize: 9, fill: 'var(--text-3)' }}
                         axisLine={false}
                         tickLine={false}
                       />
@@ -222,13 +233,13 @@ export function Analytics() {
                   <div style={{ display: 'flex', gap: 16, marginTop: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <span style={{ width: 12, height: 2, background: '#4f8ef7', display: 'inline-block' }} />
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: '#7d8fa8' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-2)' }}>
                         {candidateTone?.query_label ?? 'Candidate'}
                       </span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <span style={{ width: 12, height: 2, background: '#f05050', display: 'inline-block' }} />
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: '#7d8fa8' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-2)' }}>
                         {opponentTone?.query_label ?? 'Opponent'}
                       </span>
                     </div>
@@ -251,19 +262,19 @@ export function Analytics() {
               ) : (
                 <ResponsiveContainer width="100%" height={180}>
                   <LineChart margin={{ top: 5, right: 10, bottom: 0, left: -25 }}>
-                    <CartesianGrid strokeDasharray="2 4" stroke="#1c2a3f" />
+                    <CartesianGrid strokeDasharray="2 4" stroke="var(--bg-3)" />
                     <XAxis
                       dataKey="date"
                       type="category"
                       allowDuplicatedCategory={false}
                       minTickGap={28}
-                      tick={{ fontSize: 9, fill: '#3d4f63', fontFamily: "'IBM Plex Mono', monospace" }}
+                      tick={{ fontSize: 9, fill: 'var(--text-3)' }}
                       tickFormatter={v => v.slice(5)}
                       axisLine={false}
                       tickLine={false}
                     />
                     <YAxis
-                      tick={{ fontSize: 9, fill: '#3d4f63', fontFamily: "'IBM Plex Mono', monospace" }}
+                      tick={{ fontSize: 9, fill: 'var(--text-3)' }}
                       domain={[0, 100]}
                       axisLine={false}
                       tickLine={false}
@@ -294,7 +305,7 @@ export function Analytics() {
                         background: trendColor(series.term, i),
                         display: 'inline-block',
                       }} />
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: '#7d8fa8' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-2)' }}>
                         {series.term}
                       </span>
                     </div>
@@ -341,7 +352,6 @@ export function Analytics() {
                     borderRadius: 12,
                   }}>
                     <div style={{
-                      fontFamily: "'IBM Plex Mono', monospace",
                       fontSize: 26,
                       fontWeight: 600,
                       color: stat.color,
@@ -399,7 +409,7 @@ export function Analytics() {
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{
                             fontSize: 12,
-                            color: '#dce7f3',
+                            color: 'var(--text-1)',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap',
@@ -407,9 +417,8 @@ export function Analytics() {
                             {spike.frame_name}
                           </div>
                           <div style={{
-                            fontFamily: "'IBM Plex Mono', monospace",
                             fontSize: 10,
-                            color: '#3d4f63',
+                            color: 'var(--text-3)',
                           }}>
                             {spike.ratio.toFixed(1)}× · {spike.reach_24h.toLocaleString()} reach
                           </div>

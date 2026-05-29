@@ -15,20 +15,56 @@ from app.models import SourceItem, StoryCluster
 
 logger = logging.getLogger(__name__)
 
-_STOPWORDS = {
+# Stopwords for TITLE comparison (Jaccard). Excludes "primary"/"election"
+# because those words carry distinguishing meaning in political headlines
+# ("Primary Election Results" vs "General Election Results").
+_TITLE_STOPWORDS = {
+    # Generic English filler — no semantic content
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is",
-    "it", "of", "on", "or", "the", "to", "with", "will", "new", "says", "said",
-    "over", "after", "before", "about", "primary", "election",
+    "it", "of", "on", "or", "the", "to", "with", "will",
+    # Common news-headline filler
+    "new", "says", "said", "over", "after", "before", "about",
 }
+# Stopwords for BODY simhash (kept identical to the original set so stored
+# 64-bit hashes remain comparable to freshly-computed ones). DO NOT add or
+# remove items without recomputing every story_clusters.simhash_64 — the
+# merge backfill compares freshly-computed item hashes against stored
+# cluster hashes, and any divergence causes legitimate matches to miss.
+_HASH_STOPWORDS = _TITLE_STOPWORDS | {"primary", "election"}
+# Back-compat alias for any external import of _STOPWORDS.
+_STOPWORDS = _HASH_STOPWORDS
 _SOURCE_SUFFIX = re.compile(r"\s+[-|:]\s+[^-|:]{2,60}$")
 
 
 def normalize_title(title: str | None) -> str:
+    """Normalize a headline for token-overlap (Jaccard) comparison.
+
+    Strips trailing outlet suffix, lowercases, splits on non-alphanumeric.
+    Token retention rules:
+      - Always keep digit tokens (district numbers, dates, dollar amounts,
+        vote tallies, counts — these are distinguishing meaning in news
+        titles and must not be dropped).
+      - Drop very short non-digit tokens (<=2 chars: "a", "an", "to", ...).
+      - Drop generic stopwords.
+
+    Digit-keeping is the deliberate choice that distinguishes "District 8"
+    from "District 12" — a previous version dropped tokens shorter than 3
+    chars and silently collapsed such titles. Domain-agnostic: applies to
+    any campaign's data, not specific to any race or district.
+    """
     text = _SOURCE_SUFFIX.sub("", title or "").lower()
-    tokens = [
-        t for t in re.split(r"[^a-z0-9]+", text)
-        if len(t) > 2 and t not in _STOPWORDS
-    ]
+    tokens = []
+    for t in re.split(r"[^a-z0-9]+", text):
+        if not t:
+            continue
+        if t.isdigit():
+            tokens.append(t)
+            continue
+        if len(t) <= 2:
+            continue
+        if t in _TITLE_STOPWORDS:
+            continue
+        tokens.append(t)
     return " ".join(tokens)
 
 
@@ -51,6 +87,49 @@ def url_family(url: str | None) -> str | None:
         host = host[4:]
     parts = host.split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else host or None
+
+
+_NUMBER_RE = re.compile(r"\d+")
+# Strip trailing outlet suffix (" | Outlet", " - Outlet", " : Outlet") before
+# extracting digits. Mirrors _SOURCE_SUFFIX above but defined here as a
+# separate constant for clarity.
+_TITLE_OUTLET_SUFFIX_RE = re.compile(r"\s+[-|:]\s+[^-|:]{2,60}$")
+
+
+def numbers_in_title(title: str | None) -> set[str]:
+    """Extract distinguishing digit tokens from a headline.
+
+    Strips outlet suffix first (radio frequencies / channel numbers in
+    outlet names shouldn't count as story-distinguishing). Then captures
+    all standalone digit runs. Digits in news/political titles typically
+    carry distinguishing meaning: district numbers, dates, dollar amounts,
+    vote tallies, casualty counts.
+
+    Domain-agnostic — applies to any campaign's data, not specific to any
+    race or geography.
+    """
+    if not title:
+        return set()
+    cleaned = _TITLE_OUTLET_SUFFIX_RE.sub("", title)
+    return set(_NUMBER_RE.findall(cleaned))
+
+
+def numbers_mismatch(t1: str | None, t2: str | None) -> bool:
+    """True if both titles contain UNIQUE-to-them digit tokens (block merge).
+
+    "Unique-to-them" means each side has at least one digit token that the
+    other side doesn't have. This catches genuinely-different stories
+    ("District 8" vs "District 12", "May 18" vs "May 4") while still
+    allowing legitimate matches where one title adds detail the other
+    omits ("Bill summary" vs "Bill summary (HR 3001)" — only one side has
+    a unique digit).
+
+    Returns False when either title has no digits (no signal to act on)
+    or when neither side has a unique-to-it digit.
+    """
+    n1 = numbers_in_title(t1)
+    n2 = numbers_in_title(t2)
+    return bool(n1 - n2) and bool(n2 - n1)
 
 
 def _published_close(a: datetime | None, b: datetime | None, days: int = 7) -> bool:
@@ -253,9 +332,24 @@ def assign_story_cluster_v2(db: Session, item: SourceItem) -> tuple[StoryCluster
     Phase A logs the reason but does not act on it (per "no behavior change"
     constraint).
     """
-    window_days = int(os.environ.get("CLUSTER_WINDOW_DAYS", "14"))
+    # Idempotency short-circuit: if the item is already in a valid cluster,
+    # return it as-is. Without this, re-running v2 (e.g. via reanalysis)
+    # would re-evaluate every time and call _attach_to_cluster, which
+    # increments article_count — causing a double-count bug.
+    if item.story_cluster_id:
+        existing = db.query(StoryCluster).filter(
+            StoryCluster.id == item.story_cluster_id
+        ).first()
+        if existing is not None:
+            return existing, False, None
+        # Cluster was deleted (e.g. by a merge backfill that didn't rewrite
+        # this item's pointer). Fall through to normal assignment so the
+        # item gets reattached to a valid cluster.
+
+    window_days = int(os.environ.get("CLUSTER_WINDOW_DAYS", "30"))
     jaccard_min = float(os.environ.get("CLUSTER_TITLE_JACCARD_MIN", "0.65"))
     hamming_max = int(os.environ.get("CLUSTER_SIMHASH_HAMMING_MAX", "6"))
+    published_close_days = int(os.environ.get("CLUSTER_PUBLISHED_CLOSE_DAYS", "14"))
 
     cutoff = datetime.utcnow() - timedelta(days=window_days)
 
@@ -277,10 +371,18 @@ def assign_story_cluster_v2(db: Session, item: SourceItem) -> tuple[StoryCluster
 
     matched: StoryCluster | None = None
     for cluster, rep in candidates:
-        # Rule 1: URL canonical match
+        # Rule 1: URL canonical match — safe regardless of title content.
         if item_canonical and canonical_url(rep.source_url) == item_canonical:
             matched = cluster
             break
+        # Number-mismatch guard: if both titles have digits AND each has a
+        # digit the other lacks ("District 8" vs "District 12"), skip.
+        # Applies to rules 2 and 3, not rule 1 (URL match overrides — same
+        # URL = same article regardless of any digit difference in titles).
+        # Domain-agnostic — moved here from the merge backfill so live
+        # ingestion gets the same FP protection.
+        if numbers_mismatch(item.title, rep.title):
+            continue
         # Rule 2: very-high-similarity title
         sim = title_similarity(item.title, rep.title)
         if sim >= 0.92:
@@ -290,7 +392,7 @@ def assign_story_cluster_v2(db: Session, item: SourceItem) -> tuple[StoryCluster
         if not short_text and sim >= jaccard_min:
             cluster_hash = _hex_to_int(cluster.simhash_64)
             if cluster_hash is not None and hamming(item_hash, cluster_hash) <= hamming_max:
-                if _published_close(item.published_at, rep.published_at, days=7):
+                if _published_close(item.published_at, rep.published_at, days=published_close_days):
                     matched = cluster
                     break
 

@@ -201,7 +201,10 @@ def reanalyze_source(db: Session, item: SourceItem, dry_run: bool = False) -> di
     if not item.urgency or item.urgency == "low":
         item.urgency = intelligence.classify_urgency(f"{item.title} {item.raw_text or ''}")
 
-    story_clustering.assign_story_cluster(db, item)
+    # Use v2 so reanalysis on an item that was ingested before the
+    # cluster-native path (story_cluster_id IS NULL) gets a proper
+    # StoryCluster row. v2 is idempotent for already-clustered items.
+    story_clustering.assign_story_cluster_v2(db, item)
     if item.raw_text and item.source_url:
         quality_score, quality_label, quality_reasons = _assess_extraction_quality(item.raw_text, item.title)
         item.extraction_quality_score = quality_score

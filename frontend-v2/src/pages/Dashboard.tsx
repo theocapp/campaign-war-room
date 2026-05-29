@@ -1,34 +1,191 @@
-import { ChevronRight, Zap } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { ChevronDown, X, Zap } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import { Area, AreaChart, ResponsiveContainer } from 'recharts'
 import { api } from '@/api/client'
 import { getDashboardCache, prefetchDashboard } from '@/api/dashboardCache'
 import type { NarrativeFrame, OwnerType, SourceItem, Spike, TimeseriesPoint } from '@/api/types'
+import { InfoTooltip } from '@/components/InfoTooltip'
+import { RaceSentimentCard } from '@/components/RaceSentimentCard'
+import { formatArticleDate } from '@/lib/formatDate'
 
-const C = {
-  bg1: '#121212', bg2: '#171717', bg3: '#262626', bg4: '#2f2f2f',
-  border: '#434343', borderBright: '#555',
-  text1: '#fff', text2: '#a1a1a1', text3: '#666',
-  candidate: '#0059c2', opponent: '#d71913', media: '#a1a1a1',
-  accent: '#ffbf00',
-  green: '#22c55e', red: '#ef4444',
+// Plain-English explanations of jargon shown in the UI.
+const STAGE_HELP: Record<string, string> = {
+  mainstream: 'Mainstream — the story is everywhere. Multiple national or regional outlets are covering it this week.',
+  spreading: 'Spreading — coverage is picking up steam. New outlets are starting to pick up the story.',
+  resurfacing: 'Resurfacing — an old narrative is being talked about again after a quiet period.',
+  active: 'Active — getting steady coverage, but not surging.',
+  emerging: 'Emerging — only a handful of outlets have picked it up so far, but it could grow.',
+  fading: 'Fading — coverage is dropping off compared to last week.',
+  dormant: 'Dormant — no recent activity. Kept around for historical context.',
 }
 
-const STAGE_ORDER = ['mainstream', 'spreading', 'emerging', 'fading', 'dormant']
+const OWNER_HELP: Record<OwnerType, string> = {
+  candidate: 'Candidate — narratives that help our side (e.g. your accomplishments, your message).',
+  opponent: 'Opponent — narratives the other side is pushing, usually attacks on us.',
+  media: 'Media — narratives the press is driving on their own (not pushed by either campaign).',
+}
+
+// All colors come from CSS variables so the dark/light toggle works.
+// See src/index.css for the palette definitions per theme.
+const C = {
+  bg1: 'var(--bg-1)', bg2: 'var(--bg-2)', bg3: 'var(--bg-3)', bg4: 'var(--bg-4)',
+  border: 'var(--border)', borderBright: 'var(--border-bright)',
+  text1: 'var(--text-1)', text2: 'var(--text-2)', text3: 'var(--text-3)',
+  candidate: 'var(--candidate)', opponent: 'var(--opponent)', media: 'var(--media)',
+  accent: 'var(--accent)',
+  green: 'var(--green)', red: 'var(--red)',
+}
+
+// Order must include every stage the backend can emit; see
+// _narrative_stage() in backend/app/services/narrative_frames.py.
+// `active` and `resurfacing` were previously missing from the UI, which
+// silently hid frames in those stages from the by-stage filter and made
+// the chip counts not sum to "All".
+const STAGE_ORDER = ['mainstream', 'spreading', 'resurfacing', 'active', 'emerging', 'fading', 'dormant']
+
+// Composite "importance" score for the Featured Narratives section.
+// Higher = more worth your attention right now. Components, roughly in
+// order of weight:
+//
+//   • Strategic urgency  (the AI's "act now" call)             up to +40
+//   • Strategic posture  (defensive > offensive > amplify…)    up to +20
+//   • Momentum signal    (viral / amplified / missing / elite)  up to +25
+//   • Stage              (spreading > mainstream > emerging…)  up to +20
+//   • This-week volume   (capped — megavolume doesn't drown)   up to +30
+//   • Week-over-week Δ   (growing stories matter more)         positive boost
+//   • Outlet diversity   (broad coverage = bigger story)       up to +24
+//
+// Caps prevent a single noisy frame (e.g. 200 mentions this week from a
+// repeated tweet) from drowning out a 5-outlet, defensive, high-urgency
+// opponent attack — the second is the one the campaign actually needs to
+// react to today.
+function importanceScore(f: NarrativeFrame): number {
+  let score = 0
+
+  const urgency = f.strategic_lens?.urgency
+  if (urgency === 'high') score += 40
+  else if (urgency === 'medium') score += 20
+  else if (urgency === 'low') score += 10
+
+  const posture = f.strategic_lens?.posture
+  if (posture === 'defensive') score += 20
+  else if (posture === 'offensive') score += 15
+  else if (posture === 'amplify') score += 12
+  else if (posture === 'monitor') score += 5
+
+  if (f.momentum_signal === 'viral') score += 25
+  else if (f.momentum_signal === 'amplified') score += 18
+  else if (f.momentum_signal === 'missing_coverage') score += 20
+  else if (f.momentum_signal === 'elite_only') score += 10
+
+  const stagePts: Record<string, number> = {
+    spreading: 20, resurfacing: 18, mainstream: 15, emerging: 12,
+    active: 10, fading: 3, dormant: 0,
+  }
+  score += stagePts[f.stage] ?? 0
+
+  score += Math.min(f.mentions_this_week * 2, 30)
+
+  const delta = f.mentions_this_week - f.mentions_last_week
+  score += delta * 1.5
+
+  score += Math.min(f.unique_outlets_this_week * 3, 24)
+
+  return score
+}
 
 function ownerColor(t: OwnerType): string {
   return t === 'candidate' ? C.candidate : t === 'opponent' ? C.opponent : C.media
+}
+
+// V13.21 — quadrant color (owner × subject). Falls back to ownerColor
+// when subject_type isn't on the frame yet (older API responses).
+import { quadrantColor as _qc } from '@/lib/quadrantColor'
+function frameColor(f: { owner_type?: OwnerType; subject_type?: OwnerType }): string {
+  if (f.subject_type) return _qc(f.owner_type ?? null, f.subject_type ?? null)
+  return ownerColor(f.owner_type ?? 'media')
 }
 
 function stageLabel(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-function formatDate(iso?: string) {
-  if (!iso) return ''
-  return new Date(iso).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
+// Visual treatment for the momentum signal + strategic lens, fused into
+// one chip. The LABEL comes from the momentum signal (what's happening).
+// The COLOR comes from the strategic posture (what to do). The TOOLTIP
+// combines momentum data with the strategic action recommendation.
+//
+// Why fused not split: a separate strategic chip would add a 4th element
+// to an already-dense card row. The signal alone is read-only diagnosis;
+// the posture is the decision. Combining them puts the same information
+// in less space.
+//
+// We render only when posture is "actionable" (amplify, offensive,
+// defensive, monitor with action). "ignore" + signals without owner type
+// produce no chip.
+type StrategicLens = { posture: 'amplify' | 'offensive' | 'defensive' | 'monitor' | 'ignore'; action: string | null; urgency: 'high' | 'medium' | 'low' }
+type MomentumBadge = { label: string; color: string; bg: string; tooltip: string; urgencyBorder?: string }
+
+// Posture color palette. Chosen to match standard semantic conventions:
+// red for opposition response needed, blue for our-side offense, green
+// for amplification, yellow for monitoring, neutral for ignore.
+const POSTURE_COLORS: Record<string, { color: string; bg: string }> = {
+  amplify:   { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.14)' },   // green — our message + receptive audience
+  offensive: { color: '#0ea5e9', bg: 'rgba(14, 165, 233, 0.14)' },   // cyan — content opportunity
+  defensive: { color: '#ef4444', bg: 'rgba(239, 68, 68, 0.14)' },    // red — opposition attack territory
+  monitor:   { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.14)' },  // purple — watch but don't engage
+  ignore:    { color: '#666',    bg: 'rgba(102, 102, 102, 0.10)' },  // gray — not worth attention
+}
+
+function signalLabel(signal: string): string {
+  switch (signal) {
+    case 'viral': return 'Viral'
+    case 'amplified': return 'Amplified'
+    case 'missing_coverage': return 'Missing'
+    case 'elite_only': return 'Elite only'
+    case 'stable': return 'Stable'
+    case 'no_trend_signal': return 'No signal'
+    default: return signal
+  }
+}
+
+function momentumBadge(
+  signal: string | null | undefined,
+  data: Record<string, unknown> | null | undefined,
+  lens: StrategicLens | null | undefined,
+): MomentumBadge | null {
+  if (!signal) return null
+  // Hide pure-monitoring with no action (nothing to show the user).
+  if (lens && lens.posture === 'ignore') return null
+  if (!lens && (signal === 'stable' || signal === 'no_trend_signal')) return null
+
+  const palette = lens ? POSTURE_COLORS[lens.posture] : POSTURE_COLORS.monitor
+  const ov = data?.outlet_velocity as number | undefined
+  const cv = data?.cluster_velocity as number | undefined
+  const tv = data?.trend_velocity as number | undefined
+
+  // Tooltip combines the underlying momentum data with the strategic action.
+  // Reads "Signal: <what's happening>. Action: <what to do>. Urgency: X."
+  const signalDesc =
+    signal === 'viral' ? `Outlets ${ov ? `${ov.toFixed(1)}×` : 'spiking'} AND voter search ${tv ? `${tv.toFixed(1)}×` : 'spiking'} vs baseline` :
+    signal === 'amplified' ? `Outlets ${ov ? `${ov.toFixed(1)}×` : 'spiking'} (broad press pickup) but voter search flat` :
+    signal === 'missing_coverage' ? `Voter search ${tv ? `${tv.toFixed(1)}×` : 'spiking'} but press flat` :
+    signal === 'elite_only' ? `Angles ${cv ? `${cv.toFixed(1)}×` : 'spiking'} but few outlets — narrow press` :
+    signal
+
+  const parts = [signalDesc]
+  if (lens?.action) parts.push(`→ ${lens.action}`)
+  if (lens?.urgency) parts.push(`Urgency: ${lens.urgency}`)
+
+  return {
+    label: signalLabel(signal),
+    color: palette.color,
+    bg: palette.bg,
+    tooltip: parts.join('\n'),
+    urgencyBorder: lens?.urgency === 'high' ? palette.color : undefined,
+  }
 }
 
 function TrendArrow({ delta }: { delta: number }) {
@@ -38,21 +195,25 @@ function TrendArrow({ delta }: { delta: number }) {
 }
 
 function FeaturedCard({ frame }: { frame: NarrativeFrame }) {
-  const oc = ownerColor(frame.owner_type)
+  const oc = frameColor(frame)
   const delta = frame.mentions_this_week - frame.mentions_last_week
   const [hovered, setHovered] = useState(false)
 
   return (
-    <div
+    <Link
+      to={`/narratives/${frame.id}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
         background: hovered ? C.bg3 : C.bg2,
-        border: `1px solid ${C.border}`,
+        border: `1px solid ${hovered ? C.borderBright : C.border}`,
         borderRadius: '0.625rem',
         padding: '12px 14px',
         cursor: 'pointer',
-        transition: 'background 0.12s ease',
+        transition: 'background 0.12s ease, border-color 0.12s ease',
+        textDecoration: 'none',
+        color: 'inherit',
+        display: 'block',
       } as CSSProperties}
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
@@ -76,13 +237,14 @@ function FeaturedCard({ frame }: { frame: NarrativeFrame }) {
           </span>
         )}
       </div>
-    </div>
+    </Link>
   )
 }
 
 function DetailPanel({ frame }: { frame: NarrativeFrame }) {
   const [timeseries, setTimeseries] = useState<TimeseriesPoint[]>([])
-  const oc = ownerColor(frame.owner_type)
+  const [hovered, setHovered] = useState(false)
+  const oc = frameColor(frame)
 
   useEffect(() => {
     api.frameTimeseries(frame.id).then(setTimeseries).catch(() => {})
@@ -93,17 +255,33 @@ function DetailPanel({ frame }: { frame: NarrativeFrame }) {
   const reachDelta = frame.reach_this_week - frame.reach_last_week
   const reachFmt = (v: number) => v > 0 ? `${(v / 1000).toFixed(1)}K` : '—'
 
+  // Total outlets covering this frame across all time, derived from the
+  // outlet_tiers breakdown the API returns. The API doesn't ship a
+  // `unique_outlets_total` field directly, so we sum the tier counts.
+  const outletsTotal = frame.outlet_tiers
+    ? Object.values(frame.outlet_tiers).reduce((a, b) => a + (b || 0), 0)
+    : frame.unique_outlets_this_week
+
   const rows = [
     { label: 'Articles', total: frame.mentions_total, wk: frame.mentions_this_week, delta: articleDelta },
-    { label: 'Outlets', total: frame.unique_outlets_this_week, wk: frame.unique_outlets_this_week, delta: outletDelta },
+    { label: 'Outlets', total: outletsTotal, wk: frame.unique_outlets_this_week, delta: outletDelta },
     { label: 'Reach', total: reachFmt(frame.reach_total), wk: reachFmt(frame.reach_this_week), delta: reachDelta },
   ]
 
   return (
-    <div style={{
-      background: C.bg2, border: `1px solid ${C.border}`,
-      borderRadius: '0.625rem', padding: 16, overflow: 'hidden',
-    } as CSSProperties}>
+    <Link
+      to={`/narratives/${frame.id}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: C.bg2,
+        border: `1px solid ${hovered ? C.borderBright : C.border}`,
+        borderRadius: '0.625rem', padding: 16, overflow: 'hidden',
+        textDecoration: 'none', color: 'inherit', display: 'block',
+        cursor: 'pointer',
+        transition: 'border-color 0.12s ease',
+      } as CSSProperties}
+    >
       <div style={{ marginBottom: 10 }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: C.text1, lineHeight: 1.25, marginBottom: 4 }}>
           {frame.name}
@@ -119,19 +297,46 @@ function DetailPanel({ frame }: { frame: NarrativeFrame }) {
         )}
       </div>
 
-      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-        <span style={{
-          background: C.bg3, border: `1px solid ${C.border}`,
-          borderRadius: 4, padding: '3px 8px', fontSize: 11, color: C.text2,
-        }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span
+          title={STAGE_HELP[frame.stage] ?? ''}
+          style={{
+            background: C.bg3, border: `1px solid ${C.border}`,
+            borderRadius: 4, padding: '3px 8px', fontSize: 11, color: C.text2,
+            cursor: 'help',
+          }}
+        >
           {stageLabel(frame.stage)}
         </span>
-        <span style={{
-          background: C.bg3, border: `1px solid ${C.border}`,
-          borderRadius: 4, padding: '3px 8px', fontSize: 11, color: oc, fontWeight: 600,
-        }}>
+        <span
+          title={OWNER_HELP[frame.owner_type] ?? ''}
+          style={{
+            background: C.bg3, border: `1px solid ${C.border}`,
+            borderRadius: 4, padding: '3px 8px', fontSize: 11, color: oc, fontWeight: 600,
+            cursor: 'help',
+          }}
+        >
           {frame.owner_type.charAt(0).toUpperCase() + frame.owner_type.slice(1)}
         </span>
+        {(() => {
+          const m = momentumBadge(frame.momentum_signal, frame.momentum_data, frame.strategic_lens)
+          if (!m) return null
+          // High urgency gets a slightly bolder border (2px) — subtle visual
+          // weight to draw the eye toward truly time-sensitive items.
+          const borderWidth = m.urgencyBorder ? 2 : 1
+          return (
+            <span
+              title={m.tooltip}
+              style={{
+                background: m.bg, border: `${borderWidth}px solid ${m.color}`,
+                borderRadius: 4, padding: '3px 8px', fontSize: 11,
+                color: m.color, fontWeight: 600, cursor: 'help',
+              }}
+            >
+              {m.label}
+            </span>
+          )
+        })()}
       </div>
 
       <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14 }}>
@@ -187,20 +392,30 @@ function DetailPanel({ frame }: { frame: NarrativeFrame }) {
           </ResponsiveContainer>
         </div>
       )}
-    </div>
+    </Link>
   )
 }
 
 function ArticleRow({ item }: { item: SourceItem }) {
   const score = item.race_relevance_score ?? 0
   const scoreColor = score >= 80 ? C.accent : score >= 50 ? C.text2 : C.text3
-  const href = item.source_url
+  const [hovered, setHovered] = useState(false)
 
-  const row = (
-    <div style={{
-      display: 'flex', alignItems: 'flex-start', gap: 9,
-      padding: '10px 0', borderBottom: `1px solid ${C.bg3}`,
-    }}>
+  return (
+    <Link
+      to={`/articles/${item.id}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'flex-start', gap: 9, width: '100%',
+        padding: '10px 6px',
+        borderBottom: `1px solid ${C.bg3}`,
+        background: hovered ? 'var(--bg-3)' : 'transparent',
+        color: 'inherit', textDecoration: 'none', textAlign: 'left',
+        transition: 'background 0.1s ease',
+        borderRadius: hovered ? 4 : 0,
+      } as CSSProperties}
+    >
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
           fontSize: 13, color: C.text1, fontWeight: 500, lineHeight: 1.35,
@@ -220,29 +435,30 @@ function ArticleRow({ item }: { item: SourceItem }) {
           {score > 0 ? score : '—'}
         </div>
         <div style={{ fontSize: 11, color: C.text3 }}>
-          {formatDate(item.published_at ?? item.created_at)}
+          {formatArticleDate(item.published_at ?? item.created_at)}
         </div>
       </div>
-    </div>
+    </Link>
   )
-  return href ? (
-    <a href={href} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
-      {row}
-    </a>
-  ) : row
 }
 
-type FilterKey = 'all' | OwnerType | 'mainstream' | 'spreading' | 'emerging' | 'fading' | 'dormant'
+type FilterKey = 'all' | OwnerType | 'mainstream' | 'spreading' | 'resurfacing' | 'active' | 'emerging' | 'fading' | 'dormant'
 
-interface FilterItemProps {
+interface FilterPillProps {
   label: string
   filterKey: FilterKey
   count: number
   active: boolean
   onClick: () => void
+  tooltip?: string
 }
 
-function FilterItem({ label, filterKey: _filterKey, count, active, onClick }: FilterItemProps) {
+/**
+ * Horizontal filter chip — used in the filter header bar at the top of the
+ * dashboard. Active state is a yellow border + bolder text. Hover lifts the
+ * background to bg-3.
+ */
+function FilterPill({ label, filterKey: _filterKey, count, active, onClick, tooltip }: FilterPillProps) {
   const [hovered, setHovered] = useState(false)
   return (
     <button
@@ -250,23 +466,190 @@ function FilterItem({ label, filterKey: _filterKey, count, active, onClick }: Fi
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        display: 'flex', alignItems: 'center', width: '100%',
-        padding: '9px 16px 9px 20px',
-        background: active || hovered ? '#1a1a1a' : 'transparent',
-        border: 'none',
-        borderLeft: `3px solid ${active ? C.accent : 'transparent'}`,
-        cursor: 'pointer', textAlign: 'left',
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        padding: '5px 11px',
+        borderRadius: 999,
+        background: active ? 'var(--bg-3)' : hovered ? 'var(--bg-2)' : 'transparent',
+        border: `1px solid ${active ? C.accent : C.border}`,
+        color: active ? C.text1 : C.text2,
+        fontWeight: active ? 600 : 400,
+        fontSize: 13,
+        cursor: 'pointer', whiteSpace: 'nowrap',
         transition: 'all 0.1s ease',
+        fontFamily: 'inherit',
       } as CSSProperties}
     >
-      <span style={{ flex: 1, fontSize: 14, color: active ? C.text1 : C.text2, fontWeight: active ? 600 : 400 }}>
-        {label}
-      </span>
+      <span>{label}</span>
       {count > 0 && (
-        <span style={{ fontSize: 12, color: C.text3, marginRight: 6 }}>{count}</span>
+        <span style={{
+          fontSize: 11, color: active ? C.text2 : C.text3,
+          fontWeight: 500,
+        }}>
+          {count}
+        </span>
       )}
-      <ChevronRight size={14} style={{ color: C.text3, flexShrink: 0 }} />
+      {tooltip && <InfoTooltip text={tooltip} placement="bottom" />}
     </button>
+  )
+}
+
+interface DropdownOption {
+  key: FilterKey
+  label: string
+  count: number
+  tooltip?: string
+}
+
+interface FilterDropdownProps {
+  /** Label shown when no option in this group is selected (e.g. "Owner"). */
+  label: string
+  /** Tooltip for the group label itself. */
+  groupTooltip?: string
+  /** Options inside the dropdown. */
+  options: DropdownOption[]
+  /** Currently active filter (page-wide). Used to detect which option in
+   *  this group, if any, is the active one. */
+  activeFilter: FilterKey
+  /** Called when an option is picked. Pass `'all'` to clear the active
+   *  filter (only fired when the same active option is clicked again). */
+  onSelect: (key: FilterKey) => void
+}
+
+/**
+ * Compact dropdown for the filter header. Click to open a panel of options.
+ * When one of this group's options is the active page filter, the trigger
+ * shows "Label · OptionName" and gets the accent border, and a tiny ✕
+ * button lets you clear it without opening the menu.
+ *
+ * Click-outside / Escape close the panel. The panel is absolutely positioned
+ * — caller must put the trigger in a relatively-positioned parent (we do
+ * that here via `position: 'relative'`).
+ */
+function FilterDropdown({ label, groupTooltip, options, activeFilter, onSelect }: FilterDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const activeOpt = options.find(o => o.key === activeFilter) ?? null
+  const isActive = !!activeOpt
+
+  // Close on outside click or Escape.
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '5px 8px 5px 11px',
+          borderRadius: 999,
+          background: isActive || open ? 'var(--bg-3)' : 'transparent',
+          border: `1px solid ${isActive ? C.accent : C.border}`,
+          color: isActive ? C.text1 : C.text2,
+          fontWeight: isActive ? 600 : 400,
+          fontSize: 13,
+          cursor: 'pointer', whiteSpace: 'nowrap',
+          transition: 'all 0.1s ease',
+          fontFamily: 'inherit',
+        } as CSSProperties}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          {label}
+          {isActive && (
+            <>
+              <span style={{ color: C.text3, fontWeight: 400 }}>·</span>
+              <span>{activeOpt!.label}</span>
+            </>
+          )}
+        </span>
+        {groupTooltip && !isActive && <InfoTooltip text={groupTooltip} placement="bottom" />}
+        {isActive ? (
+          <span
+            role="button"
+            aria-label={`Clear ${label} filter`}
+            onClick={e => { e.stopPropagation(); onSelect('all') }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              padding: 2, borderRadius: 4,
+              color: C.text2, cursor: 'pointer',
+            }}
+            onMouseDown={e => e.stopPropagation()}
+          >
+            <X size={12} />
+          </span>
+        ) : (
+          <ChevronDown size={13} style={{ color: C.text3, transition: 'transform 0.1s ease', transform: open ? 'rotate(180deg)' : 'none' }} />
+        )}
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: 'absolute', top: 'calc(100% + 6px)', left: 0,
+            background: 'var(--bg-2)',
+            border: `1px solid ${C.border}`,
+            borderRadius: 8,
+            padding: 4,
+            minWidth: 200,
+            boxShadow: 'var(--shadow-elev)',
+            zIndex: 50,
+            display: 'flex', flexDirection: 'column', gap: 1,
+          }}
+        >
+          {options.map(opt => {
+            const selected = opt.key === activeFilter
+            return (
+              <button
+                key={opt.key}
+                role="menuitemradio"
+                aria-checked={selected}
+                onClick={() => {
+                  // Same option clicked → clear (toggle off). Otherwise switch.
+                  onSelect(selected ? 'all' : opt.key)
+                  setOpen(false)
+                }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 10px',
+                  borderRadius: 5,
+                  background: selected ? 'var(--bg-3)' : 'transparent',
+                  border: 'none',
+                  color: selected ? C.text1 : C.text2,
+                  fontWeight: selected ? 600 : 400,
+                  fontSize: 13, textAlign: 'left',
+                  cursor: 'pointer', fontFamily: 'inherit',
+                  transition: 'background 0.1s ease',
+                }}
+                onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-3)' }}
+                onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent' }}
+              >
+                <span style={{ flex: 1 }}>{opt.label}</span>
+                {opt.count > 0 && (
+                  <span style={{ fontSize: 11, color: C.text3, fontVariantNumeric: 'tabular-nums' }}>
+                    {opt.count}
+                  </span>
+                )}
+                {opt.tooltip && <InfoTooltip text={opt.tooltip} placement="left" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -315,15 +698,26 @@ export function Dashboard() {
       if (['candidate', 'opponent', 'media'].includes(activeFilter)) return f.owner_type === activeFilter
       return f.stage === activeFilter
     })
+    // Sort by composite importance score (urgency + posture + momentum +
+    // stage + recent activity + growth + outlet diversity). This puts the
+    // narratives that ACTUALLY matter today at the top of the Featured
+    // Narratives section, instead of just "biggest historical pile."
+    // Ties fall back to stage order, then total mentions, so the order is
+    // deterministic even when scores collide.
     .sort((a, b) => {
+      const ia = importanceScore(a), ib = importanceScore(b)
+      if (ia !== ib) return ib - ia
       const sa = STAGE_ORDER.indexOf(a.stage), sb = STAGE_ORDER.indexOf(b.stage)
       if (sa !== sb) return sa - sb
       return b.mentions_total - a.mentions_total
     })
 
   const featuredFrames = filteredFrames.slice(0, 8)
+  // Detail-panel candidates: any frame in an "actively moving" stage.
+  // Previously only mainstream+spreading — meant a campaign with all its
+  // frames in resurfacing/active showed an empty detail-panel grid.
   const topFrames = filteredFrames
-    .filter(f => f.stage === 'mainstream' || f.stage === 'spreading')
+    .filter(f => ['mainstream', 'spreading', 'resurfacing', 'active'].includes(f.stage))
     .slice(0, 2)
 
   const counts = {
@@ -333,6 +727,8 @@ export function Dashboard() {
     media: frames.filter(f => f.owner_type === 'media').length,
     mainstream: frames.filter(f => f.stage === 'mainstream').length,
     spreading: frames.filter(f => f.stage === 'spreading').length,
+    resurfacing: frames.filter(f => f.stage === 'resurfacing').length,
+    active: frames.filter(f => f.stage === 'active').length,
     emerging: frames.filter(f => f.stage === 'emerging').length,
     fading: frames.filter(f => f.stage === 'fading').length,
     dormant: frames.filter(f => f.stage === 'dormant').length,
@@ -340,36 +736,17 @@ export function Dashboard() {
 
   return (
     <div style={{ background: C.bg1, minHeight: '100%' }}>
-      {/* Three-column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr 280px', minHeight: '100%' }}>
-
-        {/* ── Left: Filter list ── */}
-        <div style={{
-          borderRight: `1px solid ${C.border}`,
-          position: 'sticky', top: 0, alignSelf: 'start',
-          paddingBottom: 24,
-        }}>
-          <FilterItem label="All Narratives" filterKey="all" count={counts.all} active={activeFilter === 'all'} onClick={() => setActiveFilter('all')} />
-
-          <div style={{ padding: '12px 20px 4px', fontSize: 10, color: C.text3, letterSpacing: '0.1em', fontWeight: 600 }}>
-            BY OWNER
-          </div>
-          <FilterItem label="Candidate" filterKey="candidate" count={counts.candidate} active={activeFilter === 'candidate'} onClick={() => setActiveFilter('candidate')} />
-          <FilterItem label="Opponent" filterKey="opponent" count={counts.opponent} active={activeFilter === 'opponent'} onClick={() => setActiveFilter('opponent')} />
-          <FilterItem label="Media" filterKey="media" count={counts.media} active={activeFilter === 'media'} onClick={() => setActiveFilter('media')} />
-
-          <div style={{ padding: '12px 20px 4px', fontSize: 10, color: C.text3, letterSpacing: '0.1em', fontWeight: 600 }}>
-            BY STAGE
-          </div>
-          <FilterItem label="Mainstream" filterKey="mainstream" count={counts.mainstream} active={activeFilter === 'mainstream'} onClick={() => setActiveFilter('mainstream')} />
-          <FilterItem label="Spreading" filterKey="spreading" count={counts.spreading} active={activeFilter === 'spreading'} onClick={() => setActiveFilter('spreading')} />
-          <FilterItem label="Emerging" filterKey="emerging" count={counts.emerging} active={activeFilter === 'emerging'} onClick={() => setActiveFilter('emerging')} />
-          <FilterItem label="Fading" filterKey="fading" count={counts.fading} active={activeFilter === 'fading'} onClick={() => setActiveFilter('fading')} />
-          <FilterItem label="Dormant" filterKey="dormant" count={counts.dormant} active={activeFilter === 'dormant'} onClick={() => setActiveFilter('dormant')} />
-        </div>
+      {/* ── Body: featured + detail + spikes | recent articles ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', minHeight: '100%' }}>
 
         {/* ── Center: Featured cards + detail panels ── */}
         <div style={{ padding: '16px 24px', borderRight: `1px solid ${C.border}` }}>
+          {/* Race Sentiment — prominent peer card above the narrative cards.
+              Markets + forecaster ratings shown separately (no blended number).
+              Phase 1: manual values entered via the edit modal. Phase 2 will
+              swap in scraped/API values without touching this component. */}
+          <RaceSentimentCard />
+
           {loading ? (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 24 }}>
               {Array.from({ length: 8 }).map((_, i) => (
@@ -390,11 +767,57 @@ export function Dashboard() {
             </div>
           ) : (
             <>
-              {/* Featured narrative cards */}
+              {/* Featured narrative cards. The section header doubles as the
+                  filter row — label on the left, filter pills + dropdowns on
+                  the right, all on a single line. */}
               {featuredFrames.length > 0 && (
                 <div style={{ marginBottom: 28 }}>
-                  <div style={{ fontSize: 11, color: C.text3, letterSpacing: '0.12em', marginBottom: 12, fontWeight: 600, textTransform: 'uppercase' }}>
-                    Featured Narratives
+                  <div style={{
+                    display: 'flex', alignItems: 'center',
+                    gap: 12, marginBottom: 12,
+                    flexWrap: 'wrap',
+                  }}>
+                    <div style={{
+                      fontSize: 11, color: C.text3, letterSpacing: '0.12em',
+                      fontWeight: 600, textTransform: 'uppercase',
+                      display: 'inline-flex', alignItems: 'center',
+                    }}>
+                      Featured Narratives
+                      <InfoTooltip
+                        text={'The eight most important narratives right now. Ranked by a combined score: how urgent the AI thinks it is, what action it calls for (defend / attack / amplify), whether it\'s viral or growing, where it sits in its lifecycle, and how many outlets are covering it this week. Filtering by Owner or Stage re-ranks within that subset.'}
+                      />
+                    </div>
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 8,
+                      marginLeft: 'auto',
+                    }}>
+                      <FilterDropdown
+                        label="Owner"
+                        groupTooltip="Who benefits from this narrative being out there. Candidate = helps us. Opponent = helps the other side. Media = the press is driving it on their own."
+                        activeFilter={activeFilter}
+                        onSelect={setActiveFilter}
+                        options={[
+                          { key: 'candidate', label: 'Candidate', count: counts.candidate, tooltip: OWNER_HELP.candidate },
+                          { key: 'opponent',  label: 'Opponent',  count: counts.opponent,  tooltip: OWNER_HELP.opponent },
+                          { key: 'media',     label: 'Media',     count: counts.media,     tooltip: OWNER_HELP.media },
+                        ]}
+                      />
+                      <FilterDropdown
+                        label="Stage"
+                        groupTooltip={'How big the story is right now. Updated automatically based on how many outlets are covering it and how that\'s changing week-over-week.'}
+                        activeFilter={activeFilter}
+                        onSelect={setActiveFilter}
+                        options={[
+                          { key: 'mainstream',  label: 'Mainstream',  count: counts.mainstream,  tooltip: STAGE_HELP.mainstream },
+                          { key: 'spreading',   label: 'Spreading',   count: counts.spreading,   tooltip: STAGE_HELP.spreading },
+                          { key: 'resurfacing', label: 'Resurfacing', count: counts.resurfacing, tooltip: STAGE_HELP.resurfacing },
+                          { key: 'active',      label: 'Active',      count: counts.active,      tooltip: STAGE_HELP.active },
+                          { key: 'emerging',    label: 'Emerging',    count: counts.emerging,    tooltip: STAGE_HELP.emerging },
+                          { key: 'fading',      label: 'Fading',      count: counts.fading,      tooltip: STAGE_HELP.fading },
+                          { key: 'dormant',     label: 'Dormant',     count: counts.dormant,     tooltip: STAGE_HELP.dormant },
+                        ]}
+                      />
+                    </div>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
                     {featuredFrames.map(f => <FeaturedCard key={f.id} frame={f} />)}
@@ -416,8 +839,12 @@ export function Dashboard() {
                 <div style={{
                   fontSize: 11, color: C.text3, letterSpacing: '0.12em',
                   marginBottom: 12, fontWeight: 600, textTransform: 'uppercase',
+                  display: 'flex', alignItems: 'center',
                 }}>
                   24h Spikes {spikes.length > 0 ? `(${spikes.length})` : ''}
+                  <InfoTooltip
+                    text={'Narratives that got noticeably more coverage in the last 24 hours than usual. The "Nx surge" number is how many times more articles than the baseline. Worth a quick look — could be a real-time story breaking.'}
+                  />
                 </div>
                 {spikes.length > 0 ? (
                   <div style={{
@@ -466,8 +893,12 @@ export function Dashboard() {
           maxHeight: 'calc(100vh - 76px)', overflowY: 'auto',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: C.text1, letterSpacing: '0.08em' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: C.text1, letterSpacing: '0.08em', display: 'inline-flex', alignItems: 'center' }}>
               RECENT ARTICLES
+              <InfoTooltip
+                text={'The latest articles the system has pulled in that look race-relevant. The yellow number on the right is an AI-assigned relevance score from 0–100 — higher means more directly about your race.'}
+                placement="left"
+              />
             </span>
             <span style={{ fontSize: 11, color: C.text3 }}>
               {loading ? '' : `${recent.length} new`}

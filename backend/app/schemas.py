@@ -41,10 +41,17 @@ class CampaignProfileOut(OrmBase):
     excluded_keywords: Optional[list[str]] = None
     geography_keywords: Optional[list[str]] = None
     trends_keywords: Optional[list[str]] = None
+    instagram_handles: Optional[list[str]] = None
+    facebook_pages: Optional[list[str]] = None
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 
-    @field_validator("key_priorities", "relevance_keywords", "excluded_keywords", "geography_keywords", "neighborhood_keywords", "trends_keywords", mode="before")
+    @field_validator(
+        "key_priorities", "relevance_keywords", "excluded_keywords",
+        "geography_keywords", "neighborhood_keywords", "trends_keywords",
+        "instagram_handles", "facebook_pages",
+        mode="before",
+    )
     @classmethod
     def _parse_string_list(cls, v):
         if isinstance(v, str):
@@ -74,6 +81,8 @@ class CampaignProfileIn(BaseModel):
     excluded_keywords: Optional[list[str]] = None
     geography_keywords: Optional[list[str]] = None
     trends_keywords: Optional[list[str]] = None
+    instagram_handles: Optional[list[str]] = None
+    facebook_pages: Optional[list[str]] = None
 
 
 # ── Race Directory ────────────────────────────────────────────────────────────
@@ -291,6 +300,8 @@ class OpponentIn(BaseModel):
     office: Optional[str] = None
     party: Optional[str] = None
     notes: Optional[str] = None
+    instagram_handles: Optional[list[str]] = None
+    facebook_pages: Optional[list[str]] = None
 
 
 class OpponentOut(OrmBase):
@@ -299,7 +310,19 @@ class OpponentOut(OrmBase):
     office: Optional[str]
     party: Optional[str]
     notes: Optional[str]
+    instagram_handles: Optional[list[str]] = None
+    facebook_pages: Optional[list[str]] = None
     created_at: datetime
+
+    @field_validator("instagram_handles", "facebook_pages", mode="before")
+    @classmethod
+    def _parse_handle_list(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                return []
+        return v
 
 
 class OpponentActivityOut(OrmBase):
@@ -967,5 +990,76 @@ class RaceImportResult(BaseModel):
     reminders_created: int
     skipped: int
     errors: list[str]
+
+
+# ── Race Sentiment (markets + forecaster ratings) ─────────────────────────────
+
+class RaceSentimentOut(OrmBase):
+    id: int
+    source: str
+    source_type: Literal["market", "rating"]
+    display_name: str
+    candidate_pct: Optional[float] = None
+    opponent_pct: Optional[float] = None
+    delta_7d: Optional[float] = None
+    rating_label: Optional[str] = None
+    rating_min_pct: Optional[float] = None
+    rating_max_pct: Optional[float] = None
+    favors: Optional[Literal["candidate", "opponent", "tossup"]] = None
+    source_url: Optional[str] = None
+    as_of: Optional[datetime] = None
+    notes: Optional[str] = None
+    external_id: Optional[str] = None
+    external_metadata: Optional[dict] = None
+    last_synced_at: Optional[datetime] = None
+    last_sync_error: Optional[str] = None
+    updated_at: Optional[datetime] = None
+
+    @field_validator("external_metadata", mode="before")
+    @classmethod
+    def _parse_external_metadata(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                return None
+        return v
+
+
+class RaceSentimentUpdate(BaseModel):
+    """Partial-update payload. Every field is optional so the UI can patch
+    one cell at a time without resending the whole row."""
+    candidate_pct: Optional[float] = None
+    opponent_pct: Optional[float] = None
+    delta_7d: Optional[float] = None
+    rating_label: Optional[str] = None
+    rating_min_pct: Optional[float] = None
+    rating_max_pct: Optional[float] = None
+    favors: Optional[Literal["candidate", "opponent", "tossup"]] = None
+    source_url: Optional[str] = None
+    as_of: Optional[datetime] = None
+    notes: Optional[str] = None
+    external_id: Optional[str] = None
+    external_metadata: Optional[dict] = None  # JSON serialized on write
+
+
+class RaceSentimentSnapshotOut(OrmBase):
+    id: int
+    source: str
+    source_type: Literal["market", "rating"]
+    candidate_pct: Optional[float] = None
+    opponent_pct: Optional[float] = None
+    rating_label: Optional[str] = None
+    rating_min_pct: Optional[float] = None
+    rating_max_pct: Optional[float] = None
+    favors: Optional[str] = None
+    captured_at: datetime
+    source_as_of: Optional[datetime] = None
+    # Data-quality flag — see race_sentiment_sync._flag_previous_if_isolated
+    # and the suspect-snapshots audit endpoint. The history endpoint filters
+    # suspect rows out by default; when callers pass ?include_suspect=true
+    # they need to know which rows were flagged.
+    suspect: bool = False
+    suspect_reason: Optional[str] = None
 
 

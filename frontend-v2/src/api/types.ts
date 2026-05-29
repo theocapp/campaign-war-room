@@ -1,5 +1,9 @@
 export type OwnerType = 'candidate' | 'opponent' | 'media'
-export type Stage = 'emerging' | 'spreading' | 'mainstream' | 'fading' | 'dormant'
+// Must match every stage the backend's _narrative_stage() can return — see
+// services/narrative_frames.py:_narrative_stage. Missing `resurfacing` and
+// `active` here caused TypeScript to silently allow but mis-typecheck the
+// Dashboard's stage filter; bug-hunt agent caught two unreachable comparisons.
+export type Stage = 'emerging' | 'spreading' | 'resurfacing' | 'active' | 'mainstream' | 'fading' | 'dormant'
 export type Trend = 'up' | 'flat' | 'down'
 export type RelevanceLabel = 'critical' | 'high' | 'medium' | 'low' | 'irrelevant'
 export type Sentiment = 'positive' | 'negative' | 'neutral' | 'mixed'
@@ -21,6 +25,11 @@ export interface NarrativeFrame {
   name: string
   description: string
   owner_type: OwnerType
+  // V13.21 — subject_type indicates who the narrative is ABOUT (vs
+  // owner_type which is who BENEFITS). Frontend uses both to render
+  // the 4-quadrant color scheme. Optional because legacy endpoints
+  // may not include it.
+  subject_type?: OwnerType
   source: 'human' | 'llm'
   stage: Stage
   created_at: string
@@ -46,6 +55,23 @@ export interface NarrativeFrame {
     social: number
   }
   key_articles?: NarrativeKeyArticle[]
+  // Momentum classifier output (see backend/app/services/frame_momentum.py).
+  // One of "viral" | "amplified" | "missing_coverage" | "elite_only" |
+  // "stable" | "no_trend_signal", or null/undefined when the frame is below
+  // MIN_ACTIVE_ARTICLES.
+  momentum_signal?: string | null
+  // Classifier inputs (parsed JSON). Shape varies per signal — see the
+  // services/frame_momentum.py docstring. Used for tooltip text.
+  momentum_data?: Record<string, unknown> | null
+  // Strategic interpretation of the (momentum_signal, owner_type) pair.
+  // posture in {amplify, offensive, defensive, monitor, ignore}.
+  // Action is null for "ignore"; urgency in {high, medium, low}.
+  // See backend/app/services/strategic_lens.py for the full matrix.
+  strategic_lens?: {
+    posture: 'amplify' | 'offensive' | 'defensive' | 'monitor' | 'ignore'
+    action: string | null
+    urgency: 'high' | 'medium' | 'low'
+  } | null
 }
 
 export interface DetailArticle {
@@ -80,6 +106,206 @@ export interface ActivityPoint {
   blog: number
   social: number
   unknown: number
+}
+
+// One cluster of candidate-frame staging rows that meets promotion
+// thresholds. Returned by /api/narrative-frames/candidate-frames/pending.
+// Surfaced in the UI as "the AI noticed these emerging narratives —
+// promote any into tracked frames?"
+export interface CandidateFrameCluster {
+  suggested_name: string
+  suggested_description: string
+  owner_type_hint: 'candidate' | 'opponent' | 'media'
+  // Inferred subject (who the narrative is ABOUT) from the cluster's
+  // representative name. Combines with owner_type_hint to produce a
+  // 4-quadrant label. Falls back to "media" when the heuristic can't
+  // pin a side. Optional because the field was added later — older
+  // cached responses may still arrive without it.
+  subject_type_hint?: 'candidate' | 'opponent' | 'media'
+  n_rows: number
+  n_articles: number
+  n_outlets: number
+  outlet_names: string[]
+  evidence_quotes: string[]
+  candidate_frame_ids: number[]
+  first_seen?: string | null
+  last_seen?: string | null
+}
+
+// 2D narrative landscape data — projection of pending candidate_frames
+// for visual cluster inspection. See `services/narrative_landscape.py`.
+export interface NarrativeLandscapePoint {
+  candidate_frame_id: number
+  x: number
+  y: number
+  cluster_id: number          // -1 = noise singleton
+  suggested_name: string
+  evidence_quote: string
+  owner_type_hint: 'candidate' | 'opponent' | 'media'
+  source_item_id: number | null
+  source_name: string | null
+  source_title: string | null
+  outlet_id: number | null
+  outlet_name: string | null
+  outlet_type: string | null
+}
+
+export interface NarrativeLandscapeCluster {
+  cluster_id: number
+  size: number
+  representative_name: string
+  owner_type_hint: 'candidate' | 'opponent' | 'media'
+  // Inferred subject (who the narrative is ABOUT) from the representative
+  // name — combines with owner_type_hint to produce a 4-quadrant label.
+  // Optional for forward-compat with older deploys.
+  subject_type_hint?: 'candidate' | 'opponent' | 'media'
+  outlet_count: number
+  outlet_tier_counts: {
+    national: number
+    regional: number
+    local: number
+    blog: number
+    social: number
+    other: number
+  }
+  outlet_names: string[]
+}
+
+export interface NarrativeLandscape {
+  points: NarrativeLandscapePoint[]
+  clusters: NarrativeLandscapeCluster[]
+  computed_at: string
+  n_total: number
+  n_clustered: number
+  n_noise: number
+  error: string | null
+}
+
+// 2D landscape over ESTABLISHED (already-promoted) narrative frames.
+// Companion to the candidate-frames landscape — see
+// `services/narrative_landscape_established.py`. Each frame is its own
+// point; no clustering (frames are already discrete). Position via UMAP
+// over name + description embeddings = topical similarity.
+export interface EstablishedLandscapeFrame {
+  frame_id: number
+  name: string
+  description: string | null
+  owner_type: 'candidate' | 'opponent' | 'media'
+  x: number
+  y: number
+  mentions_total: number          // drives bubble SIZE in the UI
+  mentions_this_week: number
+  outlet_count: number
+  outlet_tier_counts: {
+    national: number
+    regional: number
+    local: number
+    blog: number
+    social: number
+  }
+  stage: string | null            // emerging/spreading/mainstream/fading/dormant
+  momentum_signal: string | null  // viral/amplified/missing_coverage/elite_only/stable
+}
+
+// One named topic region — a HDBSCAN cluster over established frame
+// positions, labeled by LLM (or user-edited). See backend
+// `services/topic_regions.py`. Member frame IDs index into
+// EstablishedLandscape.frames.
+export interface TopicRegion {
+  region_id: number          // transient — re-numbered each compute
+  persisted_id: number | null  // DB row id for the edit endpoint (null if untracked)
+  label: string
+  member_frame_ids: number[]
+  edited_by_user: boolean    // true = user manually renamed it
+  owner_mix: { candidate: number; opponent: number; media: number }
+}
+
+export interface EstablishedLandscape {
+  frames: EstablishedLandscapeFrame[]
+  regions: TopicRegion[]            // labeled topic groupings
+  ungrouped_frame_ids: number[]     // HDBSCAN noise — frames not in any region
+  computed_at: string
+  n_total: number
+  error: string | null
+}
+
+// One article-extract dot inside a focused established bubble. Lazy-
+// loaded via GET /api/narrative-frames/{id}/landscape-detail.
+export interface FrameMemberArticle {
+  source_item_id: number
+  title: string | null
+  extracted_text: string | null  // the LLM-pulled quote — what makes the dot meaningful
+  source_name: string | null
+  outlet_name: string | null
+  outlet_type: string | null
+  published_at: string | null
+}
+
+export interface FrameLandscapeDetail {
+  frame_id: number
+  articles: FrameMemberArticle[]
+}
+
+// V12: dot-level landscape. Atomic unit = one article extract; visible
+// grouping emerges from UMAP-projected positions + nested hull overlays
+// (narrative-level frame_id, topic-level region_id).
+// V13.19 — both owner_type (who BENEFITS) and subject_type (who it's
+// ABOUT) ride on every dot/narrative, so the chart can color via the
+// 4-quadrant scheme (owner × subject).
+export interface ExtractDot {
+  id: number                      // NarrativeFrameMention.id
+  x: number
+  y: number
+  frame_id: number                // parent narrative
+  owner_type: 'candidate' | 'opponent' | 'media'
+  subject_type: 'candidate' | 'opponent' | 'media'
+  extracted_text: string
+  source_item_id: number
+  source_title: string | null
+  source_name: string | null
+  outlet_name: string | null
+  outlet_type: string | null
+  published_at: string | null
+}
+
+export interface NarrativeGroupInfo {
+  frame_id: number
+  name: string
+  description: string | null
+  owner_type: 'candidate' | 'opponent' | 'media'
+  subject_type: 'candidate' | 'opponent' | 'media'
+  mentions_total: number
+  dot_count: number
+}
+
+// 4-quadrant breakdown of a topic's authority-weighted contributions.
+// Keys mirror subject_classifier.QUADRANT_* in backend.
+export interface QuadrantMix {
+  our_defense: number
+  our_offense: number
+  their_defense: number
+  their_offense: number
+  media: number
+}
+
+export interface TopicGroupInfo {
+  region_id: number
+  persisted_id: number | null
+  label: string
+  edited_by_user: boolean
+  member_frame_ids: number[]
+  owner_mix: { candidate: number; opponent: number; media: number }
+  quadrant_mix: QuadrantMix
+}
+
+export interface DotLandscape {
+  dots: ExtractDot[]
+  narratives: NarrativeGroupInfo[]
+  topics: TopicGroupInfo[]
+  ungrouped_frame_ids: number[]
+  computed_at: string
+  n_total: number
+  error: string | null
 }
 
 export interface NarrativeFrameDetail {
@@ -153,11 +379,135 @@ export interface SourceItem {
   reviewed: boolean
   dismissed: boolean
   archived_as_irrelevant?: boolean
+  /**
+   * Other source rows that the backend judged to be the same wire story
+   * (normalized headline matches exactly AND published within 24h). The
+   * representative row is the one this SourceItem describes; `duplicates`
+   * lists the other versions across other outlets. Only populated on
+   * endpoints that explicitly group (currently /articles/recent).
+   */
+  duplicates?: ArticleDuplicate[]
+}
+
+export interface ArticleDuplicate {
+  id: number
+  source_name?: string
+  source_url?: string
+  published_at?: string
 }
 
 export interface ReviewQueueItem extends SourceItem {
   related_issues: Array<{ id: number; name: string }>
   opponent_attack_count: number
+}
+
+/**
+ * Full article detail — everything we know about a single SourceItem.
+ * Returned by GET /api/articles/{id} and rendered by the dashboard's
+ * article-detail modal. See backend/app/routes/dashboard.py for the
+ * source of truth on field shapes.
+ */
+export interface ArticleDetail {
+  id: number
+  title: string
+
+  // Source / authorship
+  source_name?: string
+  source_url?: string
+  source_type?: string
+  source_author?: string
+  source_owner_type?: string
+  source_owner_confidence?: string
+  publisher_domain?: string
+
+  // Timestamps (ISO strings)
+  published_at?: string
+  ingested_at?: string
+  created_at?: string
+
+  // Body
+  summary?: string
+  raw_text?: string
+
+  // Scoring
+  race_relevance_score?: number
+  race_relevance_label?: string
+  relevance_reasons: string[]
+  actionability_score?: number
+  actionability_label?: string
+  priority_score?: number
+  urgency?: string
+  sentiment?: string
+  content_category?: string
+  geo_relevance?: string
+
+  // Mention flags
+  candidate_mentioned: boolean
+  opponent_mentioned: boolean
+  district_mentioned: boolean
+  priority_issue_mentioned: boolean
+
+  // Perspective classifier (article_perspective.py — 3-bucket signal used
+  // primarily for landscape dot color, not as the headline framing label).
+  perspective?: string | null         // pro_candidate | pro_opponent | neutral | null
+  perspective_method?: string | null
+  perspective_confidence?: string | null
+  perspective_reason?: string | null
+
+  // LLM-judged framing — finer-grained than perspective. Tells the user what
+  // this article DOES to their candidate (helps / hurts) rather than which
+  // side is pushing it (pro_candidate / pro_opponent). Sourced from the
+  // single combined campaign_analysis call.
+  framing?: string | null             // helps_candidate | hurts_candidate | opponent_news | background | irrelevant
+
+  // Credibility / quality
+  credibility_score?: number
+  source_credibility?: string
+  credibility_note?: string
+  extraction_quality_score?: number
+  extraction_quality_label?: string
+  extraction_quality_reasons: string[]
+
+  // GDELT data
+  gdelt_themes: string[]
+  gdelt_tone?: {
+    avg_tone?: number
+    positive?: number
+    negative?: number
+    polarity?: number
+    activity_density?: number
+    group_density?: number
+    word_count?: number
+  } | null
+
+  // Full LLM analysis (shape varies — see structured_extraction in models)
+  structured_extraction?: Record<string, unknown> | null
+
+  // Lifecycle flags
+  reviewed: boolean
+  dismissed: boolean
+  archived_as_irrelevant?: boolean
+  review_note?: string
+
+  // Relationships
+  issue_mentions: Array<{
+    issue_id: number
+    name?: string
+    summary?: string
+    link_strength?: number
+    link_reasons: string[]
+  }>
+  opponent_activities: Array<{
+    id: number
+    opponent_id: number
+    opponent_name?: string
+    claim?: string
+    attack?: string
+    promise?: string
+    contradiction_note?: string
+    repeated_theme?: string
+    created_at?: string
+  }>
 }
 
 export interface Opponent {
@@ -166,7 +516,84 @@ export interface Opponent {
   office?: string
   party?: string
   fec_candidate_id?: string
+  /** Bare IG usernames — politicians often run several parallel accounts
+   *  (campaign / office / personal) and we track all of them. */
+  instagram_handles?: string[] | null
+  /** Bare FB page slugs — see instagram_handles. */
+  facebook_pages?: string[] | null
   created_at: string
+}
+
+/** One handle candidate surfaced by /api/setup/discover-handles. */
+export interface DiscoveredHandle {
+  handle: string
+  url: string
+  snippet?: string | null
+  confidence: 'high' | 'medium' | 'low'
+  score: number
+}
+
+export interface HandleDiscoveryResult {
+  name: string
+  location?: string | null
+  instagram: DiscoveredHandle[]
+  facebook: DiscoveredHandle[]
+}
+
+/** Platforms surfaced by Phase 2 third-party discovery. Matches the
+ *  backend's sub_platform vocab. */
+export type ThirdPartyPlatform =
+  | 'instagram' | 'facebook' | 'bluesky'
+  | 'reddit_subreddit' | 'reddit_user' | 'youtube'
+
+/** A third-party account candidate surfaced by /api/setup/discover-third-party.
+ *  These are accounts/pages that MENTION the race — local news outlets,
+ *  county committees, PACs, statewide subreddits — not the candidate's
+ *  or opponent's own accounts.
+ */
+export interface DiscoveredThirdPartyAccount {
+  platform: ThirdPartyPlatform
+  identifier: string
+  display_name?: string | null
+  url: string
+  snippet?: string | null
+  score: number
+  confidence: 'high' | 'medium' | 'low'
+  inferred_role: string
+  /** When non-null we have a usable RSS feed URL for this platform —
+   *  i.e. ingestable today. Null for IG/FB (paused) or YouTube @handles
+   *  that need a channel-id lookup before RSS is buildable. */
+  rss_url?: string | null
+  matched_queries?: string[]
+  /** Bare anchor names that surfaced this account. e.g. ["Paige Cognetti"]
+   *  for results that only show up in candidate-anchored searches,
+   *  ["Rob Bresnahan"] for opponent-only, both for results that appear
+   *  in dedup'd searches across both names. UI uses this to render
+   *  "via X" pills so it's clear whose search produced each result. */
+  matched_anchors?: string[]
+}
+
+export interface ThirdPartyDiscoveryResult {
+  candidate_name: string
+  location?: string | null
+  accounts_by_platform: Record<ThirdPartyPlatform, DiscoveredThirdPartyAccount[]>
+  /** Map of platform → list of identifiers the user already confirmed.
+   *  UI uses this to hide or mark already-tracked candidates. */
+  already_tracked: Partial<Record<ThirdPartyPlatform, string[]>>
+}
+
+/** A confirmed tracked third-party account stored in the DB. */
+export interface TrackedThirdPartyAccount {
+  id: number
+  platform: ThirdPartyPlatform
+  identifier: string
+  display_name?: string | null
+  url: string
+  inferred_role?: string | null
+  snippet?: string | null
+  rss_url?: string | null
+  notes?: string | null
+  added_at: string
 }
 
 export interface OpponentActivity {
@@ -192,6 +619,7 @@ export interface SourceMonitor {
   required_terms?: string[]
   excluded_terms?: string[]
   created_at: string
+  last_checked_at?: string | null
 }
 
 export interface CampaignConfig {
@@ -200,10 +628,19 @@ export interface CampaignConfig {
   office?: string
   district?: string
   state?: string
+  // Backend CampaignConfig stores location free-form ("Scranton, PA" or
+  // "Scranton/Wilkes-Barre, PA-08"). Used as a fallback source for state
+  // derivation when district doesn't encode it.
+  location?: string
+  party?: string
   election_date?: string
   campaign_message?: string
   keywords?: string[]
   priorities?: string[]
+  /** Bare IG usernames — see Opponent.instagram_handles. */
+  instagram_handles?: string[] | null
+  /** Bare FB page slugs — see Opponent.facebook_pages. */
+  facebook_pages?: string[] | null
 }
 
 export interface IngestStatus {
@@ -217,6 +654,9 @@ export interface Spike {
   reach_24h: number
   avg_daily_reach: number
   ratio: number
+  /** ISO timestamp of the latest article in the spike — when the burst
+   *  actually peaked. Drives Timeline view event placement. */
+  peak_at?: string | null
 }
 
 export interface TrendDataPoint {
@@ -242,45 +682,101 @@ export interface ToneSeries {
 }
 
 // Morning briefing — backend may vary; we type loosely
+// These types match what /api/briefing/morning ACTUALLY returns
+// (verified against the live backend on 2026-05-24). The previous shape
+// included `mention_count_24h`, `why_it_matters`, `risk_warnings`,
+// `suggested_actions`, etc. — none of which the backend sends. The frontend
+// silently failed to render the LLM race-memo and the new-articles list
+// because of the field-name mismatch (`race_situation_memo` vs `race_memo`,
+// `new_developments` vs `new_articles`). Keep this aligned with
+// routes/dashboard.py:get_morning_briefing + _item_dict.
 export interface MorningBriefingNarrativeCard {
-  narrative_id?: number
-  frame_id?: number
-  id?: number
-  frame_name?: string
-  short_label?: string
-  name?: string
-  canonical_text?: string
+  id: number
+  name: string
   owner_type?: OwnerType
-  direction?: Trend
-  trend?: Trend
-  status?: string
-  traction_score?: number
-  mention_count_24h?: number
-  this_week?: number
-  last_week?: number
-  source_count?: number
-  why_it_matters?: string
+  this_week: number
+  last_week: number
 }
 
-export interface MorningBriefingDevelopment {
-  cluster_id?: string
+// Subset of SourceItem returned by routes/dashboard.py:_item_dict.
+// Smaller than the full SourceItem — only includes the briefing-relevant fields.
+export interface BriefingArticle {
+  id: number
   title: string
-  source_count?: number
-  why_it_matters?: string
-  issue?: string
-  recency?: string
+  summary?: string | null
+  source_name?: string | null
+  source_url?: string | null
+  published_at?: string | null
+  race_relevance_score?: number | null
+  actionability_label?: string | null
+  framing?: string | null
+}
+
+// v2 grounded-memo shapes. Returned only when /briefing/morning?v=2.
+// Default (?v=1) keeps `race_memo` as a plain string for backward compat
+// — see GroundedMemo vs string union in MorningBriefing below.
+export interface BriefingCitation {
+  marker: string       // "C1", "C2", ...
+  claim_id: number
+  article_id: number
+}
+
+export interface BriefingClaimEntity {
+  id: string           // canonical_id
+  name: string
+  affiliation?: string | null
+}
+
+export interface BriefingClaim {
+  claim_id: number
+  quote: string
+  label: string        // attack | endorsement | vote | commitment | policy_position | defense
+  entities: BriefingClaimEntity[]
+  outlet: string
+  reliability_score: number | null
+  published_at: string | null
+  article_id: number
+  article_url: string | null
+}
+
+export interface GroundedMemo {
+  text: string                    // prose with [C1] [C2] markers
+  citations: BriefingCitation[]
+  sources_used: BriefingClaim[]   // also drives the "Sources Used" expandable
+}
+
+export interface BriefingEntity {
+  id: string                      // canonical_id, e.g. "person:bresnahan"
+  name: string
+  type: 'person' | 'organization' | 'bill' | 'event' | 'location'
+  affiliation: 'D' | 'R' | 'I' | null
+  mentions_this_week: number
+  mentions_last_week: number
+  delta: number
+  sample_recent_titles: string[]
 }
 
 export interface MorningBriefing {
-  candidate_name?: string
-  race_situation_memo?: string
-  narrative_pulse?: MorningBriefingNarrativeCard[]
-  needs_response?: ReviewQueueItem[]
-  new_developments?: MorningBriefingDevelopment[]
-  review_queue_count?: number
-  top_issues?: Array<{ id: number; name: string; urgency: string }>
-  suggested_actions?: string[]
-  risk_warnings?: string[]
+  generated_at: string
+  meta: {
+    total_articles_today: number
+    relevant_articles_today: number
+  }
+  race_memo?: string | GroundedMemo | null
+  narrative_pulse: MorningBriefingNarrativeCard[]
+  needs_response: BriefingArticle[]
+  new_articles: BriefingArticle[]
+  spike_alerts: Array<{
+    frame_id: number
+    name: string
+    score: number
+    reach: number
+  }>
+  // Only present when ?v=2
+  top_entities?: BriefingEntity[]
+  // Only present when ?v=2 — last 48h of candidate-specific labeled claims.
+  // May be empty in quiet windows; render conditionally.
+  overnight_changes?: BriefingClaim[]
 }
 
 export interface SetupStatus {
@@ -289,3 +785,128 @@ export interface SetupStatus {
   source_added: boolean
   narrative_frame_added: boolean
 }
+
+// AI triage verdict for a proposed (HDBSCAN-clustered) cluster of candidate
+// frames. One row per cluster_fingerprint (sha256 of sorted member ids)
+// so verdicts survive HDBSCAN cluster_id reshuffles. See backend
+// services/narrative_triage.py.
+export type NarrativeTriageVerdictKind =
+  | 'auto_reject'              // noise heuristic — hide from UI by default
+  | 'auto_merge'                // AI: this IS an existing tracked narrative
+  | 'auto_promote_suggested'    // AI: clearly worth tracking — pre-fill modal
+  | 'human_review'              // AI uncertain — user decides un-pre-filled
+
+export interface NarrativeTriageVerdict {
+  id: number
+  cluster_fingerprint: string
+  member_candidate_frame_ids: number[]
+  verdict: NarrativeTriageVerdictKind
+  confidence: number
+  reasoning: string | null
+  // Set when verdict === 'auto_merge'
+  suggested_merge_frame_id: number | null
+  // Set when verdict === 'auto_promote_suggested' (or 'human_review' as a head-start)
+  suggested_name: string | null
+  suggested_description: string | null
+  suggested_owner_type: string | null
+  dismissed_at: string | null
+  applied_at: string | null
+  judged_by_model: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+// ── Race sentiment (markets + forecaster ratings) ─────────────────────────────
+// Phase 1: every source row may have only some fields populated. Markets fill
+// the *_pct + delta_7d fields. Forecasters fill rating_label, rating_min_pct,
+// rating_max_pct, favors. No single row blends both — by design.
+
+export type RaceSentimentSourceType = 'market' | 'rating'
+export type RaceSentimentFavors = 'candidate' | 'opponent' | 'tossup'
+
+export interface RaceSentiment {
+  id: number
+  source: string                // slug: polymarket | kalshi | cook | sabato | inside_elections | ddhq
+  source_type: RaceSentimentSourceType
+  display_name: string
+  // Markets
+  candidate_pct: number | null
+  opponent_pct: number | null
+  delta_7d: number | null
+  // Ratings (as a band, not a fake percent)
+  rating_label: string | null
+  rating_min_pct: number | null
+  rating_max_pct: number | null
+  favors: RaceSentimentFavors | null
+  // Common
+  source_url: string | null
+  as_of: string | null          // ISO datetime — when the source itself published this
+  notes: string | null
+  // Phase 2: connector config + sync state
+  external_id: string | null
+  external_metadata: Record<string, unknown> | null
+  last_synced_at: string | null
+  last_sync_error: string | null
+  updated_at: string | null     // ISO datetime — when our DB row was last touched
+}
+
+export type RaceSentimentUpdate = Partial<Omit<RaceSentiment, 'id' | 'source' | 'source_type' | 'display_name' | 'updated_at' | 'last_synced_at' | 'last_sync_error'>>
+
+export interface RaceSentimentSnapshot {
+  id: number
+  source: string
+  source_type: RaceSentimentSourceType
+  candidate_pct: number | null
+  opponent_pct: number | null
+  rating_label: string | null
+  rating_min_pct: number | null
+  rating_max_pct: number | null
+  favors: string | null
+  captured_at: string           // ISO datetime
+  source_as_of: string | null
+}
+
+// Phase 3: timeline events overlaid on the forecast chart.
+// Each event is one of three types — used to color/icon them.
+export type TimelineEventType = 'frame_created' | 'frame_stage_change' | 'top_article'
+
+export interface TimelineEvent {
+  type: TimelineEventType
+  timestamp: string             // ISO datetime, Z-suffixed
+  label: string
+  frame_id?: number
+  owner_type?: string
+  subject_type?: string | null
+  from_stage?: string
+  to_stage?: string
+  article_id?: number
+  score?: number
+  source_name?: string
+}
+
+// Per-frame lifecycle events derived from when articles actually matched
+// the frame — NOT when the frame was promoted in the database. See
+// /api/race-sentiment/narrative-lifecycle.
+export type NarrativeLifecycleEventType =
+  | 'narrative_emerged'
+  | 'narrative_peaked'
+  | 'narrative_faded'
+
+export interface NarrativeLifecycleEvent {
+  type: NarrativeLifecycleEventType
+  timestamp: string             // ISO datetime, Z-suffixed
+  label: string                 // frame name
+  frame_id: number
+  owner_type: string | null
+  // subject_type: who the narrative is ABOUT (resolved server-side via the
+  // name-based heuristic when the frame's own field is NULL). Combined with
+  // owner_type to drive the 4-quadrant color scheme on the Timeline.
+  subject_type: string | null
+  // Lifetime article-match count for the frame — drives the Timeline pin
+  // SIZE so a narrative's reach is visible at a glance. Stable across all
+  // event types for the same frame, so the Emerged / Peaked / Faded pins
+  // for one narrative are sized comparably.
+  total_mentions: number
+  peak_count?: number           // only on narrative_peaked
+}
+

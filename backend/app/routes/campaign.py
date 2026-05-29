@@ -10,6 +10,8 @@ from app.schemas import CampaignProfileOut, CampaignProfileIn, CampaignInitializ
 from app.services.monitors import auto_setup_monitors, run_historical_backfill
 from app.services.gdelt_backfill import run_gdelt_backfill
 from app.services.campaign_setup import infer_election_date, initialize_campaign
+from app.services.district_geojson import get_district_geojson
+from app.services.race_cities import get_race_cities
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -131,6 +133,26 @@ def _run_backfill_then_rescore_then_rematch(days_back: int, source: str = "api")
                 )
             except Exception as exc:
                 logger.warning("feed_discovery after backfill failed: %s", exc)
+
+            # Populate publisher_domain on already-ingested Google News items
+            # so the yield-discovery job has data to work with from day 1.
+            # Going forward, ingestion sets the column inline.
+            try:
+                from app.services.feed_discovery_yield import (
+                    backfill_publisher_domain_from_google_news,
+                )
+                pdb_result = backfill_publisher_domain_from_google_news(db)
+                logger.info(
+                    "publisher_domain backfill after backfill: updated=%d "
+                    "(considered=%d, feeds_fetched=%d)",
+                    pdb_result["updated"],
+                    pdb_result["candidates_considered"],
+                    pdb_result["feeds_fetched"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "publisher_domain backfill after backfill failed: %s", exc,
+                )
 
             # Rescore newly ingested articles, then auto-trigger rematch when done
             try:
@@ -416,3 +438,45 @@ def update_campaign(body: CampaignProfileIn, db: Session = Depends(get_db)):
         logger.warning("auto_setup_monitors failed during campaign update: %s", exc, exc_info=True)
 
     return _config_to_profile(config)
+
+
+@router.get("/race/cities")
+def race_cities(limit: int = 12, db: Session = Depends(get_db)):
+    """Return cities inside the current campaign's district, auto-derived
+    from the US Census Gazetteer + district GeoJSON bounding box.
+
+    Each city: {id, name, lat, lon, state, lsad, aland}. Sorted by land
+    area (rough population proxy). Powers the Geographic Overlay markers
+    without any per-race manual curation.
+    """
+    config = db.query(CampaignConfig).first()
+    if not config or not config.district:
+        raise HTTPException(status_code=404, detail="no campaign / district configured")
+    geo = get_district_geojson(config.district)
+    if not geo:
+        raise HTTPException(status_code=404, detail=f"could not resolve district '{config.district}'")
+    cities = get_race_cities(geo, config.district, limit=limit)
+    return {"district": config.district, "cities": cities}
+
+
+@router.get("/race/district-geojson")
+def race_district_geojson(db: Session = Depends(get_db)):
+    """Return the GeoJSON boundary for the current campaign's congressional
+    district. Cached to disk per district; fetched live from US Census
+    TIGERweb on first request.
+
+    Used by the Geographic Overlay page to draw the district outline on a
+    real map. Works automatically for any US House race — just set
+    `campaign.district` to the standard `<STATE>-<NN>` format.
+
+    Returns 404 if no campaign is configured or the district can't be
+    resolved. The frontend handles this gracefully (falls back to a tile
+    map with no boundary overlay).
+    """
+    config = db.query(CampaignConfig).first()
+    if not config or not config.district:
+        raise HTTPException(status_code=404, detail="no campaign / district configured")
+    data = get_district_geojson(config.district)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"could not resolve district '{config.district}'")
+    return data
