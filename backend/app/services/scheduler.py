@@ -956,25 +956,52 @@ def _run_fec() -> None:
         log.exception("Scheduled FEC polling failed with an unhandled exception")
 
 
-def _run_race_sentiment_sync() -> None:
-    """Daily: refresh prediction-market prices + forecaster ratings.
+def _run_race_sentiment_market_sync() -> None:
+    """Frequent: refresh prediction-market prices (Polymarket, Kalshi).
 
-    Each connector failure is recorded on the row's last_sync_error column
-    so the UI can surface it; a single bad source never blocks the others.
+    Markets reprice continuously around news events; a 2h cadence
+    captures meaningful intra-day shifts without hammering upstreams.
+    Each connector failure is recorded on the row's last_sync_error
+    column so the UI can surface it; a single bad source never blocks
+    the others.
     """
     from app.db import SessionLocal
     from app.services.race_sentiment_sync import sync_all
 
-    log.info("Scheduled race sentiment sync starting")
+    log.info("Scheduled race sentiment MARKET sync starting")
     try:
         with SessionLocal() as db:
-            results = sync_all(db)
+            results = sync_all(db, source_types=("market",))
         log.info(
-            "Scheduled race sentiment sync complete: synced=%s failed=%s",
+            "Scheduled race sentiment MARKET sync complete: synced=%s failed=%s",
             results.get("synced"), results.get("failed"),
         )
     except Exception:
-        log.exception("Scheduled race sentiment sync failed with an unhandled exception")
+        log.exception("Scheduled race sentiment MARKET sync failed with an unhandled exception")
+
+
+def _run_race_sentiment_forecaster_sync() -> None:
+    """Twice-daily: refresh forecaster ratings (Cook, Sabato, Inside Elections).
+
+    Forecaster ratings change weekly at most, so 12h is plenty. Cook
+    and Sabato are sourced via 270toWin (their own sites are CF-blocked);
+    the 270toWin pages are ~7MB each, so we keep the cadence low to be
+    polite. Each connector failure is recorded on the row so the UI can
+    surface it; a single bad source never blocks the others.
+    """
+    from app.db import SessionLocal
+    from app.services.race_sentiment_sync import sync_all
+
+    log.info("Scheduled race sentiment FORECASTER sync starting")
+    try:
+        with SessionLocal() as db:
+            results = sync_all(db, source_types=("rating",))
+        log.info(
+            "Scheduled race sentiment FORECASTER sync complete: synced=%s failed=%s",
+            results.get("synced"), results.get("failed"),
+        )
+    except Exception:
+        log.exception("Scheduled race sentiment FORECASTER sync failed with an unhandled exception")
 
 
 def start_scheduler() -> None:
@@ -1049,14 +1076,24 @@ def start_scheduler() -> None:
         coalesce=True,
         replace_existing=True,
     )
-    # Race sentiment: daily prediction-market + forecaster-rating sync.
-    # External APIs / scrapers are rate-friendly at this cadence; the
-    # signal doesn't move fast enough to justify intra-day polling.
+    # Race sentiment: split cadence — prediction markets reprice on news
+    # events and want intra-day refresh; forecaster ratings change weekly
+    # at most and don't justify it. Two jobs let each source type set its
+    # own polling cost vs. responsiveness trade-off.
     _scheduler.add_job(
-        _run_race_sentiment_sync,
+        _run_race_sentiment_market_sync,
         trigger="interval",
-        hours=24,
-        id="race_sentiment_daily",
+        hours=2,
+        id="race_sentiment_markets",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    _scheduler.add_job(
+        _run_race_sentiment_forecaster_sync,
+        trigger="interval",
+        hours=12,
+        id="race_sentiment_forecasters",
         max_instances=1,
         coalesce=True,
         replace_existing=True,

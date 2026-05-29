@@ -15,7 +15,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -246,16 +246,25 @@ def _compute_7d_delta(
 # Sync orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 
-_RATING_SOURCE_URLS = {
+# Per-rating-source URLs. _RATING_FETCH_URLS is the URL we GET for sync.
+# _RATING_DISPLAY_URLS is the click-through URL surfaced to the user.
+# For Cook + Sabato these diverge: we fetch via 270toWin (CF-blocked
+# direct), but the user-facing link still goes to the authoritative
+# source. Keep both maps in sync with the equivalents in app/db.py.
+_RATING_FETCH_URLS = {
+    "cook":             "https://www.270towin.com/2026-house-election/cook-political-report-2026-house-ratings",
+    "sabato":           "https://www.270towin.com/2026-house-election/crystal-ball-2026-house-forecast",
+    "inside_elections": "https://insideelections.com/ratings/house",
+}
+_RATING_DISPLAY_URLS = {
     "cook":             "https://www.cookpolitical.com/ratings/house-race-ratings",
     "sabato":           "https://centerforpolitics.org/crystalball/",
     "inside_elections": "https://insideelections.com/ratings/house",
-    "ddhq":             "https://decisiondeskhq.com/",
 }
 
 
 def _rating_autoconfigure(db: Session, source: str, row) -> None:
-    """Fallback auto-configure for rating sources (Cook, Sabato, IE, DDHQ).
+    """Fallback auto-configure for rating sources (Cook, Sabato, IE).
 
     Normally handled at startup by _seed_race_sentiment_sources(); this runs
     in sync_one() as a safety net when a race is reconfigured between restarts.
@@ -264,8 +273,9 @@ def _rating_autoconfigure(db: Session, source: str, row) -> None:
     import json
     from app.models import CampaignConfig
 
-    url = _RATING_SOURCE_URLS.get(source)
-    if not url:
+    fetch_url = _RATING_FETCH_URLS.get(source)
+    display_url = _RATING_DISPLAY_URLS.get(source)
+    if not fetch_url or not display_url:
         return
     config = db.query(CampaignConfig).first()
     raw = ((config.district if config else None) or "").strip().upper()
@@ -274,8 +284,8 @@ def _rating_autoconfigure(db: Session, source: str, row) -> None:
     state, _, district_num = raw.partition("-")
     if not state or not district_num:
         return
-    row.external_id = url
-    row.source_url = url
+    row.external_id = fetch_url
+    row.source_url = display_url
     row.external_metadata = json.dumps({
         "district_label": raw,
         "state": state,
@@ -379,7 +389,7 @@ def sync_one(db: Session, source: str) -> bool:
         _kalshi_autodiscover(db, row)
     if not row.external_id and source == "polymarket":
         _polymarket_autodiscover(db, row)
-    if not row.external_id and source in _RATING_SOURCE_URLS:
+    if not row.external_id and source in _RATING_FETCH_URLS:
         _rating_autoconfigure(db, source, row)
 
     if not row.external_id:
@@ -409,9 +419,19 @@ def sync_one(db: Session, source: str) -> bool:
         return False
 
 
-def sync_all(db: Session) -> dict:
-    """Daily job. Loops every source with an external_id and syncs it."""
-    rows = db.query(RaceSentiment).filter(RaceSentiment.external_id.isnot(None)).all()
+def sync_all(db: Session, source_types: Optional[Iterable[str]] = None) -> dict:
+    """Loop every configured source and sync it.
+
+    `source_types` optionally restricts the sweep to e.g. ("market",) or
+    ("rating",). When None, every source with an external_id is synced.
+    The scheduler uses this filter to run markets and ratings on different
+    cadences — markets are continuously-moving prices and want hourly-ish
+    refresh; forecasters change weekly at most and don't justify it.
+    """
+    q = db.query(RaceSentiment).filter(RaceSentiment.external_id.isnot(None))
+    if source_types is not None:
+        q = q.filter(RaceSentiment.source_type.in_(list(source_types)))
+    rows = q.all()
     results = {"synced": [], "failed": []}
     for row in rows:
         ok = sync_one(db, row.source)
@@ -436,6 +456,10 @@ def _get_fetcher(source: str):
     if source in ("cook",):
         from app.services.race_ratings_monitor import cook_fetch
         return cook_fetch
-    # sabato, inside_elections, ddhq: fetchers not yet implemented (Cloudflare-blocked).
-    # Rows are auto-configured at startup so they're ready when scrapers land.
+    if source in ("sabato",):
+        from app.services.race_ratings_monitor import sabato_fetch
+        return sabato_fetch
+    if source in ("inside_elections",):
+        from app.services.race_ratings_monitor import inside_elections_fetch
+        return inside_elections_fetch
     return None

@@ -1,5 +1,5 @@
-import { Pencil, ExternalLink, X, RefreshCw, CircleAlert, Wifi } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Pencil, ExternalLink, X, RefreshCw, CircleAlert, MoreHorizontal } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { api } from '@/api/client'
 import type { RaceSentiment, RaceSentimentUpdate } from '@/api/types'
@@ -72,11 +72,42 @@ function fmtPct(v: number | null | undefined): string {
   return `${v.toFixed(0)}%`
 }
 
-function fmtDelta(v: number | null | undefined): { text: string; color: string } {
-  if (v === null || v === undefined) return { text: '', color: C.text3 }
-  if (v > 0) return { text: `+${v.toFixed(1)} 7d`, color: C.green }
-  if (v < 0) return { text: `${v.toFixed(1)} 7d`, color: C.red }
-  return { text: 'flat 7d', color: C.text3 }
+// Reduce a market row (two side-by-side percentages) to a single lead.
+// The lead — "who's ahead, by how much" — is the actionable political
+// signal; the raw two-side breakdown is extra cognitive load that doesn't
+// change what the user does next. Returns null when no data is entered;
+// returns a "tied" marker when both sides are equal; returns a "partial"
+// marker when only one side has a value (rare, but possible via the edit
+// modal saving asymmetrically).
+type MarketLead =
+  | { kind: 'none' }
+  | { kind: 'tied' }
+  | { kind: 'lead'; name: string; color: string; lead: number }
+  | { kind: 'partial'; name: string; color: string; value: number }
+
+function computeMarketLead(
+  row: RaceSentiment, candidateName: string, opponentName: string,
+): MarketLead {
+  const cand = row.candidate_pct
+  const opp = row.opponent_pct
+  if (cand === null && opp === null) return { kind: 'none' }
+  if (cand === null || opp === null) {
+    const isCand = cand !== null
+    return {
+      kind: 'partial',
+      name: isCand ? candidateName : opponentName,
+      color: isCand ? C.candidate : C.opponent,
+      value: (isCand ? cand : opp) as number,
+    }
+  }
+  if (cand === opp) return { kind: 'tied' }
+  const candAhead = cand > opp
+  return {
+    kind: 'lead',
+    name: candAhead ? candidateName : opponentName,
+    color: candAhead ? C.candidate : C.opponent,
+    lead: Math.abs(cand - opp),
+  }
 }
 
 function favorsColor(favors: string | null | undefined): string {
@@ -85,8 +116,20 @@ function favorsColor(favors: string | null | undefined): string {
   return C.text2
 }
 
+// Short labels for the horizontal-scoreboard layout — the row of mini-cards
+// has ~95px per column at the current card width, which doesn't fit
+// "Sabato's Crystal Ball" / "Cook Political Report" / "Inside Elections".
+// Full display_name is preserved in the hover-title and in the Edit modal.
+const SHORT_LABELS: Record<string, string> = {
+  polymarket:       'Polymarket',
+  kalshi:           'Kalshi',
+  cook:             'Cook',
+  sabato:           'Sabato',
+  inside_elections: 'Inside Elec.',
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Market row
+// Shared row helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 function rowHasData(row: RaceSentiment): boolean {
@@ -105,33 +148,24 @@ function parseUtcIso(iso: string): Date {
 }
 
 function SyncBadge({ row }: { row: RaceSentiment }) {
-  // Four states:
-  //   LIVE    → recent successful auto-sync (green)
+  // Three visible states (LIVE is intentionally invisible — all wired
+  // sources now sync LIVE, so a badge on every row would be noise. The
+  // *absence* of a badge means "fresh data, nothing to worry about";
+  // a visible badge means something needs attention.):
   //   MANUAL  → row has a value but it came from the Edit modal, not a sync
   //             (covers both "no connector configured" and "auto-sync failed
   //             but user entered a value anyway")
   //   BLOCKED → auto-sync failed AND no manual fallback value — the user
   //             needs to take action
-  //   none    → empty placeholder row, nothing entered or attempted
+  //   none    → either a successful recent auto-sync (the new default) or
+  //             an empty placeholder row, nothing entered or attempted
   const hasData = rowHasData(row)
 
-  // LIVE wins: a fresh successful sync overrides everything else.
+  // Fresh successful sync → no badge (the data speaks for itself).
   if (row.last_synced_at && !row.last_sync_error) {
     const ageHours = (Date.now() - parseUtcIso(row.last_synced_at).getTime()) / 3600000
     if (ageHours <= 36) {
-      return (
-        <span
-          title={`Auto-synced ${formatRelativeTime(row.last_synced_at)} from ${row.display_name}`}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 3,
-            color: C.green, fontSize: 10, fontWeight: 600,
-            letterSpacing: '0.04em',
-          }}
-        >
-          <Wifi size={11} />
-          LIVE
-        </span>
-      )
+      return null
     }
   }
 
@@ -179,120 +213,134 @@ function SyncBadge({ row }: { row: RaceSentiment }) {
   return null
 }
 
-function MarketRow({
-  row, candidateName, opponentName,
-}: { row: RaceSentiment; candidateName: string; opponentName: string }) {
-  const delta = fmtDelta(row.delta_7d)
-  const hasData = row.candidate_pct !== null || row.opponent_pct !== null
+// ─────────────────────────────────────────────────────────────────────────────
+// SourceCell — one mini-card in the horizontal scoreboard.
+//
+// Layout is 3 stacked rows of text:
+//   1. Source name (short label) + sync badge + ext-link icon
+//   2. The signal (market lead like "Cognetti +18%" or rating label like "Toss-up")
+//   3. Subline (delta "+2.0 7d" for markets, band "45–55%" for ratings)
+//
+// Markets and ratings share the cell — type-specific logic lives in
+// the signal/subline computation, not in two parallel components.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SourceCell({
+  row, candidateName, opponentName, isLast,
+}: {
+  row: RaceSentiment
+  candidateName: string
+  opponentName: string
+  isLast: boolean
+}) {
+  const isMarket = row.source_type === 'market'
+  const shortName = SHORT_LABELS[row.source] ?? row.display_name
+
+  // Single signal line per cell (was lead + delta for markets, label + band
+  // beneath for ratings — both collapsed to one row at the user's request).
+  // For ratings the band rides inline next to the label as a muted tail.
+  let signal: React.ReactNode
+  if (isMarket) {
+    const lead = computeMarketLead(row, candidateName, opponentName)
+    if (lead.kind === 'none') {
+      signal = <span style={{ color: C.text3 }}>No value</span>
+    } else if (lead.kind === 'tied') {
+      signal = <span style={{ color: C.text2, fontWeight: 600 }}>Tied</span>
+    } else if (lead.kind === 'partial') {
+      signal = (
+        <span>
+          <span style={{ color: lead.color, fontWeight: 600 }}>{lead.name}</span>
+          {' '}
+          <span style={{ color: C.text1, fontVariantNumeric: 'tabular-nums' }}>
+            {lead.value.toFixed(0)}%
+          </span>
+        </span>
+      )
+    } else {
+      signal = (
+        <span title={`${candidateName} ${fmtPct(row.candidate_pct)} · ${opponentName} ${fmtPct(row.opponent_pct)}`}>
+          <span style={{ color: lead.color, fontWeight: 600 }}>{lead.name}</span>
+          {' '}
+          <span style={{ color: C.text1, fontVariantNumeric: 'tabular-nums' }}>
+            +{lead.lead.toFixed(0)}%
+          </span>
+        </span>
+      )
+    }
+  } else {
+    if (row.rating_label) {
+      const band = (row.rating_min_pct !== null && row.rating_max_pct !== null)
+        ? `${row.rating_min_pct.toFixed(0)}–${row.rating_max_pct.toFixed(0)}%`
+        : null
+      signal = (
+        <span>
+          <span style={{ color: favorsColor(row.favors), fontWeight: 600 }}>
+            {row.rating_label}
+          </span>
+          {band && (
+            <span style={{
+              color: C.text3, marginLeft: 3,
+              fontSize: 10, fontVariantNumeric: 'tabular-nums',
+            }}>
+              {band}
+            </span>
+          )}
+        </span>
+      )
+    } else {
+      signal = (
+        <span style={{ color: C.text3 }}>
+          {row.last_sync_error ? 'Blocked' : 'No rating'}
+        </span>
+      )
+    }
+  }
 
   return (
     <div style={{
-      display: 'grid',
-      gridTemplateColumns: '120px 1fr auto auto',
-      alignItems: 'center', gap: 12,
-      padding: '8px 0',
-      borderBottom: `1px solid ${C.bg3}`,
-      fontSize: 13,
+      flex: '1 1 0',
+      minWidth: 0,
+      padding: '8px 8px',
+      borderRight: isLast ? 'none' : `1px solid ${C.bg3}`,
     }}>
-      <div style={{ color: C.text2, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
-        {row.display_name}
-        <SyncBadge row={row} />
-      </div>
-      <div style={{ color: C.text1 }}>
-        {hasData ? (
-          <span>
-            <span style={{ color: C.candidate, fontWeight: 600 }}>{candidateName}</span>
-            {' '}
-            <span style={{ color: C.text1, fontVariantNumeric: 'tabular-nums' }}>
-              {fmtPct(row.candidate_pct)}
-            </span>
-            <span style={{ color: C.text3, margin: '0 8px' }}>·</span>
-            <span style={{ color: C.opponent, fontWeight: 600 }}>{opponentName}</span>
-            {' '}
-            <span style={{ color: C.text1, fontVariantNumeric: 'tabular-nums' }}>
-              {fmtPct(row.opponent_pct)}
-            </span>
-          </span>
-        ) : (
-          <span style={{ color: C.text3 }}>No value entered</span>
-        )}
-      </div>
+      {/* Row 1: name + sync badge + ext-link */}
       <div style={{
-        color: delta.color,
-        fontSize: 12, fontWeight: 600,
-        fontVariantNumeric: 'tabular-nums',
-        minWidth: 70, textAlign: 'right',
+        display: 'flex', alignItems: 'center', gap: 4,
+        fontSize: 10, color: C.text3, letterSpacing: '0.06em',
+        fontWeight: 600, textTransform: 'uppercase',
+        marginBottom: 4, minWidth: 0,
       }}>
-        {delta.text}
-      </div>
-      <div style={{ minWidth: 16, textAlign: 'right' }}>
-        {row.source_url ? (
-          <a
-            href={row.source_url} target="_blank" rel="noopener noreferrer"
-            style={{ color: C.text3, display: 'inline-flex', alignItems: 'center' }}
-            title="Open source"
-          >
-            <ExternalLink size={13} />
-          </a>
-        ) : null}
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Forecaster (rating) row
-// ─────────────────────────────────────────────────────────────────────────────
-
-function RatingRow({ row }: { row: RaceSentiment }) {
-  const hasData = !!row.rating_label
-  const minMax = (row.rating_min_pct !== null && row.rating_max_pct !== null)
-    ? `${row.rating_min_pct.toFixed(0)}–${row.rating_max_pct.toFixed(0)}%`
-    : null
-  const fc = favorsColor(row.favors)
-
-  return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: '120px 1fr auto auto',
-      alignItems: 'center', gap: 12,
-      padding: '8px 0',
-      borderBottom: `1px solid ${C.bg3}`,
-      fontSize: 13,
-    }}>
-      <div style={{ color: C.text2, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
-        {row.display_name}
+        <span
+          title={row.display_name}
+          style={{
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            flexShrink: 1,
+          }}
+        >
+          {shortName}
+        </span>
         <SyncBadge row={row} />
-      </div>
-      <div>
-        {hasData ? (
-          <span>
-            <span style={{ color: fc, fontWeight: 600 }}>{row.rating_label}</span>
-            {minMax && (
-              <span style={{ color: C.text3, marginLeft: 8, fontVariantNumeric: 'tabular-nums' }}>
-                · {minMax}
-              </span>
-            )}
-          </span>
-        ) : (
-          <span style={{ color: C.text3 }}>
-            {row.last_sync_error ? 'Auto-sync blocked — use Edit' : 'No rating entered'}
-          </span>
-        )}
-      </div>
-      <div style={{ minWidth: 70, textAlign: 'right' }}>
-        {/* Reserved for future deltas on rating changes — Phase 2 */}
-      </div>
-      <div style={{ minWidth: 16, textAlign: 'right' }}>
         {row.source_url ? (
           <a
             href={row.source_url} target="_blank" rel="noopener noreferrer"
-            style={{ color: C.text3, display: 'inline-flex', alignItems: 'center' }}
             title="Open source"
+            style={{
+              color: C.text3, display: 'inline-flex',
+              alignItems: 'center', marginLeft: 'auto', flexShrink: 0,
+            }}
           >
-            <ExternalLink size={13} />
+            <ExternalLink size={10} />
           </a>
         ) : null}
+      </div>
+
+      {/* Row 2: signal (market lead OR rating label + band, single line) */}
+      <div style={{
+        fontSize: 12, color: C.text1,
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        lineHeight: 1.25,
+      }}>
+        {signal}
       </div>
     </div>
   )
@@ -642,6 +690,9 @@ export function RaceSentimentCard() {
   const [syncing, setSyncing] = useState(false)
   const [candidateName, setCandidateName] = useState('')
   const [opponentName, setOpponentName] = useState('')
+  // Header context menu (replaces the standalone Sync/Edit buttons).
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     api.raceSentiment().then(r => { setRows(r); setLoading(false) }).catch(() => setLoading(false))
@@ -659,31 +710,72 @@ export function RaceSentimentCard() {
     }).catch(() => {})
   }, [])
 
+  // Close the header context menu on any click outside its trigger/dropdown.
+  useEffect(() => {
+    if (!menuOpen) return
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [menuOpen])
+
+  const runSync = async () => {
+    setSyncing(true)
+    setMenuOpen(false)
+    try {
+      await api.syncAllRaceSentiment()
+      const fresh = await api.raceSentiment()
+      setRows(fresh)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   const markets = rows.filter(r => r.source_type === 'market')
   const ratings = rows.filter(r => r.source_type === 'rating')
   // Footer timestamp = the most-recent updated_at among rows that ACTUALLY
   // have a value entered. Rows that are still empty seeds shouldn't make
   // the card look "updated" — that misleads the user into thinking data
   // exists when it doesn't.
-  const rowsWithData = rows.filter(r =>
-    r.candidate_pct !== null || r.opponent_pct !== null ||
-    r.rating_label || r.rating_min_pct !== null
-  )
-  const mostRecent = rowsWithData
-    .map(r => r.updated_at ? parseUtcIso(r.updated_at).getTime() : 0)
-    .reduce((m, t) => Math.max(m, t), 0)
-  const mostRecentIso = mostRecent ? new Date(mostRecent).toISOString() : null
+  // (mostRecent / mostRecentIso removed — replaced by per-type stale
+  //  detection below, which catches forecaster-only failures that a
+  //  global "latest sync" timestamp would miss.)
+
+  // Per-source-type stale detection. Backend scheduler runs markets every
+  // 2h and forecasters every 12h (split cadences — see scheduler.py). A
+  // single global "max(updated_at)" check would miss a forecaster-only
+  // failure because fresh market syncs would keep the global max fresh.
+  // So check each type against its own threshold:
+  //   • markets: stale > 6h  (3 missed 2h cycles, tolerates one-off skip)
+  //   • ratings: stale > 24h (2 missed 12h cycles)
+  // Pick the freshest sync per type and compare to its threshold; surface
+  // the FIRST type that's stale so the user knows what's broken.
+  function freshestSyncAge(srcs: RaceSentiment[]): number | null {
+    const times = srcs
+      .map(r => r.last_synced_at ? parseUtcIso(r.last_synced_at).getTime() : 0)
+      .filter(t => t > 0)
+    if (times.length === 0) return null
+    return (Date.now() - Math.max(...times)) / 3600000
+  }
+  const marketAge = freshestSyncAge(markets)
+  const ratingAge = freshestSyncAge(ratings)
+  let staleWarning: { label: string; age: number } | null = null
+  if (marketAge !== null && marketAge > 6) {
+    staleWarning = { label: 'Markets', age: marketAge }
+  } else if (ratingAge !== null && ratingAge > 24) {
+    staleWarning = { label: 'Forecasters', age: ratingAge }
+  }
 
   return (
-    <div style={{
-      background: C.bg2, border: `1px solid ${C.border}`,
-      borderRadius: '0.625rem', padding: '14px 16px',
-      marginBottom: 24,
-    }}>
-      {/* ── Header ── */}
+    <div style={{ marginBottom: 24 }}>
+      {/* ── Section header (sits OUTSIDE the card to match the Featured
+          Narratives section format on the same page) ── */}
       <div style={{
         display: 'flex', alignItems: 'center',
-        gap: 10, marginBottom: 10, flexWrap: 'wrap',
+        gap: 12, marginBottom: 12, flexWrap: 'wrap',
       }}>
         <div style={{
           fontSize: 11, color: C.text3, letterSpacing: '0.12em',
@@ -693,50 +785,80 @@ export function RaceSentimentCard() {
           Race Sentiment
           <InfoTooltip text={HEADER_HELP} maxWidth={360} />
         </div>
-        <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
-          <button
-            onClick={async () => {
-              setSyncing(true)
-              try {
-                await api.syncAllRaceSentiment()
-                const fresh = await api.raceSentiment()
-                setRows(fresh)
-              } finally {
-                setSyncing(false)
-              }
-            }}
-            disabled={syncing}
-            style={{
-              background: 'transparent', border: `1px solid ${C.border}`,
-              borderRadius: 5, padding: '4px 10px',
-              color: C.text2, fontSize: 12,
-              cursor: syncing ? 'wait' : 'pointer',
-              opacity: syncing ? 0.6 : 1,
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              fontFamily: 'inherit',
-            }}
-            title="Refresh from connected sources (Polymarket etc.). Sources without a connector or blocked by Cloudflare are skipped."
-            onMouseEnter={e => { if (!syncing) e.currentTarget.style.borderColor = C.borderBright }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border }}
-          >
-            <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} />
-            {syncing ? 'Syncing…' : 'Sync now'}
-          </button>
-          <button
-            onClick={() => setEditing(true)}
-            style={{
-              background: 'transparent', border: `1px solid ${C.border}`,
-              borderRadius: 5, padding: '4px 10px',
-              color: C.text2, fontSize: 12, cursor: 'pointer',
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              fontFamily: 'inherit',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = C.borderBright }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border }}
-          >
-            <Pencil size={12} />
-            Edit values
-          </button>
+        <div style={{
+          marginLeft: 'auto', display: 'inline-flex',
+          alignItems: 'center', gap: 8,
+        }}>
+          {syncing ? (
+            <span style={{ fontSize: 11, color: C.text3 }}>Syncing…</span>
+          ) : staleWarning ? (
+            <span
+              title={`${staleWarning.label} auto-sync hasn't run successfully in ${Math.round(staleWarning.age)}h — open the menu to Sync now.`}
+              style={{ fontSize: 11, color: C.red, fontWeight: 600 }}
+            >
+              {staleWarning.label} stale ({Math.round(staleWarning.age)}h)
+            </span>
+          ) : null}
+          <div ref={menuRef} style={{ position: 'relative' }}>
+            <button
+              onClick={() => setMenuOpen(o => !o)}
+              aria-label="More options"
+              style={{
+                background: 'transparent', border: 'none',
+                color: C.text3, cursor: 'pointer',
+                padding: 4, borderRadius: 4,
+                display: 'inline-flex', alignItems: 'center',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.color = C.text1 }}
+              onMouseLeave={e => { e.currentTarget.style.color = C.text3 }}
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {menuOpen && (
+              <div style={{
+                position: 'absolute', top: '100%', right: 0,
+                marginTop: 4, zIndex: 50,
+                background: C.bg3, border: `1px solid ${C.border}`,
+                borderRadius: 6, minWidth: 140,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.35)',
+                padding: 4,
+              }}>
+                <button
+                  onClick={runSync}
+                  disabled={syncing}
+                  style={{
+                    width: '100%', background: 'transparent', border: 'none',
+                    color: C.text1, fontSize: 12,
+                    padding: '6px 10px', textAlign: 'left',
+                    cursor: syncing ? 'wait' : 'pointer',
+                    opacity: syncing ? 0.6 : 1,
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    fontFamily: 'inherit', borderRadius: 4,
+                  }}
+                  onMouseEnter={e => { if (!syncing) e.currentTarget.style.background = C.bg4 }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                >
+                  <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} />
+                  {syncing ? 'Syncing…' : 'Sync now'}
+                </button>
+                <button
+                  onClick={() => { setEditing(true); setMenuOpen(false) }}
+                  style={{
+                    width: '100%', background: 'transparent', border: 'none',
+                    color: C.text1, fontSize: 12,
+                    padding: '6px 10px', textAlign: 'left', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    fontFamily: 'inherit', borderRadius: 4,
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = C.bg4 }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                >
+                  <Pencil size={12} />
+                  Edit values
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -745,54 +867,36 @@ export function RaceSentimentCard() {
         <div style={{ color: C.text3, fontSize: 13, padding: '6px 0' }}>Loading…</div>
       ) : (
         <>
-          {/* Markets */}
-          <div style={{ marginBottom: 14 }}>
-            <div style={{
-              fontSize: 10, color: C.text3, letterSpacing: '0.1em',
-              fontWeight: 600, textTransform: 'uppercase', marginBottom: 4,
-            }}>
-              Markets
-            </div>
-            {markets.length === 0 ? (
-              <div style={{ color: C.text3, fontSize: 12, padding: '6px 0' }}>—</div>
-            ) : (
-              markets.map(m => (
-                <MarketRow
-                  key={m.id} row={m}
-                  candidateName={candidateName || 'Candidate'}
-                  opponentName={opponentName || 'Opponent'}
-                />
-              ))
-            )}
-          </div>
+          {/* Horizontal scoreboard — one mini-cell per source. Markets first
+              (Polymarket, Kalshi) then forecaster ratings (Cook, IE, Sabato).
+              The signal format (lead vs rating label) already distinguishes
+              the two without a section divider. */}
+          {rows.length === 0 ? (
+            <div style={{ color: C.text3, fontSize: 12, padding: '6px 0' }}>—</div>
+          ) : (
+            (() => {
+              const ordered = [...ratings, ...markets]
+              return (
+                <div style={{
+                  display: 'flex', alignItems: 'stretch',
+                  background: C.bg2,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: '0.625rem',
+                  overflow: 'hidden',
+                }}>
+                  {ordered.map((row, idx) => (
+                    <SourceCell
+                      key={row.id} row={row}
+                      candidateName={candidateName || 'Candidate'}
+                      opponentName={opponentName || 'Opponent'}
+                      isLast={idx === ordered.length - 1}
+                    />
+                  ))}
+                </div>
+              )
+            })()
+          )}
 
-          {/* Forecasters */}
-          <div>
-            <div style={{
-              fontSize: 10, color: C.text3, letterSpacing: '0.1em',
-              fontWeight: 600, textTransform: 'uppercase', marginBottom: 4,
-            }}>
-              Forecasters
-            </div>
-            {ratings.length === 0 ? (
-              <div style={{ color: C.text3, fontSize: 12, padding: '6px 0' }}>—</div>
-            ) : (
-              ratings.map(r => <RatingRow key={r.id} row={r} />)
-            )}
-          </div>
-
-          {/* Footer */}
-          <div style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            marginTop: 12, fontSize: 11, color: C.text3,
-          }}>
-            <span>
-              Live: Polymarket. Manual: forecasters (Cloudflare-blocked). Daily auto-sync.
-            </span>
-            {mostRecentIso && (
-              <span>Updated {formatRelativeTime(mostRecentIso)}</span>
-            )}
-          </div>
         </>
       )}
 

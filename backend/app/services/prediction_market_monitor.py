@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -42,6 +43,103 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 KALSHI_ELECTIONS_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 REQUEST_TIMEOUT = 15.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-provider: confidence-weighted blend of the two binary markets that
+# make up an election event (one "X wins" market per side).
+#
+# Why blend instead of just reading one side? In a perfectly liquid pair of
+# markets, both midpoints carry signal — combining them (with appropriate
+# weight) gives a lower-variance estimate than either alone. In an imperfect
+# pair (one side dead), we want the dead side's noisy midpoint to
+# automatically drop out of the result. Spread-based confidence weighting
+# does both.
+#
+# The same logic is used by both the Polymarket and Kalshi fetchers, so it
+# lives up here, above either provider.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Spreads wider than this many percentage points are treated as a dead
+# market — the midpoint of a 20-cent-wide order book carries essentially
+# no information about where the "true" probability sits. 20% is a generous
+# threshold; in practice the markets we care about have spreads of 2–5%
+# when liquid.
+_DEAD_MARKET_SPREAD_THRESHOLD_PCT = 20.0
+
+
+@dataclass(frozen=True)
+class MarketQuote:
+    """A snapshot of one binary market's "Yes" side.
+
+    midpoint_pct: (best_bid + best_ask) / 2, in percentage points (0–100).
+    spread_pct:   best_ask - best_bid, in percentage points (0–100). None
+                  if we couldn't extract bid/ask (e.g. legacy data); the
+                  blender treats that as full confidence.
+    """
+    midpoint_pct: float
+    spread_pct: Optional[float]
+
+
+def _confidence(spread_pct: Optional[float]) -> float:
+    """Confidence weight for a market quote, derived from its bid-ask spread.
+
+    Linearly decays from 1.0 (spread 0) to 0.0 (spread at the dead-market
+    threshold). Above the threshold, confidence is zero — the midpoint of
+    such a wide book has no information content.
+
+    When spread is None (legacy / unknown), assume full confidence rather
+    than discarding the quote.
+    """
+    if spread_pct is None:
+        return 1.0
+    if spread_pct >= _DEAD_MARKET_SPREAD_THRESHOLD_PCT:
+        return 0.0
+    return 1.0 - (spread_pct / _DEAD_MARKET_SPREAD_THRESHOLD_PCT)
+
+
+def _blend_p_x_wins(
+    x_yes_quote: Optional[MarketQuote],
+    other_yes_quote: Optional[MarketQuote],
+) -> Optional[float]:
+    """Confidence-weighted estimate of P(X wins), in percentage points.
+
+    Combines two readings:
+      • x_yes_quote.midpoint_pct                   — direct from X's market
+      • 100 - other_yes_quote.midpoint_pct         — implied by the other
+                                                     side's "yes" price
+                                                     (mutually-exclusive
+                                                     outcomes)
+    Each reading is weighted by its market's spread-derived confidence.
+    Returns None when both quotes are absent. Falls back to the X-side
+    midpoint when both quotes exist but both confidences are zero — that
+    case is rare (both markets dead) and we'd rather show something than
+    nothing.
+    """
+    estimates: list[tuple[float, float]] = []
+    if x_yes_quote is not None:
+        estimates.append((x_yes_quote.midpoint_pct, _confidence(x_yes_quote.spread_pct)))
+    if other_yes_quote is not None:
+        estimates.append(
+            (100.0 - other_yes_quote.midpoint_pct, _confidence(other_yes_quote.spread_pct)),
+        )
+
+    if not estimates:
+        return None
+
+    total_weight = sum(w for _, w in estimates)
+    if total_weight > 0:
+        return round(sum(p * w for p, w in estimates) / total_weight, 2)
+
+    # Both confidences are zero. Fall back to the direct X-side midpoint
+    # (if we have it), since "the X market is dead" still tells us less
+    # than "the other side's dead midpoint is somewhere in a huge range."
+    if x_yes_quote is not None:
+        return round(x_yes_quote.midpoint_pct, 2)
+    if other_yes_quote is not None:
+        return round(100.0 - other_yes_quote.midpoint_pct, 2)
+    return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Polymarket auto-discovery
@@ -195,16 +293,24 @@ def polymarket_fetch(external_id: str, metadata: dict) -> Optional[FetchedSample
     cand_id = str(metadata.get("candidate_market_id") or "")
     opp_id = str(metadata.get("opponent_market_id") or "")
 
-    candidate_pct = _yes_pct_for_market(markets, cand_id)
-    opponent_pct = _yes_pct_for_market(markets, opp_id)
+    cand_quote = _polymarket_yes_quote(markets, cand_id)
+    opp_quote = _polymarket_yes_quote(markets, opp_id)
 
     # Both being None usually means the market IDs in metadata are wrong.
-    if candidate_pct is None and opponent_pct is None:
+    if cand_quote is None and opp_quote is None:
         log.warning(
             "polymarket_fetch: neither candidate(%s) nor opponent(%s) market found in event %s",
             cand_id, opp_id, slug,
         )
         return None
+
+    # Confidence-blend the two sides. When one market is dead (huge spread,
+    # e.g. PA-08's Republican side as of 2026-05-29: bid 9¢ / ask 82¢), its
+    # noisy midpoint gets ~zero weight and the result collapses to the
+    # liquid side's view + its complement. When both are liquid, both
+    # contribute.
+    candidate_pct = _blend_p_x_wins(cand_quote, opp_quote)
+    opponent_pct = _blend_p_x_wins(opp_quote, cand_quote)
 
     return FetchedSample(
         source_type="market",
@@ -215,25 +321,51 @@ def polymarket_fetch(external_id: str, metadata: dict) -> Optional[FetchedSample
             "event_slug": slug,
             "candidate_market_id": cand_id,
             "opponent_market_id": opp_id,
+            "candidate_quote": cand_quote.__dict__ if cand_quote else None,
+            "opponent_quote": opp_quote.__dict__ if opp_quote else None,
             "candidate_pct": candidate_pct,
             "opponent_pct": opponent_pct,
         },
     )
 
 
-def _yes_pct_for_market(markets: list, market_id: str) -> Optional[float]:
-    """Pull the Yes-outcome price for a specific sub-market and convert to pct."""
+def _polymarket_yes_quote(markets: list, market_id: str) -> Optional[MarketQuote]:
+    """Pull the Yes-side quote (midpoint + spread) for a Polymarket sub-market.
+
+    Prefers bestBid/bestAsk (live order book) when present, since that
+    gives us the spread for confidence-weighting downstream. Falls back to
+    outcomePrices when bid/ask are missing (legacy / cached responses) —
+    in that case the spread is unknown so we mark it None and the blender
+    treats the quote at full confidence.
+    """
     if not market_id:
         return None
     for m in markets:
         if str(m.get("id")) != market_id:
             continue
+        # Preferred path: live bid/ask. Polymarket Gamma returns these as
+        # numbers (e.g. 0.61, 0.63) when the market has any depth.
+        bid = m.get("bestBid")
+        ask = m.get("bestAsk")
+        if bid is not None and ask is not None:
+            try:
+                bid_f, ask_f = float(bid), float(ask)
+                midpoint = (bid_f + ask_f) / 2.0 * 100.0
+                spread = (ask_f - bid_f) * 100.0
+                return MarketQuote(
+                    midpoint_pct=round(midpoint, 2),
+                    spread_pct=round(spread, 2),
+                )
+            except (TypeError, ValueError):
+                pass
+
+        # Fallback: outcomePrices (the Gamma API's pre-computed yes/no
+        # values, no spread info). Defensive parse since it comes back as
+        # either a list or a JSON-string of a list.
         prices = m.get("outcomePrices")
         outcomes = m.get("outcomes") or []
         if not prices:
             return None
-        # outcomePrices comes back as either a list or a JSON-string of a list.
-        # Defensive parse: handle both.
         if isinstance(prices, str):
             import json
             try:
@@ -246,14 +378,14 @@ def _yes_pct_for_market(markets: list, market_id: str) -> Optional[float]:
                 outcomes = json.loads(outcomes)
             except Exception:
                 outcomes = []
-        # Find the "Yes" index. Falls back to index 0 if labels missing.
         yes_idx = 0
         for i, label in enumerate(outcomes):
             if str(label).lower() == "yes":
                 yes_idx = i
                 break
         try:
-            return round(float(prices[yes_idx]) * 100.0, 2)
+            yes_pct = round(float(prices[yes_idx]) * 100.0, 2)
+            return MarketQuote(midpoint_pct=yes_pct, spread_pct=None)
         except Exception:
             return None
     return None
@@ -490,15 +622,19 @@ def kalshi_fetch(external_id: str, metadata: dict) -> Optional[FetchedSample]:
     cand_ticker = metadata.get("candidate_market_ticker", "")
     opp_ticker = metadata.get("opponent_market_ticker", "")
 
-    candidate_pct = _kalshi_yes_pct(markets, cand_ticker)
-    opponent_pct = _kalshi_yes_pct(markets, opp_ticker)
+    cand_quote = _kalshi_yes_quote(markets, cand_ticker)
+    opp_quote = _kalshi_yes_quote(markets, opp_ticker)
 
-    if candidate_pct is None and opponent_pct is None:
+    if cand_quote is None and opp_quote is None:
         log.warning(
             "kalshi_fetch: neither candidate(%s) nor opponent(%s) found in event %s",
             cand_ticker, opp_ticker, external_id,
         )
         return None
+
+    # Confidence-blend the two binary markets. See _blend_p_x_wins docstring.
+    candidate_pct = _blend_p_x_wins(cand_quote, opp_quote)
+    opponent_pct = _blend_p_x_wins(opp_quote, cand_quote)
 
     return FetchedSample(
         source_type="market",
@@ -509,36 +645,55 @@ def kalshi_fetch(external_id: str, metadata: dict) -> Optional[FetchedSample]:
             "event_ticker": external_id,
             "candidate_market_ticker": cand_ticker,
             "opponent_market_ticker": opp_ticker,
+            "candidate_quote": cand_quote.__dict__ if cand_quote else None,
+            "opponent_quote": opp_quote.__dict__ if opp_quote else None,
             "candidate_pct": candidate_pct,
             "opponent_pct": opponent_pct,
         },
     )
 
 
-def _kalshi_yes_pct(markets: list, ticker: str) -> Optional[float]:
-    """Extract the implied win probability (0–100) for a Kalshi sub-market.
+def _kalshi_yes_quote(markets: list, ticker: str) -> Optional[MarketQuote]:
+    """Pull the Yes-side quote (midpoint + spread) for a Kalshi sub-market.
 
-    Uses last_price_dollars as the primary value (most recent trade);
-    falls back to the mid of yes_bid/yes_ask if last_price is zero.
+    Prefers yes_bid_dollars/yes_ask_dollars (live order book) which gives
+    us the spread for confidence-weighting. Falls back to last_price_dollars
+    when bid/ask aren't populated — in that case the spread is unknown so
+    we mark it None and the blender treats it as full confidence (the
+    last-trade price is generally a meaningful signal when bid/ask are
+    missing).
     """
     if not ticker:
         return None
     for m in markets:
         if m.get("ticker") != ticker:
             continue
+
+        # Preferred path: live bid/ask gives us spread.
+        bid = m.get("yes_bid_dollars")
+        ask = m.get("yes_ask_dollars")
+        if bid is not None and ask is not None:
+            try:
+                bid_f, ask_f = float(bid), float(ask)
+                midpoint = (bid_f + ask_f) / 2.0 * 100.0
+                spread = (ask_f - bid_f) * 100.0
+                return MarketQuote(
+                    midpoint_pct=round(midpoint, 2),
+                    spread_pct=round(spread, 2),
+                )
+            except (TypeError, ValueError):
+                pass
+
+        # Fallback: last trade price (no spread info).
         last = m.get("last_price_dollars")
         if last:
             try:
                 val = float(last)
                 if val > 0:
-                    return round(val * 100.0, 2)
-            except (TypeError, ValueError):
-                pass
-        bid = m.get("yes_bid_dollars")
-        ask = m.get("yes_ask_dollars")
-        if bid is not None and ask is not None:
-            try:
-                return round((float(bid) + float(ask)) / 2.0 * 100.0, 2)
+                    return MarketQuote(
+                        midpoint_pct=round(val * 100.0, 2),
+                        spread_pct=None,
+                    )
             except (TypeError, ValueError):
                 pass
     return None

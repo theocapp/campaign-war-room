@@ -241,16 +241,27 @@ def _seed_race_sentiment_sources() -> None:
         ("cook",             "rating", "Cook Political Report"),
         ("sabato",           "rating", "Sabato's Crystal Ball"),
         ("inside_elections", "rating", "Inside Elections"),
-        ("ddhq",             "rating", "Decision Desk HQ"),
     ]
 
-    # Fixed URLs for each rating source (same URL regardless of district).
-    # Only the district_label in metadata changes between races.
-    _RATING_URLS = {
+    # Fixed URLs per rating source. external_id is the *fetcher target*
+    # (what we GET when syncing); source_url is the *click-through link*
+    # shown to the user in the dashboard, so it always points to the
+    # authoritative source — even when we're sourcing the data via a
+    # mirror. Cook and Sabato are sourced via 270toWin because their
+    # own sites are Cloudflare-blocked to direct scraping.
+    #
+    # NOTE: the 270toWin URLs are election-year-specific. Refresh when
+    # the cycle rolls over to 2028, or template the year from
+    # CampaignConfig.election_date if multi-cycle deployments matter.
+    _RATING_FETCH_URLS = {
+        "cook":             "https://www.270towin.com/2026-house-election/cook-political-report-2026-house-ratings",
+        "sabato":           "https://www.270towin.com/2026-house-election/crystal-ball-2026-house-forecast",
+        "inside_elections": "https://insideelections.com/ratings/house",
+    }
+    _RATING_DISPLAY_URLS = {
         "cook":             "https://www.cookpolitical.com/ratings/house-race-ratings",
         "sabato":           "https://centerforpolitics.org/crystalball/",
         "inside_elections": "https://insideelections.com/ratings/house",
-        "ddhq":             "https://decisiondeskhq.com/",
     }
 
     with SessionLocal() as db:
@@ -270,11 +281,10 @@ def _seed_race_sentiment_sources() -> None:
             row = existing[slug]
 
             # Auto-configure rating sources from district (no network needed).
-            if row.external_id is None and slug in _RATING_URLS and district and "-" in district:
+            if row.external_id is None and slug in _RATING_FETCH_URLS and district and "-" in district:
                 state, _, district_num = district.partition("-")
-                url = _RATING_URLS[slug]
-                row.external_id = url
-                row.source_url = url
+                row.external_id = _RATING_FETCH_URLS[slug]
+                row.source_url = _RATING_DISPLAY_URLS[slug]
                 row.external_metadata = json.dumps({
                     "district_label": district,
                     "state": state,

@@ -3948,3 +3948,153 @@ The 5-agent code review on `d90d62c` surfaced more than the three hot-fixes alre
 - Frontend dev server running on port 5174 via Claude Preview (`b7909906...`).
 - Branch `main` is at commit `58701b5`, pushed to GitHub. Four commits ahead of the start-of-session state (d90d62c → 978987d → 0960db3 → e33970f → 58701b5).
 - The two pre-existing Landscape.tsx TS errors and the test_seed_race_directory FEC failure remain on main, unchanged.
+
+---
+
+## 2026-05-29 Session: RaceSentimentCard compaction + Inside Elections auto-sync
+
+### Built
+
+**Frontend — RaceSentimentCard compaction** ([RaceSentimentCard.tsx](frontend-v2/src/components/RaceSentimentCard.tsx))
+- Replaced the two-side market percentage display (`Cognetti 45% · Bresnahan 55%`) with a single lead (`Bresnahan +10%`). Leader name keeps its candidate/opponent color; the percentage points stay neutral. New `computeMarketLead()` helper handles partial / tied / full states; the original raw values are preserved in the row's `title=` hover attribute.
+- Dropped the "Markets" / "Forecasters" sub-section headers. All sources now render in one continuous list (markets first, ratings second). The signal format itself (`+18%` vs. `Lean R · 60–75%`) provides enough visual distinction without doubled headers.
+- Tightened density: `padding 8px → 3px`, `fontSize 13 → 12`, link icon `13 → 12`. Grid restructured from `120px 1fr auto auto` to `180px auto auto 1fr auto` so name | signal | delta pack tight on the left and only the external-link icon sits flush right — eliminates the wide blank middle column.
+- Name cell now has `overflow: ellipsis` + `title=` fallback so long forecaster names ("Sabato's Crystal Ball", "Cook Political Report") truncate cleanly while remaining hover-discoverable.
+- **Net result:** card height 389px → 247px (36% reduction).
+
+**Backend — Inside Elections auto-sync** ([race_ratings_monitor.py](backend/app/services/race_ratings_monitor.py))
+- Added `inside_elections_fetch()` + `_parse_inside_elections_district()`. The IE `/ratings/house` page returns 200 OK to plain httpx with a real-browser User-Agent — no special tooling required. Their HTML is well-structured (per-tier `<h3 class="rating ...">` followed by `<table class="ratings">` with `td.state` / `td.district` columns). Parser walks the document linearly, remembering the latest seen `h3.rating`, returning that text when it hits the matching state+district row.
+- Registered `inside_elections` in [race_sentiment_sync.py](backend/app/services/race_sentiment_sync.py) `_get_fetcher()`. End-to-end sync verified: `last_synced_at` populated, no error, returned `Tilt R · 52–60% · favors=opponent` (matches the previously hand-entered value — strong sanity-check). Dashboard now shows the green LIVE badge on Inside Elections in place of MANUAL.
+- Updated the card footer text from "Manual: forecasters (Cloudflare-blocked)" to reflect the per-source reality: "Live: Polymarket, Kalshi, Inside Elections. Manual: Cook, Sabato (Cloudflare), DDHQ."
+- 6 parser unit tests added in [tests/test_inside_elections_parser.py](backend/tests/test_inside_elections_parser.py) — HTML-snippet tests, no network, will fail loudly if IE changes their layout.
+
+**Backend — `_get_html()` false-positive fix** ([race_ratings_monitor.py:202](backend/app/services/race_ratings_monitor.py:202))
+- Previous Cloudflare detection raised `CloudflareBlockedError` whenever `"challenge-platform"` appeared anywhere in the response body. That string is part of the URL of `/cdn-cgi/challenge-platform/scripts/jsd/main.js`, which CF injects into *every* CF-protected page as passive bot-analytics telemetry — even on 200 OK pages serving real content. IE's `/ratings/house` is a 200 with that script present, so the detection mis-flagged it.
+- New logic: require BOTH `status_code in (403, 503)` AND a challenge-only body marker (`"Just a moment..."` page title or `cf_chl_opt` inline JS variable, scanned in the first 8KB only). Bare 403/503 without the challenge body now propagates as a normal HTTP error instead of being mis-labeled as CF.
+- Cook still correctly raises `CloudflareBlockedError` (status 403 + challenge title); verified.
+
+### Key decisions
+
+- **Did NOT keep Playwright as a dependency.** Installed it + Chromium (~200MB), tested headless + playwright-stealth against all 4 forecaster sites. Result: Cook and Sabato remain Cloudflare-IUAM-blocked even with stealth patches applied (`navigator.webdriver` masking, etc.). Inside Elections works with plain httpx, no headless browser required. DDHQ does not publish a public ratings URL (every obvious `/ratings/*` path 404s; homepage 200s but offers no ratings table). Conclusion: a runtime Playwright dependency would not bypass the only sources we wanted it for. Uninstalled + cleared the Chromium cache.
+- **Did NOT pay for a Cloudflare bypass service.** ScraperAPI / ZenRows / Bright Data would unblock Cook + Sabato but cost $30–100/mo recurring. Punted to user; flagged as an option if/when those two MANUAL rows become annoying to update by hand.
+- **Did NOT widen the name column past 180px to fit "Cook Political Report" / "Sabato's Crystal Ball" without ellipsis.** Tradeoff: a wider name column (~210px) would eat into the signal-side breathing room. Truncation with hover-title is the standard table-row idiom; can revisit if the user dislikes it.
+- **Card stays one continuous list (no M/F type badge per row).** User opted "not sure" on the row-tagging question; default to the most compact option, since the `+N%` lead vs. `Lean R · band` rating formats are already visually distinct. Easy to re-introduce a tag later if it turns out users confuse the two.
+
+### Open questions / concerns for review
+
+- **Latent bug in `_favors_from_label()`** ([race_ratings_monitor.py:201](backend/app/services/race_ratings_monitor.py:201)): `if any(s in l for s in ("d", "democrat")) and "republican" not in l: return "candidate"`. The single-character `"d"` matches the letter `d` in any label containing one — including `"solid r"` (the lowercased "Solid R"). So `Solid R`, `Likely R`, and any tier with a `d` somewhere in its lowercase form would incorrectly favor `candidate`. Currently masked for PA-08 because the live rating is `Tilt R` (`"tilt r"` → no `d` → falls through to opponent), but will mis-favor if Cook ever moves PA-08 to Solid R / Likely R. Out of scope for this session — file a fix.
+- **DDHQ row is "configured but empty"** — its `external_id` was set by `_rating_autoconfigure()` to the homepage URL, which is not a ratings page. The row shows "No rating entered" with no badge. If anyone ever wires a real DDHQ source URL, the auto-config will need to know the new path. May be worth removing the DDHQ row from the seed list until/unless we have a viable source for it; it's currently visual clutter.
+- **`_get_html()` detection is still HTTP-status-coupled.** If Cloudflare ever starts serving the IUAM challenge with a `200` status (some CF configurations do this for redirect-based challenges), the detection will fail closed and the fetcher will return parser-garbage instead of `CloudflareBlockedError`. Probably fine in practice — the current modes Cook/Sabato are using are 403-based — but worth noting if their behavior changes.
+- **Live IE rating equals the previously hand-entered value** (`Tilt R · 52–60%`). Good — confirms the parser, but means there's no behavioral diff for the user to *see* until IE actually changes its rating on PA-08. The LIVE badge in place of MANUAL is the only visible signal that anything happened.
+- **Footer text is hand-coded** with the explicit source split. If a future session adds another live source, the footer must be updated alongside `_get_fetcher()`. Worth considering a derived footer that reads from the rows (`rows.filter(r => r.last_synced_at && !r.last_sync_error).map(r => r.display_name)` etc.) — small refactor, not done in this session.
+
+### Live state at end of session
+
+- Frontend on port 5174 still served by the same Claude Preview server (`71cb49d8-...`), serving the new compact card. Dashboard `/` rendered card contains: `Kalshi · LIVE · Cognetti +18%`, `Polymarket · LIVE · Cognetti +16%`, `Cook Political Report · MANUAL · Toss-up · 45–55%`, `Decision Desk HQ · No rating entered`, `Inside Elections · LIVE · Tilt R · 52–60%`, `Sabato's Crystal Ball · MANUAL · Lean R · 60–75%`, footer "Updated just now."
+- Backend still importable; no migrations added. Live DB `inside_elections` row updated this session via `sync_one()` — `last_synced_at=2026-05-29 05:07 UTC`, `last_sync_error=null`.
+- Playwright + playwright-stealth installed and uninstalled within the same session; `~/Library/Caches/ms-playwright/` removed. `requirements.txt` unchanged.
+- Pre-existing GeographicOverlay HMR errors continue to appear in the Vite console (unrelated to this session — already noted in prior INTER_SESSION entries).
+- Branch `main` is unchanged on disk vs. start-of-session — no commits made; user can review the diff before deciding to commit.
+
+---
+
+## 2026-05-29 Session (continued): Cook + Sabato via 270toWin + DDHQ removal
+
+### Built
+
+**Backend — Cook + Sabato auto-sync via 270toWin** ([race_ratings_monitor.py](backend/app/services/race_ratings_monitor.py))
+- The earlier session reported Cook and Sabato as "permanently blocked by Cloudflare IUAM" after testing direct httpx, headless Chromium, and playwright-stealth. The user pushed back on the claim that an alternative source (270toWin) was "stale" — turned out my first probe extracted the wrong field (`seat_status` is a shared 270toWin field across all per-source pages; the per-forecaster rating lives in `map_code`).
+- 270toWin's per-source pages (cook-political-report-2026-house-ratings, crystal-ball-2026-house-forecast) embed a JSON blob with one `map_code` per district. The codes map 1:1 to rating tiers via the page's color-palette legend (`0`=Toss-up, `6`=Lean R, etc — full 9-tier map in `_270TOWIN_COLOR_TO_RATING`).
+- Implemented `_270towin_fetch(url, metadata, source_label)` + `_parse_270towin_map_code(html, state, district)`. `cook_fetch` and `sabato_fetch` are now thin wrappers over the shared helper. 9 parser unit tests in [tests/test_270towin_parser.py](backend/tests/test_270towin_parser.py).
+- Validated end-to-end against the live DB: Cook syncs to "Toss-up · 45–55%" (matches the actual Cook site), Sabato syncs to "Lean R · 60–75%" (matches the actual Sabato site). Dashboard now shows the green LIVE badge on both rows.
+
+**Backend — URL split: fetcher vs. display** ([db.py](backend/app/db.py), [race_sentiment_sync.py](backend/app/services/race_sentiment_sync.py))
+- Introduced `_RATING_FETCH_URLS` (the URL `sync_one` GETs) and `_RATING_DISPLAY_URLS` (the click-through URL the dashboard shows). For Cook and Sabato these diverge: we GET 270toWin but the user-facing external-link icon still points to cookpolitical.com / centerforpolitics.org. Inside Elections is the same URL in both maps.
+- Live DB rows migrated in-session: `cook.external_id` and `sabato.external_id` repointed to their 270toWin URLs; `source_url` left as the authoritative source. Both rows had `last_sync_error` cleared.
+- These constants are duplicated between `app/db.py` (seed) and `app/services/race_sentiment_sync.py` (autoconfigure fallback) — must be kept in sync. There's an inline NOTE comment on both. Could be consolidated into a single module if a future session decides to.
+
+**Backend — DDHQ removed** ([db.py](backend/app/db.py), [race_sentiment_sync.py](backend/app/services/race_sentiment_sync.py), [RaceSentimentCard.tsx](frontend-v2/src/components/RaceSentimentCard.tsx))
+- DDHQ does not publish a public 2026 House ratings table; their `/ratings/*` paths all 404. Validated again this session. Dropped from `defaults` in `_seed_race_sentiment_sources()` and the URL maps in both modules. Existing `ddhq` row deleted from the live DB.
+- Frontend doesn't need any code change for this — the dashboard just renders rows that exist; one fewer row = one fewer line. The footer text was updated to drop the "Manual: ... DDHQ" suffix.
+
+**Frontend — Footer rewrite** ([RaceSentimentCard.tsx](frontend-v2/src/components/RaceSentimentCard.tsx))
+- Footer now reads: *"Live: all sources. Cook + Sabato sourced via 270toWin. Daily auto-sync."* Honest about provenance (270toWin is a mirror, not the source itself).
+
+**Cleanup**
+- Deleted the dead `_parse_cook_district()` helper that the original Cloudflare-blocked `cook_fetch` used to scrape cookpolitical.com directly. Module docstring updated to describe the new architecture (3 sources, all LIVE, 270toWin as the Cook/Sabato proxy).
+
+### Key decisions
+
+- **Sourced Cook + Sabato via 270toWin rather than a paid bypass service.** Free, no recurring cost, validated to match the live forecaster ratings on the day of validation. Tradeoff: 270toWin's update cadence may lag the source by hours-to-a-day after a rating change. For a daily-sync use case this is acceptable; if a rating change had to surface within minutes, we'd need a paid CF bypass.
+- **Treated the URL split as semantic (`external_id` for fetcher, `source_url` for display) rather than papering over it.** Cleaner provenance: when a user clicks the external-link icon next to "Cook Political Report" on the dashboard, they go to Cook's actual page, not to 270toWin. The fact that we source the data via 270toWin is a backend implementation detail.
+- **Deleted the old `cook_fetch` cookpolitical.com scraper** rather than keeping it as fallback. Per the project guidance to avoid backwards-compat hacks for hypothetical futures. If anyone ever lands a paid CF bypass, they can rewrite the function from scratch — the logic of the old scraper was trivial (BeautifulSoup table-row scan), so there's nothing to preserve.
+- **Did NOT replace IE's direct fetcher with 270toWin.** During validation, 270toWin's IE data showed Toss-up while the live IE site showed Tilt R — IE's data on 270toWin appears to be either stale or normalized. The direct IE fetcher works fine, so we keep it.
+- **DDHQ row deleted, not hidden.** No reason to clutter the dashboard with a permanently-empty row. If DDHQ later publishes a public ratings page, a future session can re-add the seed entry.
+
+### Open questions / concerns for review
+
+- **270toWin URL hardcodes `2026`.** When the 2028 cycle rolls over, both `_RATING_FETCH_URLS` constants need to be edited. For a single-tenant tool this is fine; for the SaaS / multi-tenant pivot, derive the year from `CampaignConfig.election_date` or similar. Filed as future work, not in scope today.
+- **`_RATING_FETCH_URLS` / `_RATING_DISPLAY_URLS` are duplicated** across [app/db.py](backend/app/db.py) and [app/services/race_sentiment_sync.py](backend/app/services/race_sentiment_sync.py). The two must stay in sync. Worth consolidating into a single module (e.g. `app/services/race_sentiment_config.py`) — but adds a refactor without immediate payoff. NOTE comments mark the duplication.
+- **The `_favors_from_label()` bug noted in the previous session entry is still there.** Not exercised by the 270toWin path (which computes favors directly from `_270TOWIN_COLOR_TO_RATING`, avoiding the bug entirely), but `inside_elections_fetch` still uses it. Same fix recommendation as before: change `("d", "democrat")` to `("democrat",)` — `Lean D` etc would still be matched via `_normalize_rating_label` running first. Worth a separate small PR.
+- **270toWin's reliability for IE is unproven.** We sampled one district on one day. If 270toWin's IE data is regularly stale, then assuming 270toWin's Cook/Sabato data is reliable is on shakier ground than I framed it. Sample more districts over more days before claiming 270toWin is "same-day accurate" for SaaS/marketing claims.
+- **Frontend footer text is still hand-coded.** Same caveat as last session — if a future session changes the auto-sync source set, the footer text in [RaceSentimentCard.tsx](frontend-v2/src/components/RaceSentimentCard.tsx) must be updated alongside. Worth deriving from the rows themselves.
+
+### Live state at end of session
+
+- Dashboard `/` rendered card: **all 5 rows LIVE**. `Polymarket · LIVE · Cognetti +16%`, `Kalshi · LIVE · Cognetti +18%`, `Cook Political Report · LIVE · Toss-up · 45–55%`, `Inside Elections · LIVE · Tilt R · 52–60%`, `Sabato's Crystal Ball · LIVE · Lean R · 60–75%`. Footer: "Live: all sources. Cook + Sabato sourced via 270toWin. Daily auto-sync." Card height: 222px (down from a 389px baseline pre-session).
+- Live DB: `ddhq` row deleted, `cook.external_id` and `sabato.external_id` repointed to 270toWin URLs, all three rating rows have fresh `last_synced_at` and null `last_sync_error`.
+- 15 parser tests pass (9 new 270toWin + 6 existing Inside Elections).
+- Branch `main` still uncommitted — user reviewing diff before commit.
+- No new dependencies added; httpx + bs4 were already in `requirements.txt`.
+
+---
+
+## 2026-05-29 Session (continued): UI compaction + market math overhaul
+
+### Built
+
+**RaceSentimentCard — full UI restructure** ([RaceSentimentCard.tsx](frontend-v2/src/components/RaceSentimentCard.tsx))
+- Replaced the vertical-list layout with a **horizontal scoreboard**: one mini-cell per source, all five in a single row. Each cell is a stack of `SOURCE NAME` (small, uppercase, muted) over the signal (rating label + band for forecasters; market lead for markets). Source order was flipped so forecasters (Cook / IE / Sabato) lead and markets (Kalshi / Polymarket) sit on the right per the user's preference.
+- Pulled the header (title + InfoTooltip + timestamp + ··· menu) **outside the card wrapper** so the section matches the Featured Narratives format on the same page — only the scoreboard itself is wrapped in card styling (`bg-2` background, `border`, `0.625rem` radius).
+- Replaced standalone *Sync now* / *Edit values* buttons with a single `MoreHorizontal` (···) icon that opens a dropdown menu. Click-outside closes the menu via a `mousedown` listener registered on the document only while open. The card height has shrunk from 389px (start of session) → 90px (now); a ~77% reduction over the day's work.
+- Removed the always-visible "Updated Xm ago" footer. The timestamp now only appears in the header when sync is **actually stale** — silent when healthy. After the schedule split (below), staleness is checked per source type rather than as a single global age.
+- Removed the explicit `LIVE` badge from each cell since every source now syncs live. The `MANUAL` / `BLOCKED` SyncBadge states still render for failure surfacing; absence-of-badge means healthy.
+- Reformatted forecaster cells so the band rides inline next to the rating label (`Toss-up 45–55%` on one line, not stacked). Removed the green/red 7-day delta sublines on markets per the user's request — the lead is the actionable signal; the delta was noise. Tightened cell font + padding to make `Toss-up 45–55%` fit cleanly without truncation across all forecaster cells.
+
+**Race-sentiment sync — split cadence** ([scheduler.py](backend/app/services/scheduler.py), [race_sentiment_sync.py](backend/app/services/race_sentiment_sync.py))
+- The previous single daily job (`race_sentiment_daily`) ran every 24h regardless of source type. Markets reprice on news events and want intra-day refresh; forecaster ratings change weekly at most and don't justify it. Split into two scheduler jobs: `race_sentiment_markets` (every 2h) and `race_sentiment_forecasters` (every 12h).
+- `sync_all()` now takes an optional `source_types` filter so each job runs only its share. Live-verified: `sync_all(db, source_types=('market',))` syncs only Polymarket + Kalshi.
+- Frontend stale detection updated to per-source-type thresholds: markets warn at >6h (three missed 2h cycles, tolerates one-off skip), forecasters warn at >24h (two missed 12h cycles). A global `max(updated_at)` check was deliberately not used because fresh market syncs would have masked forecaster-only failures. Warning text identifies which type is stale (`"Markets stale (8h)"` etc.) with a hover tooltip pointing to the Sync now menu action.
+
+**Confidence-weighted market blending** ([prediction_market_monitor.py](backend/app/services/prediction_market_monitor.py))
+- Investigation surfaced a real bug in market pct math. PA-08 on Polymarket has two binary sub-markets ("Will the Democrats win?" and "Will the Republicans win?"). The Democrat market is liquid (bid 61¢ / ask 63¢, midpoint 62%) but the Republican market is **dead** — bid 9¢ / ask 82¢ — so its "midpoint" of 45.5¢ is a synthetic number from an essentially empty order book. Computing the lead as `candidate_pct − opponent_pct = 62 − 45.5 = +16.5` mixed a real signal with phantom data and gave the user a misleading number.
+- Implemented `MarketQuote` (frozen dataclass with `midpoint_pct` + `spread_pct`), `_confidence(spread_pct)` (linear decay 1.0 at 0% spread down to 0 at the 20% dead-market threshold), and `_blend_p_x_wins(x_yes, other_yes)` which computes a confidence-weighted estimate of P(X wins) from both binary markets. Each market contributes its midpoint, weighted by its spread-derived confidence — dead markets drop out automatically.
+- Refactored both `polymarket_fetch` and `kalshi_fetch` to use the new blending. The Polymarket fetcher now reads `bestBid` / `bestAsk` directly (with `outcomePrices` as a legacy fallback). The Kalshi fetcher prefers `yes_bid_dollars` / `yes_ask_dollars` (with `last_price_dollars` as fallback). The raw quote objects are recorded in `raw_response` for debugging.
+- Live-verified post-blend: Polymarket goes from `62 / 45.5 → +16.5` to `62 / 38 → +24` (correctly collapses to the liquid D market). Kalshi goes from `62 / 44 → +18` (raw asks) to `59 / 41 → +18` (blended midpoints) — same lead, cleaner absolute values that sum to 100. 15 unit tests in [tests/test_market_blend.py](backend/tests/test_market_blend.py) cover the blending corners: liquid+liquid averaging, liquid+dead collapse, both-dead fallback, complement-derivation, and the exact PA-08 Polymarket scenario.
+
+### Key decisions
+
+- **Followed the user's "use midpoints, not picked-side" intuition.** My first proposal was the simpler "just use the liquid side's midpoint and complement it." The user pushed back: that ignores valuable signal when *both* markets have it. They were right. Confidence-weighted blending degrades gracefully (gives the correct picked-side answer when one is dead, but takes the average when both are real) and is statistically the better estimator. The extra ~30 lines of code are worth it.
+- **20% spread → confidence 0 threshold.** Generous enough that real markets with 2–5% spreads keep nearly-full weight; aggressive enough that a 20¢-wide order book is treated as the dead signal it is. Encoded as `_DEAD_MARKET_SPREAD_THRESHOLD_PCT` so it's easy to tune.
+- **Did not normalize blended `candidate_pct + opponent_pct` to sum to 100.** Each side blends independently — letting the sum drift slightly from 100 leaves the residual spread/fee cushion visible in the data, which is honest. In the dead-R Polymarket case it naturally sums to exactly 100 anyway because both estimates come from the same liquid market via complementation.
+- **Markets every 2h, not 1h.** The user's range was "1–2h." Conservative end was chosen to be polite to upstreams (Polymarket Gamma + Kalshi Elections APIs), to keep daily fetch cost bounded for a potential SaaS deployment, and because intra-day market moves of <2h are usually noise around a news event the user will already see via narrative ingestion. Easy to drop to 1h if responsiveness ever feels lagging.
+- **`fmtDelta` helper deleted** — the green/red 7-day delta render path is now dead. The DB column `delta_7d` still exists; if a future session wants to bring deltas back (e.g. as a sparkline), the field is still being written by the snapshot job.
+
+### Open questions / concerns for review
+
+- **The Polymarket R-market problem may extend to other races.** For PA-08 the issue surfaces clearly: the D side is liquid, the R side is dead, and `62 - 45.5 = +16.5` looked wrong to the user. For a race where both sides are dead (a non-competitive race that Polymarket lists but no one trades), the blender currently falls back to the X-side midpoint — which is still phantom data. Long-term the right move may be to refuse to publish a market reading at all when **both** confidences are zero. Today that's PA-08-specific behavior we don't need; flagging for when other races get added.
+- **Spread threshold is a single magic number.** 20% feels right for U.S. House race markets, but for Senate or Presidential markets — which trade at lower implied probabilities and may have different liquidity profiles — a different threshold could be appropriate. If multi-race deployment lands, consider making the threshold a per-race parameter or a function of `liquidity_dollars`.
+- **APScheduler in-memory state doesn't pick up the schedule split until uvicorn restarts.** The new code lives on disk and uvicorn's `--reload` will reload the module on file changes, but the running scheduler instance keeps its previous job registrations. User was told to restart the backend (`pkill -f "uvicorn app.main:app" && cd backend && .venv/bin/uvicorn app.main:app --reload`) for the new cadence to take effect.
+- **The forecaster threshold (24h) may be too forgiving for the SaaS pivot.** Today this is one user; if a campaign manager goes a week between dashboard logins they want to know whether the data they're looking at is stale. Consider tightening to 18h (just over 1.5x the cycle).
+- **All UI height numbers in the dashboard are inline-style px values.** That's intentional — the design is dense and intentional — but a future global "increase density" / "decrease density" toggle would need to thread through the SourceCell padding + signal font + band font. Not worth abstracting today.
+- **`raw_response` now includes the full `MarketQuote.__dict__`.** That's fine for debugging but mildly increases the size of each `RaceSentimentSnapshot` row in Postgres. If snapshot retention ever bites, the `candidate_quote` / `opponent_quote` fields could be dropped from the snapshot.
+
+### Live state at end of session
+
+- Dashboard `/` rendered card: 5 cells, all LIVE, scoreboard 52px tall, section total 90px including header. Order: Cook / Inside Elec. / Sabato / Kalshi / Polymarket.
+- Final live values: `Cook · Toss-up 45–55%`, `Inside Elec. · Tilt R 52–60%`, `Sabato · Lean R 60–75%`, `Kalshi · Cognetti +18%`, `Polymarket · Cognetti +24%`.
+- DB: `candidate_pct` / `opponent_pct` on the polymarket row now reflect blended midpoints (62 / 38). Kalshi row reflects blended midpoints (59 / 41). Both have `last_synced_at` fresh.
+- Backend scheduler config: `race_sentiment_markets` every 2h, `race_sentiment_forecasters` every 12h. Code is committed to disk; the running uvicorn process needs a restart for it to take effect.
+- 15 new tests in `tests/test_market_blend.py`; all pass. Existing `tests/test_270towin_parser.py` (9) and `tests/test_inside_elections_parser.py` (6) still pass — no regressions.
+- Branch `main` still uncommitted across all of today's work.
+
