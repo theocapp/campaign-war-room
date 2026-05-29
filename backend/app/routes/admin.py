@@ -18,6 +18,7 @@ from app.models import (
 from app.schemas import (
     ReanalyzeSourcesRequest,
     ReanalyzeSourcesResult,
+    RescoreArticlesRequest,
     ResetWorkspaceRequest,
     ResetWorkspaceResult,
 )
@@ -259,23 +260,42 @@ def reanalyze_sources_endpoint(body: ReanalyzeSourcesRequest, db: Session = Depe
 
 @router.post("/admin/rescore-articles")
 def start_rescore(
-    only_unscored: bool = False,
-    auto_rematch: bool = False,
-    max_workers: int | None = None,
+    body: RescoreArticlesRequest,
     db: Session = Depends(get_db),
 ):
     """Start background LLM rescoring of articles. Returns immediately.
 
-    only_unscored=true skips articles that already have a summary, so a
-    rescore can resume without redoing work already completed.
-    auto_rematch=true chains a frame-rematch job once rescoring finishes.
-    max_workers=null auto-sizes to one worker per loaded LLM key (default).
+    `only_unscored=true` skips articles that already have a summary, so a
+    rescore can resume without redoing work already completed. This is the
+    safe path — no confirm required.
+
+    `only_unscored=false` (default) rescores EVERY article in the corpus —
+    21k+ items at ~2/min, i.e. a multi-day, real-money LLM run. To prevent
+    a single misclick from triggering that, the body must include
+    `confirm: "RESCORE ALL ARTICLES"` in this case.
+
+    `auto_rematch=true` chains a frame-rematch job once rescoring finishes.
+    `max_workers=null` auto-sizes to one worker per loaded LLM key (default).
+
+    Internal callers (campaign.py backfill resume, scheduler.py pipeline
+    resume) hit `rescore_svc.start_rescore` directly without going through
+    this endpoint, so they're unaffected by the confirm requirement.
     """
+    if not body.only_unscored and body.confirm != "RESCORE ALL ARTICLES":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Full rescore requires confirm string exactly "
+                "'RESCORE ALL ARTICLES' (multi-day LLM run over 21k+ articles). "
+                "Pass only_unscored=true to score just new articles without "
+                "confirmation."
+            ),
+        )
     return rescore_svc.start_rescore(
         db,
-        only_unscored=only_unscored,
-        auto_rematch=auto_rematch,
-        max_workers=max_workers,
+        only_unscored=body.only_unscored,
+        auto_rematch=body.auto_rematch,
+        max_workers=body.max_workers,
     )
 
 

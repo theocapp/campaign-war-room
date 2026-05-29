@@ -168,7 +168,30 @@ export const api = {
     post<NarrativeFrame>('/narrative-frames', data),
   updateFrame: (id: number, data: Partial<NarrativeFrame>) =>
     put<NarrativeFrame>(`/narrative-frames/${id}`, data),
-  deleteFrame: (id: number) => del<unknown>(`/narrative-frames/${id}`),
+  // Frame deletion cascades through FrameClusterMatch, FrameVariant,
+  // FrameStageHistory, and NarrativeFrameMention — see backend
+  // `safe_delete_frame`. The backend requires `?confirm=DELETE+FRAME` to
+  // proceed; pass `dryRun: true` to preview the cascade counts without
+  // touching data. Type the confirm string at the call site so a misclick
+  // can't bypass the guard.
+  previewDeleteFrame: (id: number) =>
+    del<{
+      dry_run: true
+      frame_id: number
+      frame_name: string
+      would_delete: {
+        frame_cluster_matches: number
+        narrative_frame_mentions: number
+        frame_variants: number
+        frame_stage_history: number
+        candidate_frame_refs_cleared: number
+        narrative_frame: number
+      }
+    }>(`/narrative-frames/${id}?dry_run=true`),
+  deleteFrame: (id: number, confirm: 'DELETE FRAME') =>
+    del<{ ok: true; deleted: Record<string, number> }>(
+      `/narrative-frames/${id}?confirm=${encodeURIComponent(confirm)}`,
+    ),
   suggestFrames: () => post<{ suggestions: NarrativeFrame[] }>('/narrative-frames/suggest'),
   rematchFrames: () => post<unknown>('/narrative-frames/rematch'),
   // Pending candidate-frame clusters — narratives the LLM has been flagging

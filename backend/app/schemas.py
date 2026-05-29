@@ -896,6 +896,22 @@ class ReanalyzeSourcesRequest(BaseModel):
     dry_run: bool = False
 
 
+class RescoreArticlesRequest(BaseModel):
+    """Body for POST /admin/rescore-articles.
+
+    A full rescore (only_unscored=False) runs the LLM scoring pipeline over
+    every article in the corpus — currently 21k+ items at ~2/min, i.e. a
+    multi-day, real-money job. Require an explicit confirm string for that
+    case so a single misclick doesn't trigger it. The `only_unscored=True`
+    case is the safe "resume" path — it only touches articles that have
+    never been scored — so no confirm is required there.
+    """
+    confirm: Optional[str] = None  # required when only_unscored=False
+    only_unscored: bool = False
+    auto_rematch: bool = False
+    max_workers: Optional[int] = None
+
+
 class ReanalyzeSourceResult(BaseModel):
     source_id: int
     title: str

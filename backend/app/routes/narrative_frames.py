@@ -287,7 +287,12 @@ def update_frame(frame_id: int, body: FrameUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{frame_id}")
-def delete_frame(frame_id: int, db: Session = Depends(get_db)):
+def delete_frame(
+    frame_id: int,
+    confirm: str = "",
+    dry_run: bool = False,
+    db: Session = Depends(get_db),
+):
     """Delete a NarrativeFrame and all its dependents.
 
     Routed through ``safe_delete_frame`` to ensure cascade to
@@ -297,10 +302,64 @@ def delete_frame(frame_id: int, db: Session = Depends(get_db)):
     via the ORM relationship, leaving the rest as orphans (we found
     13 orphan frame_variants + 4 orphan candidate_frames in tonight's
     audit, all traceable to frames deleted via this route).
+
+    Safety:
+      - ``?dry_run=true`` returns the cascade counts that *would* be deleted,
+        without touching anything. Use this to preview the blast radius
+        before confirming a frame deletion.
+      - The actual delete requires ``?confirm=DELETE+FRAME`` (URL-encoded).
+        A frame can carry hundreds of FrameClusterMatch rows and tens of
+        variants — a misclick here is meaningful data loss.
     """
     frame = db.query(NarrativeFrame).get(frame_id)
     if not frame:
         raise HTTPException(status_code=404, detail="Frame not found")
+
+    if dry_run:
+        # Preview cascade counts via a read-only sweep — same predicates
+        # safe_delete_frame uses, but no deletes are issued.
+        from app.models import (
+            CandidateFrame as _CF,
+            FrameClusterMatch as _FCM,
+            FrameStageHistory as _FSH,
+            FrameVariant as _FV,
+            NarrativeFrameMention as _NFM,
+        )
+        return {
+            "dry_run": True,
+            "frame_id": frame_id,
+            "frame_name": frame.name,
+            "would_delete": {
+                "frame_cluster_matches": db.query(_FCM).filter(
+                    _FCM.frame_id == frame_id
+                ).count(),
+                "narrative_frame_mentions": db.query(_NFM).filter(
+                    _NFM.frame_id == frame_id
+                ).count(),
+                "frame_variants": db.query(_FV).filter(
+                    _FV.frame_id == frame_id
+                ).count(),
+                "frame_stage_history": db.query(_FSH).filter(
+                    _FSH.frame_id == frame_id
+                ).count(),
+                "candidate_frame_refs_cleared": db.query(_CF).filter(
+                    _CF.resolved_to_frame_id == frame_id
+                ).count(),
+                "narrative_frame": 1,
+            },
+        }
+
+    if confirm != "DELETE FRAME":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Frame deletion cascades through FrameClusterMatch, "
+                "FrameVariant, FrameStageHistory, and NarrativeFrameMention. "
+                "Pass ?confirm=DELETE+FRAME (URL-encoded) to proceed, "
+                "or ?dry_run=true to preview cascade counts first."
+            ),
+        )
+
     from app.services.safe_deletes import safe_delete_frame
     counts = safe_delete_frame(db, frame_id)
     db.commit()
