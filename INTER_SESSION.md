@@ -3889,3 +3889,62 @@ The Briefing page now uses clean Inter throughout. Other pages (Entity Network, 
 
 - **Did not enable `pg_stat_statements`** for dbstats — would require Postgres restart affecting other DBs on this server. Plan calls this out as deferred until perf becomes a real problem.
 - **Used local Postgres 15, not Docker.** Same outcome as Docker for dev purposes; one less moving part. Production hosting (Neon/Supabase/RDS) decision deferred per the migration plan.
+
+## 2026-05-29 Session: post-cutover code-review followups (P1–P4)
+
+The 5-agent code review on `d90d62c` surfaced more than the three hot-fixes already committed. Worked through the remaining IMPORTANT findings in four focused commits.
+
+### Built
+
+**P1 — `978987d` backend: fix Postgres dialect detection + extend timeouts for LLM workers**
+- Found a deeper bug while implementing the requested timeout fix: `_IS_POSTGRES` at `backend/app/db.py:37` was `DATABASE_URL.startswith(("postgresql:", "postgres:"))`. The real URL is `postgresql+psycopg://...` which does NOT start with `postgresql:` — the next character is `+`, not `:`. The check has returned False since the 2026-05-29 cutover, silently disabling the entire `_set_postgres_session_defaults` connect listener. **Statement_timeout, lock_timeout, and idle_in_transaction_session_timeout were the server defaults (0 / 1s / 0) instead of the intended 60s / 10s / 5min** for the whole period the cutover has been live. Verified by `SHOW statement_timeout` on an app-engine session: was 0, now 1min after fix.
+- Switched to `make_url(DATABASE_URL).get_backend_name()` and accept both `"postgresql"` and the legacy `"postgres"` alias.
+- With the listener now actually firing, raised `idle_in_transaction_session_timeout` from 5min → 30min. Sized to the rescore worker pattern: `_process_item` opens a session, runs SELECT (begins tx), then calls `campaign_analysis.analyze` which can sleep up to 5min × 3 attempts on provider rate-limit backoff. 30min absorbs the full backoff ladder.
+- Defended Alembic in `backend/alembic/env.py`: on Postgres connections, issue `SET statement_timeout = 0` + `SET idle_in_transaction_session_timeout = 0` before `context.begin_transaction()`. Migrations are now unbounded regardless of how the engine was constructed (today they use a separate engine without the listener; tomorrow they might not).
+- Added `tests/test_db_dialect_detection.py` (8 cases) covering `postgresql+psycopg`, `postgresql+psycopg2`, bare `postgresql://`, legacy `postgres://`, sqlite variants, plus a live cross-check of `_IS_POSTGRES` / `_IS_SQLITE` against the resolved URL.
+- Restarted uvicorn (PID 55981). Smoke test against `/api/admin/dbstats`, `/api/search`, `/api/narrative-frames`, `/api/articles/recent`, `/api/opponents` all 200.
+
+**P2 — `0960db3` backend+frontend: confirm-string guards on destructive endpoints**
+- `POST /admin/rescore-articles` — previously no confirm. A misclick would queue a full LLM rescore over 21k+ articles (~2/min, multi-day, real money). Now takes a `RescoreArticlesRequest` body. When `only_unscored=False`, requires `confirm: "RESCORE ALL ARTICLES"`. When `only_unscored=True` (the safe resume path), no confirm. Internal callers (`scheduler.py`, `campaign.py`) call the service function directly and are unaffected.
+- `DELETE /narrative-frames/{frame_id}` — previously no confirm. Cascades through FrameClusterMatch + FrameVariant + FrameStageHistory + NarrativeFrameMention (real frame has hundreds of FCM rows + dozens of variants). Now requires `?confirm=DELETE+FRAME` (URL-encoded). Also adds `?dry_run=true` which returns cascade counts without committing. Smoke check on frame_id=1 ("Bresnahan's Stock Trades") dry-run: 201 FCM + 144 NFM + 37 variants + 7 stage_history.
+- Frontend `client.ts` `deleteFrame` signature now requires `confirm: 'DELETE FRAME'` at the type level; new `previewDeleteFrame` exposes the dry-run path. No UI button calls this today; the strict signature means a future "delete frame" button can't omit the guard.
+- Added `tests/test_destructive_endpoint_guards.py` — 9 tests, all pass.
+
+**P3 — `e33970f` frontend: surface failed-write errors via toast + inline row state**
+- `Opponents.tsx:248` (createOpponent), `ReviewQueue.tsx:408` (doAction + bulkAction), `Monitors.tsx:144` (toggleActive / deleteMonitor / triggerCrawl / discoverUrls) all had `catch { /* silently fail */ }`. Failed writes looked identical to successes — the operator would double-fire the same action.
+- New `components/Toast.tsx` — minimal context-based toast with `aria-live="polite"`, auto-dismiss (6s for errors, 3s for successes), click-to-dismiss. `useToast()` hook tolerates being called outside a provider. `describeError()` helper parses the `${METHOD} ${path} → ${status}: ${body}` thrown by `api/client.ts` into a readable string (handles FastAPI's `{detail: ...}` payload).
+- `App.tsx` wraps the router in `<ToastProvider>` so any page in the tree can call `useToast()`.
+- Opponents: inline error inside the AddOpponentModal **plus** a toast (message survives if operator accidentally closes the modal).
+- ReviewQueue: per-id `actionErrors` Map renders the failure inline below the row; bulk action sets it for every selected id. Successful retry clears the row's error before the call.
+- Monitors: per-row `rowErrors` strip below the failing row for toggle/delete; toasts for global actions (`triggerCrawl` also fires a success toast on the happy path).
+- Verified end-to-end against the running app by patching `window.fetch` to return 500 for the next monitor PUT / opponent POST / review-queue action, then clicking the corresponding button. In all three cases the toast appeared in the viewport AND the inline row error rendered with the FastAPI detail payload extracted.
+
+**P4 — `58701b5` frontend: remove KG mock data from SearchResults + GeographicOverlay**
+- `SearchResults.tsx:10` — entity tab client-side-filtered `MOCK_ENTITIES` and linked to `/entity-network` (which `App.tsx` redirects to `/`). Triple-broken. Removed the tab, the MOCK_ENTITIES/EntityType/TYPE_ICONS imports, the entity branch of the results memo, the count, the visible state, and the result section. Tab type narrows from `'all'|'articles'|'narratives'|'entities'` to drop `'entities'`.
+- `GeographicOverlay.tsx` — header badge said "LIVE MAP" but the side panel was built from `MOCK_ENTITIES` + `MOCK_RELATIONS`, and city marker stats came from a `placeholderStats()` hash function that fabricated `articleCount` and a `{d, r, neutral}` stance. The operator couldn't tell what was real. Per the CLAUDE.md KG-policy retreat, wiring to `/api/entity-network` was not an option, so the dishonest sections came out.
+- Renamed badge to "DISTRICT MAP". Removed `placeholderStats()`, `cityIndex` useMemo, `stanceColor`, `cityRadius`, filter-mode chips, stance-color legend, per-city stance bar, StatCard grid, entity list panel, made-up `description` + `articleCount` on CityNode, and the "X articles" sub-label on marker tooltips. CityNode now only carries fields straight from `/api/race/cities`.
+- Side panel keeps city name, LSAD category, lat/lon, state abbreviation, and a disclaimer: "Per-city article volume, stance, and entity activity are not currently tracked. The map shows the district boundary and Census-listed places only."
+- Verified in the running app: `/search?q=cognetti` tabs read "All (118) / Articles (100) / Narratives (18)", no Entities tab. `/map` shows "DISTRICT MAP" badge, no LIVE MAP / stance legend / filter chips. Clicking Moosic shows "BOROUGH IN PA-08 / Moosic / 41.3560°, -75.7047° · PA" + disclaimer.
+
+### Key decisions
+
+- **Always-on idle-in-tx of 30min** instead of "commit eagerly between LLM calls in rescore." The eager-commit refactor touches multiple workers + the `campaign_analysis` callsite and rescheme of the tx boundary changes semantics (partial rescore results would commit before the cascading writes). 30min is enough headroom for the worst-case retry storm without changing tx semantics. If a worker gets stuck, the `pool_stats.invalidations` counter at `/api/admin/dbstats` will surface it within the 30min window.
+- **Conditional confirm on rescore-articles** rather than always-required. `only_unscored=True` is the safe resume path used after every backfill cycle by scheduler.py + campaign.py — making operators type "RESCORE ALL ARTICLES" to resume a partial run after a deploy feels wrong. The danger is the full-21k run; that's what's gated.
+- **Per-row error state + a global toast**, not just a toast. Toasts are ephemeral (6s); if the operator looks away, they miss it. Per-row state persists until the row is retried successfully, so a stuck row remains visibly broken.
+- **Strip GeographicOverlay rather than wire it to /api/entity-network**. The CLAUDE.md KG policy explicitly retired typed-edge prose inference; wiring this page to the entity-network endpoint would recreate the v14.x edge-projection problem the project already retreated from twice. The honest reading was "remove the dishonest content; keep the genuine Census map."
+- **Did not fix the pre-existing `test_seed_race_directory_imports_real_fec_federal_snapshot` failure** — out of scope. Confirmed via `git stash` that it fails on `main` without my changes. Worth its own session.
+
+### Open questions / concerns for review
+
+- **The 60s `statement_timeout` is now actually live** for the first time since the cutover. If any historical query in the app took 30-60s, it'll now hit the 60s ceiling and EITHER complete just in time OR start erroring. Watch `/api/admin/dbstats slow_queries` and uvicorn ERROR logs over the next 24h. Briefing v2 takes ~5s, the heaviest expected; backfills go through `start_rescore` and chunked DB writes; should be safe.
+- **The scheduler still hasn't fired its first ingestion since this session's restart** (uvicorn restart timestamp). Next hour will tell whether the new timeouts impact RSS ingestion specifically.
+- **The relevance_reasons regression is already fixed** — the cutover happened AFTER the fix session, so Postgres copied clean data. Verified: 0 corrupted rows in `noctua.source_items.relevance_reasons`. The side-task chip referenced at session start is stale.
+- **Frontend `client.ts deleteFrame` now requires `confirm: 'DELETE FRAME'`** at the type level — there is no UI caller today, but if a future "delete frame" button is wired up, the call site must spell out the confirm string. That's intentional friction; remove only if the call site adds its own dialog.
+
+### Live state at end of session
+
+- Backend: uvicorn PID 55981, running against Postgres `noctua`. Pool 6 active connections, 99%+ cache hit, 0 invalidations, 0 deadlocks.
+- Postgres session defaults verified live: statement_timeout=1min, lock_timeout=10s, idle_in_transaction_session_timeout=30min.
+- Frontend dev server running on port 5174 via Claude Preview (`b7909906...`).
+- Branch `main` is at commit `58701b5`, pushed to GitHub. Four commits ahead of the start-of-session state (d90d62c → 978987d → 0960db3 → e33970f → 58701b5).
+- The two pre-existing Landscape.tsx TS errors and the test_seed_race_directory FEC failure remain on main, unchanged.
