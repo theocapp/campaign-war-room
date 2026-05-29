@@ -1,0 +1,875 @@
+CREATE TABLE campaign_config (
+	id INTEGER NOT NULL, 
+	candidate_name VARCHAR NOT NULL, 
+	party VARCHAR, 
+	race VARCHAR, 
+	district VARCHAR, 
+	office VARCHAR, 
+	location VARCHAR, 
+	race_level VARCHAR, 
+	election_type VARCHAR, 
+	district_number VARCHAR, 
+	neighborhood_keywords TEXT, 
+	sparse_race_mode BOOLEAN, 
+	election_date DATETIME, 
+	campaign_message TEXT, 
+	key_priorities TEXT, 
+	relevance_keywords TEXT, 
+	excluded_keywords TEXT, 
+	geography_keywords TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, historical_backfill_completed BOOLEAN DEFAULT 0, extended_backfill_completed INTEGER DEFAULT 0, trends_keywords TEXT, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE race_directory (
+	id INTEGER NOT NULL, 
+	race_key VARCHAR NOT NULL, 
+	race_name VARCHAR NOT NULL, 
+	race_level VARCHAR NOT NULL, 
+	office_name VARCHAR NOT NULL, 
+	state VARCHAR NOT NULL, 
+	district_label VARCHAR, 
+	district_number VARCHAR, 
+	election_type VARCHAR NOT NULL, 
+	election_date DATETIME, 
+	geography_summary TEXT, 
+	data_source VARCHAR NOT NULL, 
+	is_active BOOLEAN, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX ix_race_directory_race_key ON race_directory (race_key);
+CREATE TABLE source_items (
+	id INTEGER NOT NULL, 
+	title VARCHAR NOT NULL, 
+	source_name VARCHAR, 
+	source_url VARCHAR, 
+	source_type VARCHAR NOT NULL, 
+	source_owner_type VARCHAR, 
+	source_owner_confidence VARCHAR, 
+	raw_text TEXT, 
+	summary TEXT, 
+	published_at DATETIME, 
+	created_at DATETIME, 
+	urgency VARCHAR, 
+	credibility_note TEXT, 
+	reviewed BOOLEAN, 
+	dismissed BOOLEAN, 
+	priority_score INTEGER, 
+	review_note TEXT, 
+	evidence_score INTEGER, 
+	credibility_score INTEGER, 
+	race_relevance_score INTEGER, 
+	race_relevance_label VARCHAR, 
+	relevance_reasons TEXT, 
+	actionability_score INTEGER, 
+	actionability_label VARCHAR, 
+	content_category VARCHAR, 
+	geo_relevance VARCHAR, 
+	candidate_mentioned BOOLEAN, 
+	opponent_mentioned BOOLEAN, 
+	district_mentioned BOOLEAN, 
+	priority_issue_mentioned BOOLEAN, 
+	archived_as_irrelevant BOOLEAN, 
+	story_cluster_id VARCHAR, 
+	duplicate_of_source_id INTEGER, 
+	extraction_quality_score INTEGER, 
+	extraction_quality_label VARCHAR, 
+	extraction_quality_reasons TEXT, ingested_at DATETIME, source_author TEXT, sentiment TEXT, outlet_id INTEGER REFERENCES outlets(id), structured_extraction TEXT, gdelt_themes TEXT, source_credibility TEXT DEFAULT 'medium', gdelt_tone TEXT, publisher_domain TEXT, perspective TEXT, perspective_method TEXT, perspective_confidence TEXT, perspective_reason TEXT, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE issues (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	summary TEXT, 
+	urgency VARCHAR, 
+	mention_count INTEGER, 
+	trend VARCHAR, 
+	last_seen_at DATETIME, 
+	PRIMARY KEY (id), 
+	UNIQUE (name)
+);
+CREATE TABLE opponents (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	office VARCHAR, 
+	party VARCHAR, 
+	notes TEXT, 
+	created_at DATETIME, fec_candidate_id TEXT, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE canvassing_notes (
+	id INTEGER NOT NULL, 
+	voter_name VARCHAR, 
+	address VARCHAR, 
+	precinct VARCHAR NOT NULL, 
+	issue VARCHAR, 
+	sentiment VARCHAR, 
+	notes TEXT, 
+	date DATETIME, 
+	created_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE rss_feeds (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	url VARCHAR NOT NULL, 
+	source_type VARCHAR, 
+	active BOOLEAN, 
+	last_fetched_at DATETIME, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	UNIQUE (url)
+);
+CREATE TABLE source_monitors (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	monitor_type VARCHAR NOT NULL, 
+	"query" TEXT, 
+	url VARCHAR, 
+	source_type VARCHAR, 
+	category VARCHAR, 
+	active BOOLEAN, 
+	required_terms TEXT, 
+	excluded_terms TEXT, 
+	relevance_hint TEXT, 
+	last_checked_at DATETIME, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE source_packs (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	description TEXT, 
+	race_level VARCHAR, 
+	geography VARCHAR, 
+	created_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE manual_source_reminders (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	category VARCHAR, 
+	source_type VARCHAR, 
+	url VARCHAR, 
+	setup_note TEXT, 
+	active BOOLEAN, 
+	last_checked_at DATETIME, 
+	created_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE race_candidates (
+	id INTEGER NOT NULL, 
+	race_id INTEGER NOT NULL, 
+	candidate_name VARCHAR NOT NULL, 
+	party VARCHAR, 
+	is_incumbent BOOLEAN, 
+	role VARCHAR, 
+	campaign_url VARCHAR, 
+	notes TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(race_id) REFERENCES race_directory (id)
+);
+CREATE TABLE issue_mentions (
+	id INTEGER NOT NULL, 
+	issue_id INTEGER NOT NULL, 
+	source_item_id INTEGER NOT NULL, 
+	link_strength INTEGER, 
+	link_reasons TEXT, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(issue_id) REFERENCES issues (id), 
+	FOREIGN KEY(source_item_id) REFERENCES source_items (id)
+);
+CREATE TABLE opponent_activities (
+	id INTEGER NOT NULL, 
+	opponent_id INTEGER NOT NULL, 
+	source_item_id INTEGER, 
+	claim TEXT, 
+	attack TEXT, 
+	promise TEXT, 
+	contradiction_note TEXT, 
+	repeated_theme VARCHAR, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(opponent_id) REFERENCES opponents (id), 
+	FOREIGN KEY(source_item_id) REFERENCES source_items (id)
+);
+CREATE TABLE candidate_message_libraries (
+	id INTEGER NOT NULL, 
+	campaign_config_id INTEGER, 
+	core_message TEXT, 
+	short_bio_frame TEXT, 
+	tone_guidance TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(campaign_config_id) REFERENCES campaign_config (id)
+);
+CREATE TABLE source_pack_items (
+	id INTEGER NOT NULL, 
+	source_pack_id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	category VARCHAR, 
+	source_type VARCHAR, 
+	url VARCHAR, 
+	setup_note TEXT, 
+	active BOOLEAN, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(source_pack_id) REFERENCES source_packs (id)
+);
+CREATE TABLE manual_captures (
+	id INTEGER NOT NULL, 
+	source_item_id INTEGER NOT NULL, 
+	title VARCHAR NOT NULL, 
+	source_name VARCHAR, 
+	source_type VARCHAR, 
+	source_url VARCHAR, 
+	capture_type VARCHAR, 
+	raw_text TEXT NOT NULL, 
+	geography_tags TEXT, 
+	issue_tags TEXT, 
+	candidate_related BOOLEAN, 
+	opponent_related BOOLEAN, 
+	notes TEXT, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(source_item_id) REFERENCES source_items (id)
+);
+CREATE TABLE generated_talking_points (
+	id INTEGER NOT NULL, 
+	issue_id INTEGER, 
+	custom_issue_text VARCHAR, 
+	issue_name VARCHAR NOT NULL, 
+	tone VARCHAR NOT NULL, 
+	short_answer TEXT, 
+	long_answer TEXT, 
+	debate_answer TEXT, 
+	social_post TEXT, 
+	risk_warning TEXT, 
+	evidence_notes TEXT, 
+	source_titles_used TEXT, 
+	source_urls_used TEXT, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(issue_id) REFERENCES issues (id)
+);
+CREATE TABLE candidate_narratives (
+	id INTEGER NOT NULL, 
+	library_id INTEGER NOT NULL, 
+	short_label VARCHAR NOT NULL, 
+	canonical_text TEXT NOT NULL, 
+	narrative_kind VARCHAR NOT NULL, 
+	issue_name VARCHAR, 
+	preferred_phrases TEXT, 
+	avoid_phrases TEXT, 
+	must_mention_points TEXT, 
+	red_lines TEXT, 
+	priority INTEGER, 
+	active BOOLEAN, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(library_id) REFERENCES candidate_message_libraries (id)
+);
+CREATE TABLE narratives (
+	id INTEGER NOT NULL, 
+	canonical_text TEXT NOT NULL, 
+	short_label VARCHAR NOT NULL, 
+	narrative_type VARCHAR NOT NULL, 
+	owner_type VARCHAR, 
+	direction VARCHAR, 
+	status VARCHAR, 
+	first_seen_at DATETIME, 
+	last_seen_at DATETIME, 
+	source_cluster_count INTEGER, 
+	source_count INTEGER, 
+	messenger_diversity_count INTEGER, 
+	geography_count INTEGER, 
+	traction_score INTEGER, 
+	evidence_strength VARCHAR, 
+	response_status VARCHAR, 
+	owner_confidence VARCHAR, 
+	attribution_type VARCHAR, 
+	target_confidence VARCHAR, 
+	candidate_narrative_id INTEGER, 
+	notes TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, target_person VARCHAR, stance VARCHAR DEFAULT 'neutral', source_platform VARCHAR, source_url VARCHAR, source_author_name VARCHAR, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(candidate_narrative_id) REFERENCES candidate_narratives (id)
+);
+CREATE TABLE narrative_mentions (
+	id INTEGER NOT NULL, 
+	narrative_id INTEGER NOT NULL, 
+	source_item_id INTEGER, 
+	opponent_activity_id INTEGER, 
+	source_cluster_id VARCHAR, 
+	matched_text TEXT, 
+	mention_role VARCHAR, 
+	confidence_score INTEGER, 
+	owner_confidence VARCHAR, 
+	attribution_type VARCHAR, 
+	target_confidence VARCHAR, 
+	candidate_narrative_id INTEGER, 
+	created_at DATETIME, source_platform VARCHAR, source_author_name VARCHAR, target_person VARCHAR, stance VARCHAR DEFAULT 'neutral', published_at DATETIME, ingested_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_nm_narrative_source UNIQUE (narrative_id, source_item_id), 
+	FOREIGN KEY(narrative_id) REFERENCES narratives (id), 
+	FOREIGN KEY(source_item_id) REFERENCES source_items (id), 
+	FOREIGN KEY(opponent_activity_id) REFERENCES opponent_activities (id), 
+	FOREIGN KEY(candidate_narrative_id) REFERENCES candidate_narratives (id)
+);
+CREATE UNIQUE INDEX uq_nm_narrative_source
+        ON narrative_mentions(narrative_id, source_item_id)
+        WHERE source_item_id IS NOT NULL
+    ;
+CREATE TABLE kg_entities (
+	id INTEGER NOT NULL, 
+	entity_type VARCHAR NOT NULL, 
+	name TEXT NOT NULL, 
+	canonical_name TEXT, 
+	description TEXT, 
+	extra_data TEXT, 
+	embedding TEXT, 
+	resolution_confidence FLOAT CONSTRAINT ck_kg_entity_res_confidence CHECK (resolution_confidence IS NULL OR (resolution_confidence >= 0.0 AND resolution_confidence <= 1.0)), 
+	merged_into_entity_id INTEGER, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(merged_into_entity_id) REFERENCES kg_entities (id) ON DELETE SET NULL
+);
+CREATE INDEX idx_kg_entities_type ON kg_entities (entity_type);
+CREATE INDEX idx_kg_entities_merged_into ON kg_entities (merged_into_entity_id);
+CREATE INDEX idx_kg_entities_name ON kg_entities (name);
+CREATE INDEX idx_kg_entities_canonical_name ON kg_entities (canonical_name);
+CREATE TABLE kg_sources (
+	id INTEGER NOT NULL, 
+	url TEXT NOT NULL, 
+	title TEXT, 
+	text TEXT, 
+	published_at DATETIME, 
+	ingested_at DATETIME, 
+	content_hash TEXT NOT NULL, 
+	source_item_id INTEGER, 
+	created_at DATETIME, source_type TEXT, source_name TEXT, domain TEXT, credibility_score REAL DEFAULT 0.5, verified_official INTEGER DEFAULT 0, 
+	PRIMARY KEY (id), 
+	UNIQUE (content_hash)
+);
+CREATE INDEX idx_kg_sources_content_hash ON kg_sources (content_hash);
+CREATE INDEX idx_kg_sources_ingested_at ON kg_sources (ingested_at);
+CREATE INDEX idx_kg_sources_url ON kg_sources (url);
+CREATE TABLE kg_issues (
+	id INTEGER NOT NULL, 
+	name TEXT NOT NULL, 
+	display_name TEXT NOT NULL, 
+	description TEXT, 
+	embedding TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	UNIQUE (name)
+);
+CREATE INDEX idx_kg_issues_name ON kg_issues (name);
+CREATE TABLE kg_edges (
+	id INTEGER NOT NULL, 
+	from_type VARCHAR NOT NULL, 
+	from_id INTEGER NOT NULL, 
+	to_type VARCHAR NOT NULL, 
+	to_id INTEGER NOT NULL, 
+	relationship_type VARCHAR NOT NULL, 
+	confidence_score FLOAT CONSTRAINT ck_kg_edge_confidence CHECK (confidence_score IS NULL OR (confidence_score >= 0.0 AND confidence_score <= 1.0)), 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_kg_edge UNIQUE (from_type, from_id, to_type, to_id, relationship_type)
+);
+CREATE INDEX idx_kg_edges_to ON kg_edges (to_type, to_id);
+CREATE INDEX idx_kg_edges_from ON kg_edges (from_type, from_id);
+CREATE INDEX idx_kg_edges_rel ON kg_edges (relationship_type);
+CREATE TABLE kg_entity_aliases (
+	id INTEGER NOT NULL, 
+	entity_id INTEGER NOT NULL, 
+	alias TEXT NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_kg_entity_alias UNIQUE (entity_id, alias), 
+	FOREIGN KEY(entity_id) REFERENCES kg_entities (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_kg_entity_aliases_alias ON kg_entity_aliases (alias);
+CREATE TABLE kg_events (
+	id INTEGER NOT NULL, 
+	name TEXT NOT NULL, 
+	event_type VARCHAR NOT NULL, 
+	event_timestamp DATETIME, 
+	description TEXT, 
+	related_source_id INTEGER, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(related_source_id) REFERENCES kg_sources (id) ON DELETE SET NULL
+);
+CREATE INDEX idx_kg_events_timestamp ON kg_events (event_timestamp);
+CREATE INDEX idx_kg_events_type ON kg_events (event_type);
+CREATE TABLE kg_claims (
+	id INTEGER NOT NULL, 
+	text TEXT NOT NULL, 
+	stance VARCHAR NOT NULL, 
+	confidence FLOAT NOT NULL, 
+	source_id INTEGER NOT NULL, 
+	semantic_id TEXT, 
+	extracted_at DATETIME, 
+	created_at DATETIME, embedding TEXT, normalized_text TEXT, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_kg_claim_confidence CHECK (confidence >= 0.0 AND confidence <= 1.0), 
+	FOREIGN KEY(source_id) REFERENCES kg_sources (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_kg_claims_stance ON kg_claims (stance);
+CREATE INDEX idx_kg_claims_semantic_id ON kg_claims (semantic_id);
+CREATE INDEX idx_kg_claims_confidence ON kg_claims (confidence);
+CREATE TABLE kg_claim_entities (
+	claim_id INTEGER NOT NULL, 
+	entity_id INTEGER NOT NULL, 
+	PRIMARY KEY (claim_id, entity_id), 
+	FOREIGN KEY(claim_id) REFERENCES kg_claims (id) ON DELETE CASCADE, 
+	FOREIGN KEY(entity_id) REFERENCES kg_entities (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_kg_claim_entities_entity ON kg_claim_entities (entity_id);
+CREATE TABLE kg_claim_issues (
+	claim_id INTEGER NOT NULL, 
+	issue_id INTEGER NOT NULL, 
+	PRIMARY KEY (claim_id, issue_id), 
+	FOREIGN KEY(claim_id) REFERENCES kg_claims (id) ON DELETE CASCADE, 
+	FOREIGN KEY(issue_id) REFERENCES kg_issues (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_kg_claim_issues_issue ON kg_claim_issues (issue_id);
+CREATE TABLE kg_narratives (
+	id INTEGER NOT NULL, 
+	label TEXT NOT NULL, 
+	description TEXT, 
+	embedding TEXT, 
+	clustering_method TEXT, 
+	velocity_score FLOAT, 
+	first_seen_at DATETIME, 
+	last_seen_at DATETIME, 
+	trigger_event_id INTEGER, 
+	created_at DATETIME, 
+	updated_at DATETIME, status TEXT NOT NULL DEFAULT 'active', merged_into_id INTEGER, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(trigger_event_id) REFERENCES kg_events (id) ON DELETE SET NULL
+);
+CREATE INDEX idx_kg_narratives_last_seen ON kg_narratives (last_seen_at);
+CREATE INDEX idx_kg_narratives_trigger_event ON kg_narratives (trigger_event_id);
+CREATE INDEX idx_kg_narratives_velocity ON kg_narratives (velocity_score);
+CREATE TABLE kg_narrative_claims (
+	narrative_id INTEGER NOT NULL, 
+	claim_id INTEGER NOT NULL, 
+	added_at DATETIME, 
+	PRIMARY KEY (narrative_id, claim_id), 
+	FOREIGN KEY(narrative_id) REFERENCES kg_narratives (id) ON DELETE CASCADE, 
+	FOREIGN KEY(claim_id) REFERENCES kg_claims (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_kg_narrative_claims_claim ON kg_narrative_claims (claim_id);
+CREATE TABLE kg_alerts (
+	id INTEGER NOT NULL, 
+	narrative_id INTEGER NOT NULL, 
+	alert_type VARCHAR NOT NULL, 
+	severity_score FLOAT NOT NULL, 
+	message TEXT NOT NULL, 
+	created_at DATETIME NOT NULL, 
+	resolved_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(narrative_id) REFERENCES kg_narratives (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_kg_alerts_type ON kg_alerts (alert_type);
+CREATE INDEX idx_kg_alerts_resolved_at ON kg_alerts (resolved_at);
+CREATE INDEX idx_kg_alerts_created_at ON kg_alerts (created_at);
+CREATE INDEX idx_kg_alerts_narrative ON kg_alerts (narrative_id);
+CREATE TABLE narrative_frames (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	description TEXT, 
+	owner_type VARCHAR, 
+	active BOOLEAN, 
+	source VARCHAR, 
+	created_at DATETIME, 
+	updated_at DATETIME, last_known_stage TEXT, last_stage_check_at DATETIME, momentum_signal TEXT, momentum_signal_at DATETIME, momentum_data TEXT, subject_type TEXT, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE narrative_frame_mentions (
+	id INTEGER NOT NULL, 
+	frame_id INTEGER NOT NULL, 
+	source_item_id INTEGER NOT NULL, 
+	confidence INTEGER, 
+	matched_by VARCHAR, 
+	created_at DATETIME, extracted_text TEXT, claim_meta TEXT, variant_id INTEGER REFERENCES frame_variants(id), quote_embedding TEXT, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_nfm_frame_source UNIQUE (frame_id, source_item_id), 
+	FOREIGN KEY(frame_id) REFERENCES narrative_frames (id), 
+	FOREIGN KEY(source_item_id) REFERENCES source_items (id)
+);
+CREATE UNIQUE INDEX uq_opponents_fec_candidate_id ON opponents(fec_candidate_id) WHERE fec_candidate_id IS NOT NULL;
+CREATE VIRTUAL TABLE source_items_fts USING fts5(title, raw_text, content='source_items', content_rowid='id')
+/* source_items_fts(title,raw_text) */;
+CREATE TABLE IF NOT EXISTS 'source_items_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+CREATE TABLE IF NOT EXISTS 'source_items_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS 'source_items_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+CREATE TABLE IF NOT EXISTS 'source_items_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+CREATE TRIGGER source_items_ai AFTER INSERT ON source_items BEGIN   INSERT INTO source_items_fts(rowid, title, raw_text)   VALUES (new.id, COALESCE(new.title,''), COALESCE(new.raw_text,'')); END;
+CREATE TRIGGER source_items_ad AFTER DELETE ON source_items BEGIN   INSERT INTO source_items_fts(source_items_fts, rowid, title, raw_text)   VALUES ('delete', old.id, COALESCE(old.title,''), COALESCE(old.raw_text,'')); END;
+CREATE TRIGGER source_items_au AFTER UPDATE ON source_items BEGIN   INSERT INTO source_items_fts(source_items_fts, rowid, title, raw_text)   VALUES ('delete', old.id, COALESCE(old.title,''), COALESCE(old.raw_text,''));   INSERT INTO source_items_fts(rowid, title, raw_text)   VALUES (new.id, COALESCE(new.title,''), COALESCE(new.raw_text,'')); END;
+CREATE TABLE outlets (
+	id INTEGER NOT NULL, 
+	name VARCHAR NOT NULL, 
+	domain VARCHAR NOT NULL, 
+	outlet_type VARCHAR NOT NULL, 
+	state VARCHAR, 
+	city VARCHAR, 
+	authority_score INTEGER NOT NULL, 
+	active BOOLEAN, 
+	notes TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, rss_url TEXT, districts TEXT, monthly_visitors INTEGER, bias_label TEXT, reliability_score INTEGER, 
+	PRIMARY KEY (id), 
+	UNIQUE (domain)
+);
+CREATE TABLE story_clusters (
+	id VARCHAR NOT NULL, 
+	seed_source_item_id INTEGER NOT NULL, 
+	representative_source_item_id INTEGER NOT NULL, 
+	analysis_anchor_source_item_id INTEGER, 
+	analysis_anchor_updated_at DATETIME, 
+	last_llm_analysis_at DATETIME, 
+	title_representative VARCHAR, 
+	summary_representative TEXT, 
+	simhash_64 VARCHAR, 
+	first_seen_at DATETIME NOT NULL, 
+	last_seen_at DATETIME NOT NULL, 
+	article_count INTEGER, 
+	outlet_count INTEGER, 
+	source_diversity_score FLOAT, 
+	known_entities TEXT, 
+	dormant_since DATETIME, 
+	structured_extraction TEXT, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(seed_source_item_id) REFERENCES source_items (id), 
+	FOREIGN KEY(representative_source_item_id) REFERENCES source_items (id), 
+	FOREIGN KEY(analysis_anchor_source_item_id) REFERENCES source_items (id)
+);
+CREATE TABLE frame_cluster_matches (
+	id INTEGER NOT NULL, 
+	frame_id INTEGER NOT NULL, 
+	story_cluster_id VARCHAR NOT NULL, 
+	confidence INTEGER, 
+	matched_by VARCHAR, 
+	source_type VARCHAR, 
+	representative_snapshot_ts DATETIME, 
+	first_seen_at DATETIME, 
+	last_seen_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_frame_cluster UNIQUE (frame_id, story_cluster_id), 
+	FOREIGN KEY(frame_id) REFERENCES narrative_frames (id), 
+	FOREIGN KEY(story_cluster_id) REFERENCES story_clusters (id)
+);
+CREATE TABLE cluster_opponent_activities (
+	id INTEGER NOT NULL, 
+	opponent_id INTEGER NOT NULL, 
+	story_cluster_id VARCHAR NOT NULL, 
+	claim TEXT, 
+	attack TEXT, 
+	promise TEXT, 
+	fingerprint VARCHAR NOT NULL, 
+	source_type VARCHAR, 
+	first_seen_at DATETIME, 
+	last_seen_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_cluster_opponent_fp UNIQUE (opponent_id, story_cluster_id, fingerprint), 
+	FOREIGN KEY(opponent_id) REFERENCES opponents (id), 
+	FOREIGN KEY(story_cluster_id) REFERENCES story_clusters (id)
+);
+CREATE INDEX ix_story_clusters_last_seen_at ON story_clusters(last_seen_at);
+CREATE INDEX ix_story_clusters_first_seen_at ON story_clusters(first_seen_at);
+CREATE INDEX ix_story_clusters_representative ON story_clusters(representative_source_item_id);
+CREATE INDEX ix_story_clusters_simhash_lastseen ON story_clusters(simhash_64, last_seen_at);
+CREATE INDEX ix_fcm_frame_id ON frame_cluster_matches(frame_id);
+CREATE INDEX ix_fcm_cluster_id ON frame_cluster_matches(story_cluster_id);
+CREATE INDEX ix_fcm_first_seen ON frame_cluster_matches(first_seen_at);
+CREATE INDEX ix_coa_opponent_id ON cluster_opponent_activities(opponent_id);
+CREATE INDEX ix_coa_cluster_id ON cluster_opponent_activities(story_cluster_id);
+CREATE TABLE gdelt_tone_snapshots (
+	id INTEGER NOT NULL, 
+	query_label VARCHAR NOT NULL, 
+	entity_type VARCHAR NOT NULL, 
+	snapshot_date DATETIME NOT NULL, 
+	avg_tone FLOAT, 
+	article_count INTEGER, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_gdelt_tone_daily UNIQUE (query_label, snapshot_date)
+);
+CREATE TABLE google_trend_snapshots (
+	id INTEGER NOT NULL, 
+	term VARCHAR NOT NULL, 
+	snapshot_date DATETIME NOT NULL, 
+	interest INTEGER, 
+	geo VARCHAR NOT NULL, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_google_trend_daily UNIQUE (term, snapshot_date, geo)
+);
+CREATE TABLE candidate_frames (
+	id INTEGER NOT NULL, 
+	source_item_id INTEGER NOT NULL, 
+	suggested_name VARCHAR NOT NULL, 
+	owner_type_hint VARCHAR NOT NULL, 
+	evidence_quote TEXT NOT NULL, 
+	reasoning TEXT, 
+	resolved_to_frame_id INTEGER, 
+	resolved_at DATETIME, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(source_item_id) REFERENCES source_items (id), 
+	FOREIGN KEY(resolved_to_frame_id) REFERENCES narrative_frames (id)
+);
+CREATE TABLE frame_stage_history (
+    id INTEGER PRIMARY KEY,
+    frame_id INTEGER NOT NULL REFERENCES narrative_frames(id),
+    from_stage TEXT,
+    to_stage TEXT NOT NULL,
+    transitioned_at DATETIME,
+    metrics_snapshot TEXT
+);
+CREATE INDEX ix_fsh_frame_transitioned ON frame_stage_history(frame_id, transitioned_at);
+CREATE TABLE frame_variants (
+    id INTEGER PRIMARY KEY,
+    frame_id INTEGER NOT NULL REFERENCES narrative_frames(id),
+    name VARCHAR NOT NULL,
+    centroid_embedding TEXT,
+    first_seen_at DATETIME NOT NULL,
+    last_seen_at DATETIME NOT NULL,
+    mention_count INTEGER DEFAULT 0,
+    generation INTEGER DEFAULT 1,
+    created_at DATETIME,
+    updated_at DATETIME
+);
+CREATE INDEX ix_fv_frame_id ON frame_variants(frame_id);
+CREATE TABLE topic_region_labels (
+	id INTEGER NOT NULL, 
+	member_frame_ids_json TEXT NOT NULL, 
+	label VARCHAR NOT NULL, 
+	edited_by_user BOOLEAN NOT NULL, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE TABLE proposed_cluster_triage (
+	id INTEGER NOT NULL, 
+	cluster_fingerprint VARCHAR NOT NULL, 
+	member_candidate_frame_ids_json TEXT NOT NULL, 
+	verdict VARCHAR NOT NULL, 
+	confidence FLOAT NOT NULL, 
+	reasoning TEXT, 
+	suggested_merge_frame_id INTEGER, 
+	suggested_name VARCHAR, 
+	suggested_description TEXT, 
+	suggested_owner_type VARCHAR, 
+	dismissed_at DATETIME, 
+	applied_at DATETIME, 
+	judged_by_model VARCHAR, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE INDEX ix_proposed_cluster_triage_suggested_merge_frame_id ON proposed_cluster_triage (suggested_merge_frame_id);
+CREATE UNIQUE INDEX ix_proposed_cluster_triage_cluster_fingerprint ON proposed_cluster_triage (cluster_fingerprint);
+CREATE INDEX ix_proposed_cluster_triage_verdict ON proposed_cluster_triage (verdict);
+CREATE INDEX ix_source_items_publisher_domain ON source_items(publisher_domain);
+CREATE TABLE entities (
+	id INTEGER NOT NULL, 
+	canonical_id VARCHAR NOT NULL, 
+	type VARCHAR NOT NULL, 
+	name VARCHAR NOT NULL, 
+	aliases TEXT, 
+	description TEXT, 
+	affiliation VARCHAR, 
+	metadata_json TEXT, 
+	mention_count INTEGER, 
+	source_count INTEGER, 
+	first_seen DATETIME, 
+	last_seen DATETIME, 
+	seeded BOOLEAN, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id)
+);
+CREATE INDEX ix_entities_seeded ON entities (seeded);
+CREATE INDEX ix_entities_type ON entities (type);
+CREATE UNIQUE INDEX ix_entities_canonical_id ON entities (canonical_id);
+CREATE TABLE entity_mentions (
+	id INTEGER NOT NULL, 
+	article_id INTEGER NOT NULL, 
+	entity_id INTEGER NOT NULL, 
+	surface_text VARCHAR, 
+	confidence VARCHAR NOT NULL, 
+	extraction_method VARCHAR NOT NULL, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_entity_mention_article_entity UNIQUE (article_id, entity_id), 
+	FOREIGN KEY(article_id) REFERENCES source_items (id), 
+	FOREIGN KEY(entity_id) REFERENCES entities (id)
+);
+CREATE INDEX ix_entity_mentions_article_id ON entity_mentions (article_id);
+CREATE INDEX ix_entity_mentions_entity_id ON entity_mentions (entity_id);
+CREATE TABLE entity_relations (
+	id INTEGER NOT NULL, 
+	subject_id INTEGER NOT NULL, 
+	predicate VARCHAR NOT NULL, 
+	object_id INTEGER NOT NULL, 
+	weight INTEGER, 
+	first_seen DATETIME, 
+	last_seen DATETIME, 
+	sample_quote TEXT, 
+	source_articles TEXT, 
+	confidence VARCHAR NOT NULL, 
+	created_at DATETIME, 
+	updated_at DATETIME, valid_from DATETIME, valid_to DATETIME, evidence_json TEXT, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_entity_relation_triple UNIQUE (subject_id, predicate, object_id), 
+	FOREIGN KEY(subject_id) REFERENCES entities (id), 
+	FOREIGN KEY(object_id) REFERENCES entities (id)
+);
+CREATE INDEX ix_entity_relations_object_id ON entity_relations (object_id);
+CREATE INDEX ix_entity_relations_subject_id ON entity_relations (subject_id);
+CREATE INDEX ix_entity_relations_predicate ON entity_relations (predicate);
+CREATE TABLE entity_review_decisions (
+	id INTEGER NOT NULL, 
+	item_type VARCHAR NOT NULL, 
+	item_key VARCHAR NOT NULL, 
+	decision VARCHAR NOT NULL, 
+	notes TEXT, 
+	decided_at DATETIME, 
+	decided_by VARCHAR, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_entity_review_decision_item UNIQUE (item_type, item_key)
+);
+CREATE INDEX ix_entity_review_decisions_item_type ON entity_review_decisions (item_type);
+CREATE INDEX ix_entity_review_decisions_item_key ON entity_review_decisions (item_key);
+CREATE TABLE claims (
+	id INTEGER NOT NULL, 
+	subject_id INTEGER NOT NULL, 
+	predicate VARCHAR NOT NULL, 
+	object_id INTEGER NOT NULL, 
+	procedural VARCHAR, 
+	rhetorical VARCHAR, 
+	ideological VARCHAR, 
+	status VARCHAR NOT NULL, 
+	retracted_at DATETIME, 
+	retracted_by VARCHAR, 
+	retracted_reason TEXT, 
+	first_seen DATETIME, 
+	last_seen DATETIME, 
+	sample_quote TEXT, 
+	confidence VARCHAR NOT NULL, 
+	extractor_version VARCHAR, 
+	created_at DATETIME, 
+	updated_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_claim_triple UNIQUE (subject_id, predicate, object_id), 
+	FOREIGN KEY(subject_id) REFERENCES entities (id), 
+	FOREIGN KEY(object_id) REFERENCES entities (id)
+);
+CREATE INDEX ix_claims_object_id ON claims (object_id);
+CREATE INDEX ix_claims_predicate ON claims (predicate);
+CREATE INDEX ix_claims_subject_id ON claims (subject_id);
+CREATE TABLE claim_supports (
+	id INTEGER NOT NULL, 
+	claim_id INTEGER NOT NULL, 
+	article_id INTEGER NOT NULL, 
+	stance VARCHAR NOT NULL, 
+	sample_quote TEXT, 
+	confidence VARCHAR NOT NULL, 
+	extractor_version VARCHAR, 
+	extracted_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_claim_support_pair UNIQUE (claim_id, article_id), 
+	FOREIGN KEY(claim_id) REFERENCES claims (id), 
+	FOREIGN KEY(article_id) REFERENCES source_items (id)
+);
+CREATE INDEX ix_claim_supports_claim_id ON claim_supports (claim_id);
+CREATE INDEX ix_claim_supports_article_id ON claim_supports (article_id);
+CREATE TABLE race_sentiment (
+	id INTEGER NOT NULL, 
+	source VARCHAR NOT NULL, 
+	source_type VARCHAR NOT NULL, 
+	display_name VARCHAR NOT NULL, 
+	candidate_pct FLOAT, 
+	opponent_pct FLOAT, 
+	delta_7d FLOAT, 
+	rating_label VARCHAR, 
+	rating_min_pct FLOAT, 
+	rating_max_pct FLOAT, 
+	favors VARCHAR, 
+	source_url VARCHAR, 
+	as_of DATETIME, 
+	notes TEXT, 
+	updated_at DATETIME, external_id TEXT, external_metadata TEXT, last_synced_at DATETIME, last_sync_error TEXT, 
+	PRIMARY KEY (id), 
+	UNIQUE (source)
+);
+CREATE TABLE race_sentiment_snapshots (
+	id INTEGER NOT NULL, 
+	source VARCHAR NOT NULL, 
+	source_type VARCHAR NOT NULL, 
+	candidate_pct FLOAT, 
+	opponent_pct FLOAT, 
+	rating_label VARCHAR, 
+	rating_min_pct FLOAT, 
+	rating_max_pct FLOAT, 
+	favors VARCHAR, 
+	captured_at DATETIME, 
+	source_as_of DATETIME, 
+	raw_response TEXT, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_race_sentiment_snapshot UNIQUE (source, captured_at)
+);
+CREATE INDEX ix_race_sentiment_snapshots_captured_at ON race_sentiment_snapshots (captured_at);
+CREATE INDEX ix_race_sentiment_snapshots_source ON race_sentiment_snapshots (source);
+CREATE TABLE claim_records (
+	id INTEGER NOT NULL, 
+	article_id INTEGER NOT NULL, 
+	evidence_span TEXT NOT NULL, 
+	evidence_start_char INTEGER, 
+	evidence_end_char INTEGER, 
+	evidence_hash VARCHAR(40) NOT NULL, 
+	label VARCHAR, 
+	confidence VARCHAR NOT NULL, 
+	extractor_version VARCHAR, 
+	created_at DATETIME, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_claim_record_evidence_hash UNIQUE (evidence_hash), 
+	FOREIGN KEY(article_id) REFERENCES source_items (id)
+);
+CREATE INDEX ix_claim_records_evidence_hash ON claim_records (evidence_hash);
+CREATE INDEX ix_claim_records_extractor_version ON claim_records (extractor_version);
+CREATE INDEX ix_claim_records_label ON claim_records (label);
+CREATE INDEX ix_claim_records_article_id ON claim_records (article_id);
+CREATE TABLE claim_record_entities (
+	id INTEGER NOT NULL, 
+	claim_record_id INTEGER NOT NULL, 
+	entity_id INTEGER NOT NULL, 
+	surface_text VARCHAR, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_claim_record_entity_pair UNIQUE (claim_record_id, entity_id), 
+	FOREIGN KEY(claim_record_id) REFERENCES claim_records (id), 
+	FOREIGN KEY(entity_id) REFERENCES entities (id)
+);
+CREATE INDEX ix_claim_record_entities_claim_record_id ON claim_record_entities (claim_record_id);
+CREATE INDEX ix_claim_record_entities_entity_id ON claim_record_entities (entity_id);
+CREATE INDEX ix_claim_records_article ON claim_records(article_id);
+CREATE INDEX ix_claim_records_version ON claim_records(extractor_version);
+CREATE INDEX ix_claim_records_hash ON claim_records(evidence_hash);
+CREATE INDEX ix_cre_claim ON claim_record_entities(claim_record_id);
+CREATE INDEX ix_cre_entity ON claim_record_entities(entity_id);

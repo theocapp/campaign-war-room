@@ -22,3 +22,43 @@ urllib3<2
 # GDELT DOC API + RSS ingestion paths — the import is lazy.
 google-cloud-bigquery>=3.0
 readability-lxml==0.8.4.1
+# Schema migration tooling — added 2026-05-27 for the SQLite → Postgres migration.
+# See POSTGRES_MIGRATION_PLAN.md for the phased plan. Both packages are dialect-agnostic
+# (alembic works against either; psycopg is only used once DATABASE_URL points at Postgres).
+alembic==1.13.3
+psycopg[binary]==3.2.3
+
+# Packages that were installed ad-hoc into the previous venv but never added
+# to requirements.txt. Reconstituted 2026-05-27 during the venv recreation that
+# fixed stale shebangs left over from the project move
+# (/Users/theo/campaign-war-room/ → /Users/theo/noctua/).
+# Versions match the prior install so behavior stays identical.
+
+# Clustering / embeddings (frame_variants, landscape, topic regions)
+hdbscan==0.8.43
+umap-learn==0.5.12
+scikit-learn==1.8.0
+scipy==1.17.1
+
+# Gemini API (embeddings provider)
+google-generativeai==0.8.6
+google-ai-generativelanguage==0.6.15
+google-api-python-client==2.196.0
+google-auth-httplib2==0.4.0
+httplib2==0.31.2
+uritemplate==4.2.0
+
+# HTML parsing / scraping (ingestion, paywall fallbacks)
+beautifulsoup4==4.14.3
+cloudscraper==1.2.71
+
+# Decodes Google News redirect URLs (news.google.com/rss/articles/CBMI...)
+# into their original publisher URLs without making HTTP calls. Used by
+# scripts/resolve_google_news_redirects.py to unblock the ~770 race-relevant
+# articles whose source_url is a GN redirect (raw_text was just the title).
+googlenewsdecoder==0.1.7
+
+# Test runner
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
