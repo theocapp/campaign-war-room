@@ -1,0 +1,2158 @@
+{
+  "generated_at": "2026-05-29T02:56:50.143321Z",
+  "summary": {
+    "pass": 169,
+    "warn": 15,
+    "fail": 6
+  },
+  "findings": [
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "campaign_config.neighborhood_keywords all rows parse",
+      "detail": {
+        "table": "campaign_config",
+        "column": "neighborhood_keywords"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "campaign_config.key_priorities all rows parse",
+      "detail": {
+        "table": "campaign_config",
+        "column": "key_priorities"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "campaign_config.relevance_keywords all rows parse",
+      "detail": {
+        "table": "campaign_config",
+        "column": "relevance_keywords"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "campaign_config.excluded_keywords all rows parse",
+      "detail": {
+        "table": "campaign_config",
+        "column": "excluded_keywords"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "campaign_config.geography_keywords all rows parse",
+      "detail": {
+        "table": "campaign_config",
+        "column": "geography_keywords"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "campaign_config.trends_keywords all rows parse",
+      "detail": {
+        "table": "campaign_config",
+        "column": "trends_keywords"
+      }
+    },
+    {
+      "severity": "FAIL",
+      "category": "json",
+      "description": "source_items.relevance_reasons: 187 rows fail JSON parse",
+      "detail": {
+        "table": "source_items",
+        "column": "relevance_reasons",
+        "rows": [
+          {
+            "id": 17751,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "The article highlights an ongoing debate relevant to law enforcement and communi"
+          },
+          {
+            "id": 17753,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "The article touches on policy themes in Scranton/Wilkes-Barre, PA-08, but doesn'"
+          },
+          {
+            "id": 17782,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "This article presents a positive narrative about Bresnahan's work, which may be "
+          },
+          {
+            "id": 18044,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "While this article does not directly involve Paige Cognetti or Rob Bresnahan, it"
+          },
+          {
+            "id": 18107,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "This article discusses a sales tax increase to fund healthcare services, which i"
+          },
+          {
+            "id": 18161,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "Cognetti's recent campaign activity may indicate growing momentum in the race"
+          },
+          {
+            "id": 18211,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "Cognetti has officially entered the race and delivered a high-impact kickoff mes"
+          },
+          {
+            "id": 18218,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "A fact sheet from Families USA highlights the impacts of deep cuts to Medicaid, "
+          },
+          {
+            "id": 18387,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "This article highlights Rep. Bresnahan's potential involvement in questionable f"
+          },
+          {
+            "id": 18388,
+            "error": "Expecting value: line 1 column 1 (char 0)",
+            "sample": "Biden's connection to Scranton may not directly affect the campaign, but it coul"
+          }
+        ],
+        "total_bad": 187
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "source_items.extraction_quality_reasons all rows parse",
+      "detail": {
+        "table": "source_items",
+        "column": "extraction_quality_reasons"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "source_items.gdelt_themes all rows parse",
+      "detail": {
+        "table": "source_items",
+        "column": "gdelt_themes"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "source_items.structured_extraction all rows parse",
+      "detail": {
+        "table": "source_items",
+        "column": "structured_extraction"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "source_items.gdelt_tone all rows parse",
+      "detail": {
+        "table": "source_items",
+        "column": "gdelt_tone"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "issue_mentions.link_reasons all rows parse",
+      "detail": {
+        "table": "issue_mentions",
+        "column": "link_reasons"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "narrative_frame_mentions.claim_meta all rows parse",
+      "detail": {
+        "table": "narrative_frame_mentions",
+        "column": "claim_meta"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "narrative_frame_mentions.quote_embedding all rows parse",
+      "detail": {
+        "table": "narrative_frame_mentions",
+        "column": "quote_embedding"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "narrative_frames.momentum_data all rows parse",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "momentum_data"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "frame_variants.centroid_embedding all rows parse",
+      "detail": {
+        "table": "frame_variants",
+        "column": "centroid_embedding"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "frame_stage_history.metrics_snapshot all rows parse",
+      "detail": {
+        "table": "frame_stage_history",
+        "column": "metrics_snapshot"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "topic_region_labels.member_frame_ids_json all rows parse",
+      "detail": {
+        "table": "topic_region_labels",
+        "column": "member_frame_ids_json"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "proposed_cluster_triage.member_candidate_frame_ids_json all rows parse",
+      "detail": {
+        "table": "proposed_cluster_triage",
+        "column": "member_candidate_frame_ids_json"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "outlets.districts all rows parse",
+      "detail": {
+        "table": "outlets",
+        "column": "districts"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "entities.aliases all rows parse",
+      "detail": {
+        "table": "entities",
+        "column": "aliases"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "entities.metadata_json all rows parse",
+      "detail": {
+        "table": "entities",
+        "column": "metadata_json"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "entity_relations.source_articles all rows parse",
+      "detail": {
+        "table": "entity_relations",
+        "column": "source_articles"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "entity_relations.evidence_json all rows parse",
+      "detail": {
+        "table": "entity_relations",
+        "column": "evidence_json"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "race_sentiment.external_metadata all rows parse",
+      "detail": {
+        "table": "race_sentiment",
+        "column": "external_metadata"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "race_sentiment_snapshots.raw_response all rows parse",
+      "detail": {
+        "table": "race_sentiment_snapshots",
+        "column": "raw_response"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "story_clusters.known_entities all rows parse",
+      "detail": {
+        "table": "story_clusters",
+        "column": "known_entities"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "json",
+      "description": "story_clusters.structured_extraction all rows parse",
+      "detail": {
+        "table": "story_clusters",
+        "column": "structured_extraction"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "issue_mentions.issue_id \u2192 issues.id all resolve",
+      "detail": {
+        "child_table": "issue_mentions",
+        "child_column": "issue_id",
+        "parent_table": "issues"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "issue_mentions.source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "issue_mentions",
+        "child_column": "source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "opponent_activities.opponent_id \u2192 opponents.id all resolve",
+      "detail": {
+        "child_table": "opponent_activities",
+        "child_column": "opponent_id",
+        "parent_table": "opponents"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "opponent_activities.source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "opponent_activities",
+        "child_column": "source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "race_candidates.race_id \u2192 race_directory.id all resolve",
+      "detail": {
+        "child_table": "race_candidates",
+        "child_column": "race_id",
+        "parent_table": "race_directory"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "source_pack_items.source_pack_id \u2192 source_packs.id all resolve",
+      "detail": {
+        "child_table": "source_pack_items",
+        "child_column": "source_pack_id",
+        "parent_table": "source_packs"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "source_items.outlet_id \u2192 outlets.id all resolve",
+      "detail": {
+        "child_table": "source_items",
+        "child_column": "outlet_id",
+        "parent_table": "outlets"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "frame_variants.frame_id \u2192 narrative_frames.id all resolve",
+      "detail": {
+        "child_table": "frame_variants",
+        "child_column": "frame_id",
+        "parent_table": "narrative_frames"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "frame_stage_history.frame_id \u2192 narrative_frames.id all resolve",
+      "detail": {
+        "child_table": "frame_stage_history",
+        "child_column": "frame_id",
+        "parent_table": "narrative_frames"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "narrative_frame_mentions.frame_id \u2192 narrative_frames.id all resolve",
+      "detail": {
+        "child_table": "narrative_frame_mentions",
+        "child_column": "frame_id",
+        "parent_table": "narrative_frames"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "narrative_frame_mentions.source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "narrative_frame_mentions",
+        "child_column": "source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "narrative_frame_mentions.variant_id \u2192 frame_variants.id all resolve",
+      "detail": {
+        "child_table": "narrative_frame_mentions",
+        "child_column": "variant_id",
+        "parent_table": "frame_variants"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "story_clusters.seed_source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "story_clusters",
+        "child_column": "seed_source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "story_clusters.representative_source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "story_clusters",
+        "child_column": "representative_source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "story_clusters.analysis_anchor_source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "story_clusters",
+        "child_column": "analysis_anchor_source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "frame_cluster_matches.frame_id \u2192 narrative_frames.id all resolve",
+      "detail": {
+        "child_table": "frame_cluster_matches",
+        "child_column": "frame_id",
+        "parent_table": "narrative_frames"
+      }
+    },
+    {
+      "severity": "FAIL",
+      "category": "fk",
+      "description": "frame_cluster_matches.story_cluster_id \u2192 story_clusters.id: 53 orphan(s)",
+      "detail": {
+        "child_table": "frame_cluster_matches",
+        "child_column": "story_cluster_id",
+        "parent_table": "story_clusters",
+        "orphan_count": 53,
+        "sample_child_ids": [
+          2075,
+          1869,
+          1868,
+          782,
+          1101,
+          1102,
+          1786,
+          832,
+          1789,
+          2062
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "cluster_opponent_activities.opponent_id \u2192 opponents.id all resolve",
+      "detail": {
+        "child_table": "cluster_opponent_activities",
+        "child_column": "opponent_id",
+        "parent_table": "opponents"
+      }
+    },
+    {
+      "severity": "FAIL",
+      "category": "fk",
+      "description": "cluster_opponent_activities.story_cluster_id \u2192 story_clusters.id: 72 orphan(s)",
+      "detail": {
+        "child_table": "cluster_opponent_activities",
+        "child_column": "story_cluster_id",
+        "parent_table": "story_clusters",
+        "orphan_count": 72,
+        "sample_child_ids": [
+          302,
+          303,
+          304,
+          354,
+          121,
+          122,
+          123,
+          124,
+          125,
+          126
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "candidate_frames.source_item_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "candidate_frames",
+        "child_column": "source_item_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "candidate_frames.resolved_to_frame_id \u2192 narrative_frames.id all resolve",
+      "detail": {
+        "child_table": "candidate_frames",
+        "child_column": "resolved_to_frame_id",
+        "parent_table": "narrative_frames"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "entity_mentions.article_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "entity_mentions",
+        "child_column": "article_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "FAIL",
+      "category": "fk",
+      "description": "entity_mentions.entity_id \u2192 entities.id: 1 orphan(s)",
+      "detail": {
+        "child_table": "entity_mentions",
+        "child_column": "entity_id",
+        "parent_table": "entities",
+        "orphan_count": 1,
+        "sample_child_ids": [
+          10037
+        ]
+      }
+    },
+    {
+      "severity": "FAIL",
+      "category": "fk",
+      "description": "claims.subject_id \u2192 entities.id: 25 orphan(s)",
+      "detail": {
+        "child_table": "claims",
+        "child_column": "subject_id",
+        "parent_table": "entities",
+        "orphan_count": 25,
+        "sample_child_ids": [
+          200,
+          285,
+          1413,
+          498,
+          562,
+          802,
+          1305,
+          1306,
+          1307,
+          1308
+        ]
+      }
+    },
+    {
+      "severity": "FAIL",
+      "category": "fk",
+      "description": "claims.object_id \u2192 entities.id: 26 orphan(s)",
+      "detail": {
+        "child_table": "claims",
+        "child_column": "object_id",
+        "parent_table": "entities",
+        "orphan_count": 26,
+        "sample_child_ids": [
+          6,
+          112,
+          633,
+          930,
+          10,
+          72,
+          1792,
+          1820,
+          35,
+          367
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "claim_supports.claim_id \u2192 claims.id all resolve",
+      "detail": {
+        "child_table": "claim_supports",
+        "child_column": "claim_id",
+        "parent_table": "claims"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "claim_supports.article_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "claim_supports",
+        "child_column": "article_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "claim_records.article_id \u2192 source_items.id all resolve",
+      "detail": {
+        "child_table": "claim_records",
+        "child_column": "article_id",
+        "parent_table": "source_items"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "claim_record_entities.claim_record_id \u2192 claim_records.id all resolve",
+      "detail": {
+        "child_table": "claim_record_entities",
+        "child_column": "claim_record_id",
+        "parent_table": "claim_records"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "claim_record_entities.entity_id \u2192 entities.id all resolve",
+      "detail": {
+        "child_table": "claim_record_entities",
+        "child_column": "entity_id",
+        "parent_table": "entities"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "entity_relations.subject_id \u2192 entities.id all resolve",
+      "detail": {
+        "child_table": "entity_relations",
+        "child_column": "subject_id",
+        "parent_table": "entities"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "fk",
+      "description": "entity_relations.object_id \u2192 entities.id all resolve",
+      "detail": {
+        "child_table": "entity_relations",
+        "child_column": "object_id",
+        "parent_table": "entities"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "race_directory race_key UNIQUE clean",
+      "detail": {
+        "table": "race_directory",
+        "constraint": "race_key UNIQUE"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "issues issue name UNIQUE clean",
+      "detail": {
+        "table": "issues",
+        "constraint": "issue name UNIQUE"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "rss_feeds feed url UNIQUE clean",
+      "detail": {
+        "table": "rss_feeds",
+        "constraint": "feed url UNIQUE"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "outlets outlet domain UNIQUE clean",
+      "detail": {
+        "table": "outlets",
+        "constraint": "outlet domain UNIQUE"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "entities entity canonical_id UNIQUE clean",
+      "detail": {
+        "table": "entities",
+        "constraint": "entity canonical_id UNIQUE"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "entity_mentions uq_entity_mention_article_entity clean",
+      "detail": {
+        "table": "entity_mentions",
+        "constraint": "uq_entity_mention_article_entity"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "claims uq_claim_triple clean",
+      "detail": {
+        "table": "claims",
+        "constraint": "uq_claim_triple"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "claim_supports uq_claim_support_pair clean",
+      "detail": {
+        "table": "claim_supports",
+        "constraint": "uq_claim_support_pair"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "claim_records uq_claim_record_evidence_hash clean",
+      "detail": {
+        "table": "claim_records",
+        "constraint": "uq_claim_record_evidence_hash"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "claim_record_entities uq_claim_record_entity_pair clean",
+      "detail": {
+        "table": "claim_record_entities",
+        "constraint": "uq_claim_record_entity_pair"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "entity_relations uq_entity_relation_triple clean",
+      "detail": {
+        "table": "entity_relations",
+        "constraint": "uq_entity_relation_triple"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "entity_review_decisions uq_entity_review_decision_item clean",
+      "detail": {
+        "table": "entity_review_decisions",
+        "constraint": "uq_entity_review_decision_item"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "narrative_frame_mentions uq_nfm_frame_source clean",
+      "detail": {
+        "table": "narrative_frame_mentions",
+        "constraint": "uq_nfm_frame_source"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "frame_cluster_matches uq_frame_cluster clean",
+      "detail": {
+        "table": "frame_cluster_matches",
+        "constraint": "uq_frame_cluster"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "cluster_opponent_activities uq_cluster_opponent_fp clean",
+      "detail": {
+        "table": "cluster_opponent_activities",
+        "constraint": "uq_cluster_opponent_fp"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "google_trend_snapshots uq_google_trend_daily clean",
+      "detail": {
+        "table": "google_trend_snapshots",
+        "constraint": "uq_google_trend_daily"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "gdelt_tone_snapshots uq_gdelt_tone_daily clean",
+      "detail": {
+        "table": "gdelt_tone_snapshots",
+        "constraint": "uq_gdelt_tone_daily"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "race_sentiment race_sentiment source UNIQUE clean",
+      "detail": {
+        "table": "race_sentiment",
+        "constraint": "race_sentiment source UNIQUE"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "unique",
+      "description": "race_sentiment_snapshots uq_race_sentiment_snapshot clean",
+      "detail": {
+        "table": "race_sentiment_snapshots",
+        "constraint": "uq_race_sentiment_snapshot"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "campaign_config.sparse_race_mode only 0/1/NULL",
+      "detail": {
+        "table": "campaign_config",
+        "column": "sparse_race_mode"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "campaign_config.historical_backfill_completed only 0/1/NULL",
+      "detail": {
+        "table": "campaign_config",
+        "column": "historical_backfill_completed"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "campaign_config.extended_backfill_completed only 0/1/NULL",
+      "detail": {
+        "table": "campaign_config",
+        "column": "extended_backfill_completed"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "race_directory.is_active only 0/1/NULL",
+      "detail": {
+        "table": "race_directory",
+        "column": "is_active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "race_candidates.is_incumbent only 0/1/NULL",
+      "detail": {
+        "table": "race_candidates",
+        "column": "is_incumbent"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.reviewed only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "reviewed"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.dismissed only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "dismissed"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.candidate_mentioned only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "candidate_mentioned"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.opponent_mentioned only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "opponent_mentioned"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.district_mentioned only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "district_mentioned"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.priority_issue_mentioned only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "priority_issue_mentioned"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_items.archived_as_irrelevant only 0/1/NULL",
+      "detail": {
+        "table": "source_items",
+        "column": "archived_as_irrelevant"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "rss_feeds.active only 0/1/NULL",
+      "detail": {
+        "table": "rss_feeds",
+        "column": "active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_monitors.active only 0/1/NULL",
+      "detail": {
+        "table": "source_monitors",
+        "column": "active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "source_pack_items.active only 0/1/NULL",
+      "detail": {
+        "table": "source_pack_items",
+        "column": "active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "manual_source_reminders.active only 0/1/NULL",
+      "detail": {
+        "table": "manual_source_reminders",
+        "column": "active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "outlets.active only 0/1/NULL",
+      "detail": {
+        "table": "outlets",
+        "column": "active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "narrative_frames.active only 0/1/NULL",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "active"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "entities.seeded only 0/1/NULL",
+      "detail": {
+        "table": "entities",
+        "column": "seeded"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "boolean",
+      "description": "topic_region_labels.edited_by_user only 0/1/NULL",
+      "detail": {
+        "table": "topic_region_labels",
+        "column": "edited_by_user"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "source_items.published_at all parseable",
+      "detail": {
+        "table": "source_items",
+        "column": "published_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "source_items.ingested_at all parseable",
+      "detail": {
+        "table": "source_items",
+        "column": "ingested_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "source_items.created_at all parseable",
+      "detail": {
+        "table": "source_items",
+        "column": "created_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "narrative_frames.created_at all parseable",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "created_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "narrative_frames.updated_at all parseable",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "updated_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "narrative_frame_mentions.created_at all parseable",
+      "detail": {
+        "table": "narrative_frame_mentions",
+        "column": "created_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "story_clusters.first_seen_at all parseable",
+      "detail": {
+        "table": "story_clusters",
+        "column": "first_seen_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "story_clusters.last_seen_at all parseable",
+      "detail": {
+        "table": "story_clusters",
+        "column": "last_seen_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "story_clusters.created_at all parseable",
+      "detail": {
+        "table": "story_clusters",
+        "column": "created_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "story_clusters.updated_at all parseable",
+      "detail": {
+        "table": "story_clusters",
+        "column": "updated_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "frame_cluster_matches.first_seen_at all parseable",
+      "detail": {
+        "table": "frame_cluster_matches",
+        "column": "first_seen_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "frame_cluster_matches.last_seen_at all parseable",
+      "detail": {
+        "table": "frame_cluster_matches",
+        "column": "last_seen_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "entities.first_seen all parseable",
+      "detail": {
+        "table": "entities",
+        "column": "first_seen"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "entities.last_seen all parseable",
+      "detail": {
+        "table": "entities",
+        "column": "last_seen"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "claims.first_seen all parseable",
+      "detail": {
+        "table": "claims",
+        "column": "first_seen"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "claims.last_seen all parseable",
+      "detail": {
+        "table": "claims",
+        "column": "last_seen"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "entity_relations.valid_from all parseable",
+      "detail": {
+        "table": "entity_relations",
+        "column": "valid_from"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "entity_relations.valid_to all parseable",
+      "detail": {
+        "table": "entity_relations",
+        "column": "valid_to"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "datetime",
+      "description": "race_sentiment_snapshots.captured_at all parseable",
+      "detail": {
+        "table": "race_sentiment_snapshots",
+        "column": "captured_at"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "source_items.title no NULLs",
+      "detail": {
+        "table": "source_items",
+        "column": "title"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "source_items.source_type no NULLs",
+      "detail": {
+        "table": "source_items",
+        "column": "source_type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entities.canonical_id no NULLs",
+      "detail": {
+        "table": "entities",
+        "column": "canonical_id"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entities.type no NULLs",
+      "detail": {
+        "table": "entities",
+        "column": "type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entities.name no NULLs",
+      "detail": {
+        "table": "entities",
+        "column": "name"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claims.subject_id no NULLs",
+      "detail": {
+        "table": "claims",
+        "column": "subject_id"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claims.predicate no NULLs",
+      "detail": {
+        "table": "claims",
+        "column": "predicate"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claims.object_id no NULLs",
+      "detail": {
+        "table": "claims",
+        "column": "object_id"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claim_records.article_id no NULLs",
+      "detail": {
+        "table": "claim_records",
+        "column": "article_id"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claim_records.evidence_span no NULLs",
+      "detail": {
+        "table": "claim_records",
+        "column": "evidence_span"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claim_records.evidence_hash no NULLs",
+      "detail": {
+        "table": "claim_records",
+        "column": "evidence_hash"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "claim_records.confidence no NULLs",
+      "detail": {
+        "table": "claim_records",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entity_relations.subject_id no NULLs",
+      "detail": {
+        "table": "entity_relations",
+        "column": "subject_id"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entity_relations.predicate no NULLs",
+      "detail": {
+        "table": "entity_relations",
+        "column": "predicate"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entity_relations.object_id no NULLs",
+      "detail": {
+        "table": "entity_relations",
+        "column": "object_id"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "entity_relations.confidence no NULLs",
+      "detail": {
+        "table": "entity_relations",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "narrative_frames.name no NULLs",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "name"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "not_null",
+      "description": "opponents.name no NULLs",
+      "detail": {
+        "table": "opponents",
+        "column": "name"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.urgency only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "urgency"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "source_items.race_relevance_label: 1 undocumented value(s)",
+      "detail": {
+        "table": "source_items",
+        "column": "race_relevance_label",
+        "allowed": [
+          "irrelevant",
+          "low",
+          "medium",
+          "high",
+          "<NULL>"
+        ],
+        "found": [
+          {
+            "value": "critical",
+            "count": 660
+          }
+        ]
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "source_items.source_owner_type: 5 undocumented value(s)",
+      "detail": {
+        "table": "source_items",
+        "column": "source_owner_type",
+        "allowed": [
+          "unclear",
+          "candidate",
+          "opponent",
+          "media",
+          "<NULL>"
+        ],
+        "found": [
+          {
+            "value": "candidate_statement",
+            "count": 1
+          },
+          {
+            "value": "community/manual",
+            "count": 1261
+          },
+          {
+            "value": "opponent_statement",
+            "count": 100
+          },
+          {
+            "value": "outside_group_statement",
+            "count": 36
+          },
+          {
+            "value": "party_committee_statement",
+            "count": 1392
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.source_owner_confidence only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "source_owner_confidence"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "source_items.actionability_label: 3 undocumented value(s)",
+      "detail": {
+        "table": "source_items",
+        "column": "actionability_label",
+        "allowed": [
+          "ignore",
+          "low",
+          "medium",
+          "high",
+          "<NULL>"
+        ],
+        "found": [
+          {
+            "value": "monitor",
+            "count": 4089
+          },
+          {
+            "value": "respond",
+            "count": 752
+          },
+          {
+            "value": "review",
+            "count": 1053
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.geo_relevance only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "geo_relevance"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "source_items.extraction_quality_label: 1 undocumented value(s)",
+      "detail": {
+        "table": "source_items",
+        "column": "extraction_quality_label",
+        "allowed": [
+          "good",
+          "medium",
+          "poor",
+          "<NULL>"
+        ],
+        "found": [
+          {
+            "value": "mixed",
+            "count": 193
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.source_credibility only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "source_credibility"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.perspective only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "perspective"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.perspective_method only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "perspective_method"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.perspective_confidence only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "perspective_confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "source_items.sentiment only documented values",
+      "detail": {
+        "table": "source_items",
+        "column": "sentiment"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "source_items.content_category: 7 undocumented value(s)",
+      "detail": {
+        "table": "source_items",
+        "column": "content_category",
+        "allowed": [
+          "irrelevant",
+          "candidate_news",
+          "opponent_news",
+          "race_news",
+          "policy",
+          "election_admin",
+          "endorsement",
+          "other",
+          "<NULL>"
+        ],
+        "found": [
+          {
+            "value": "campaign",
+            "count": 1928
+          },
+          {
+            "value": "entertainment",
+            "count": 388
+          },
+          {
+            "value": "food",
+            "count": 288
+          },
+          {
+            "value": "generic_crime",
+            "count": 343
+          },
+          {
+            "value": "priority_issue",
+            "count": 129
+          },
+          {
+            "value": "sports",
+            "count": 850
+          },
+          {
+            "value": "weather",
+            "count": 223
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "issues.urgency only documented values",
+      "detail": {
+        "table": "issues",
+        "column": "urgency"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "issues.trend only documented values",
+      "detail": {
+        "table": "issues",
+        "column": "trend"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "narrative_frames.owner_type only documented values",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "owner_type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "narrative_frames.subject_type only documented values",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "subject_type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "narrative_frames.source only documented values",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "source"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "narrative_frames.momentum_signal: 2 undocumented value(s)",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "momentum_signal",
+        "allowed": [
+          "viral",
+          "missing_coverage",
+          "elite_only",
+          "stable",
+          "<NULL>"
+        ],
+        "found": [
+          {
+            "value": "amplified",
+            "count": 4
+          },
+          {
+            "value": "no_trend_signal",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "narrative_frame_mentions.matched_by: 1 undocumented value(s)",
+      "detail": {
+        "table": "narrative_frame_mentions",
+        "column": "matched_by",
+        "allowed": [
+          "llm",
+          "human"
+        ],
+        "found": [
+          {
+            "value": "promoted_from_candidate",
+            "count": 103
+          }
+        ]
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "frame_cluster_matches.matched_by: 1 undocumented value(s)",
+      "detail": {
+        "table": "frame_cluster_matches",
+        "column": "matched_by",
+        "allowed": [
+          "llm",
+          "human"
+        ],
+        "found": [
+          {
+            "value": "promoted_from_candidate",
+            "count": 148
+          }
+        ]
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "frame_cluster_matches.source_type: 1 undocumented value(s)",
+      "detail": {
+        "table": "frame_cluster_matches",
+        "column": "source_type",
+        "allowed": [
+          "cluster_runtime",
+          "cluster_backfill",
+          "cluster_retrigger"
+        ],
+        "found": [
+          {
+            "value": "promoted_from_candidate",
+            "count": 147
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "cluster_opponent_activities.source_type only documented values",
+      "detail": {
+        "table": "cluster_opponent_activities",
+        "column": "source_type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "entities.type only documented values",
+      "detail": {
+        "table": "entities",
+        "column": "type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "entity_mentions.confidence only documented values",
+      "detail": {
+        "table": "entity_mentions",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "entity_mentions.extraction_method: 3 undocumented value(s)",
+      "detail": {
+        "table": "entity_mentions",
+        "column": "extraction_method",
+        "allowed": [
+          "seed",
+          "alias",
+          "embedding",
+          "llm"
+        ],
+        "found": [
+          {
+            "value": "fresh",
+            "count": 4236
+          },
+          {
+            "value": "seed_alias",
+            "count": 789
+          },
+          {
+            "value": "seed_name",
+            "count": 14716
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "entity_relations.predicate only documented values",
+      "detail": {
+        "table": "entity_relations",
+        "column": "predicate"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "entity_relations.confidence only documented values",
+      "detail": {
+        "table": "entity_relations",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "entity_review_decisions.decision only documented values",
+      "detail": {
+        "table": "entity_review_decisions",
+        "column": "decision"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "claims.status only documented values",
+      "detail": {
+        "table": "claims",
+        "column": "status"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "claims.confidence only documented values",
+      "detail": {
+        "table": "claims",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "claim_supports.stance only documented values",
+      "detail": {
+        "table": "claim_supports",
+        "column": "stance"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "claim_supports.confidence only documented values",
+      "detail": {
+        "table": "claim_supports",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "claim_records.confidence only documented values",
+      "detail": {
+        "table": "claim_records",
+        "column": "confidence"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "claim_records.label only documented values",
+      "detail": {
+        "table": "claim_records",
+        "column": "label"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "race_sentiment.source_type only documented values",
+      "detail": {
+        "table": "race_sentiment",
+        "column": "source_type"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "race_sentiment_snapshots.source_type only documented values",
+      "detail": {
+        "table": "race_sentiment_snapshots",
+        "column": "source_type"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "enum",
+      "description": "source_monitors.monitor_type: 3 undocumented value(s)",
+      "detail": {
+        "table": "source_monitors",
+        "column": "monitor_type",
+        "allowed": [
+          "rss",
+          "search_query",
+          "manual",
+          "webpage"
+        ],
+        "found": [
+          {
+            "value": "fec_ie_district",
+            "count": 1
+          },
+          {
+            "value": "twitter_profile",
+            "count": 3
+          },
+          {
+            "value": "youtube",
+            "count": 2
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "enum",
+      "description": "proposed_cluster_triage.verdict only documented values",
+      "detail": {
+        "table": "proposed_cluster_triage",
+        "column": "verdict"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "utf8",
+      "description": "source_items.title no replacement chars",
+      "detail": {
+        "table": "source_items",
+        "column": "title"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "utf8",
+      "description": "source_items.raw_text: 20 row(s) contain U+FFFD (likely encoding error during ingestion)",
+      "detail": {
+        "table": "source_items",
+        "column": "raw_text",
+        "samples": [
+          {
+            "id": 55,
+            "sample": "%PDF-1.6\r\n%\ufffd\ufffd\ufffd\ufffd\r\n1 0 obj\r\n<</Metadata 2 0 R /OCProperties<</D<</ON[ 14 0 R  15 0"
+          },
+          {
+            "id": 71,
+            "sample": "%PDF-1.4\r%\ufffd\ufffd\ufffd\ufffd\r\n554 0 obj\r<</Linearized 1/L 193638/O 557/E 71027/N 5/T 182442/H "
+          },
+          {
+            "id": 130,
+            "sample": "%PDF-1.5\n%\ufffd\ufffd\ufffd\ufffd\n4 0 obj\n<</Filter/DCTDecode/ColorSpace/DeviceRGB/Type/XObject/Sub"
+          },
+          {
+            "id": 134,
+            "sample": "%PDF-1.7\r%\ufffd\ufffd\ufffd\ufffd\r\n2091 0 obj\r<</Filter/FlateDecode/First 7/Length 165/N 1/Type/Obj"
+          },
+          {
+            "id": 140,
+            "sample": "%PDF-1.7\r%\ufffd\ufffd\ufffd\ufffd\r\n2091 0 obj\r<</Filter/FlateDecode/First 7/Length 165/N 1/Type/Obj"
+          },
+          {
+            "id": 11242,
+            "sample": "Vice President JD Vance is hitting his home state on Monday to continue promotin"
+          },
+          {
+            "id": 11728,
+            "sample": "Vice President\ufffdJD Vance\ufffdon Wednesday will head to the swing political turf of no"
+          },
+          {
+            "id": 13839,
+            "sample": "%PDF-1.7\r%\ufffd\ufffd\ufffd\ufffd\r\n2367 0 obj\r<</Linearized 1/L 597084/O 2369/E 79392/N 20/T 596430"
+          },
+          {
+            "id": 13840,
+            "sample": "%PDF-1.6\r%\ufffd\ufffd\ufffd\ufffd\r\n937 0 obj\r<</Linearized 1/L 4523749/O 939/E 752978/N 21/T 452301"
+          },
+          {
+            "id": 13842,
+            "sample": "%PDF-1.5\r\n%\ufffd\ufffd\ufffd\ufffd\r\n1 0 obj\r\n<</Type/Catalog/Pages 2 0 R/Lang(en-US) /StructTreeRoo"
+          }
+        ]
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "utf8",
+      "description": "source_items.summary: 5 row(s) contain U+FFFD (likely encoding error during ingestion)",
+      "detail": {
+        "table": "source_items",
+        "column": "summary",
+        "samples": [
+          {
+            "id": 55,
+            "sample": "%PDF-1.6 %\ufffd\ufffd\ufffd\ufffd 1 0 obj <</Metadata 2 0 R /OCProperties<</D<</ON[ 14 0 R 15 0 R 1"
+          },
+          {
+            "id": 71,
+            "sample": "%PDF-1.4 %\ufffd\ufffd\ufffd\ufffd 554 0 obj <</Linearized 1/L 193638/O 557/E 71027/N 5/T 182442/H ["
+          },
+          {
+            "id": 130,
+            "sample": "%PDF-1.5\n%\ufffd\ufffd\ufffd\ufffd\n4 0 obj\n<</Filter/DCTDecode/ColorSpace/DeviceRGB/Type/XObject/Sub"
+          },
+          {
+            "id": 134,
+            "sample": "%PDF-1.7 %\ufffd\ufffd\ufffd\ufffd 2091 0 obj <</Filter/FlateDecode/First 7/Length 165/N 1/Type/ObjS"
+          },
+          {
+            "id": 140,
+            "sample": "%PDF-1.7 %\ufffd\ufffd\ufffd\ufffd 2091 0 obj <</Filter/FlateDecode/First 7/Length 165/N 1/Type/ObjS"
+          }
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "oversized",
+      "description": "source_items.raw_text all rows under 1000000 bytes",
+      "detail": {
+        "table": "source_items",
+        "column": "raw_text"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "oversized",
+      "description": "source_items.summary all rows under 1000000 bytes",
+      "detail": {
+        "table": "source_items",
+        "column": "summary"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "oversized",
+      "description": "source_items.structured_extraction all rows under 1000000 bytes",
+      "detail": {
+        "table": "source_items",
+        "column": "structured_extraction"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "oversized",
+      "description": "story_clusters.structured_extraction all rows under 1000000 bytes",
+      "detail": {
+        "table": "story_clusters",
+        "column": "structured_extraction"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "nul_byte",
+      "description": "source_items.title no embedded NULs",
+      "detail": {
+        "table": "source_items",
+        "column": "title"
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "nul_byte",
+      "description": "source_items.raw_text: 47 row(s) contain embedded NUL (migration strips silently)",
+      "detail": {
+        "table": "source_items",
+        "column": "raw_text",
+        "row_count": 47,
+        "sample_ids": [
+          71,
+          130,
+          134,
+          140,
+          13839,
+          13840,
+          13842,
+          13898,
+          13904,
+          13919,
+          13923,
+          13924,
+          13934,
+          13935,
+          14213,
+          14215,
+          14277,
+          14775,
+          14793,
+          15208
+        ]
+      }
+    },
+    {
+      "severity": "WARN",
+      "category": "nul_byte",
+      "description": "source_items.summary: 3 row(s) contain embedded NUL (migration strips silently)",
+      "detail": {
+        "table": "source_items",
+        "column": "summary",
+        "row_count": 3,
+        "sample_ids": [
+          130,
+          134,
+          140
+        ]
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "nul_byte",
+      "description": "story_clusters.title_representative no embedded NULs",
+      "detail": {
+        "table": "story_clusters",
+        "column": "title_representative"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "nul_byte",
+      "description": "story_clusters.summary_representative no embedded NULs",
+      "detail": {
+        "table": "story_clusters",
+        "column": "summary_representative"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "nul_byte",
+      "description": "narrative_frames.description no embedded NULs",
+      "detail": {
+        "table": "narrative_frames",
+        "column": "description"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "nul_byte",
+      "description": "narrative_frame_mentions.extracted_text no embedded NULs",
+      "detail": {
+        "table": "narrative_frame_mentions",
+        "column": "extracted_text"
+      }
+    },
+    {
+      "severity": "PASS",
+      "category": "nul_byte",
+      "description": "claim_records.evidence_span no embedded NULs",
+      "detail": {
+        "table": "claim_records",
+        "column": "evidence_span"
+      }
+    }
+  ]
+}

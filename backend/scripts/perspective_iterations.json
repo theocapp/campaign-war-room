@@ -1,0 +1,612 @@
+{
+  "v1_baseline": {
+    "8452": {
+      "favored": "Paige Cognetti",
+      "reason": "The article criticizes Rob Bresnahan's claims about data center projects, which favors Paige Cognetti by highlighting negative aspects of her opponent."
+    },
+    "3273": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article focuses on scrutiny of Cognetti, which benefits Bresnahan by highlighting a potential weakness in her campaign."
+    },
+    "395": {
+      "favored": "neutral",
+      "reason": "The article discusses the dynamics of the race without favoring either candidate."
+    },
+    "9786": {
+      "favored": "Paige Cognetti",
+      "reason": "The article criticizes Rob Bresnahan for stock trading and questions his ability to relate to constituents, which benefits Paige Cognetti."
+    },
+    "3933": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights Rob Bresnahan's involvement in providing a letter of recommendation, which positively reflects on him."
+    },
+    "3770": {
+      "favored": "neutral",
+      "reason": "The article discusses Joe Biden's presidential campaign and does not mention either candidate directly."
+    },
+    "3639": {
+      "favored": "neutral",
+      "reason": "The article discusses a Senate decision and a Trump-related event without mentioning either candidate directly or relating it to the race."
+    },
+    "3370": {
+      "favored": "neutral",
+      "reason": "The article discusses a legal verdict unrelated to either candidate's campaign or political positions."
+    },
+    "9664": {
+      "favored": "Paige Cognetti",
+      "reason": "The article discusses corruption issues linked to Rob Bresnahan, which reflects negatively on him and favors Paige Cognetti."
+    },
+    "2944": {
+      "favored": "Paige Cognetti",
+      "reason": "The article discusses ethics allegations against Rob Bresnahan, which favors Paige Cognetti by highlighting negative information about her opponent."
+    },
+    "9114": {
+      "favored": "Paige Cognetti",
+      "reason": "The article highlights Paige Cognetti's unopposed primary, which strengthens her position among Democrats."
+    },
+    "9731": {
+      "favored": "Paige Cognetti",
+      "reason": "The article criticizes Rob Bresnahan's vote regarding ICE funding, which would benefit Paige Cognetti's campaign by highlighting Bresnahan's controversial decision."
+    },
+    "13816": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights Rob Bresnahan's community project funding requests, which serves to promote his achievements and initiatives."
+    },
+    "5386": {
+      "favored": "neutral",
+      "reason": "The article is about a community event that does not mention either candidate or relate to the political race."
+    },
+    "2208": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights Rob Bresnahan's engagement in healthcare issues, which positively reflects on his campaign."
+    },
+    "6426": {
+      "favored": "Paige Cognetti",
+      "reason": "The article criticizes the Republican Party, which indirectly favors the Democratic candidate, Paige Cognetti."
+    },
+    "4394": {
+      "favored": "Paige Cognetti",
+      "reason": "The article highlights Trump's faltering public trust in economic leadership, which could benefit Cognetti by framing her as a better alternative."
+    },
+    "465": {
+      "favored": "Paige Cognetti",
+      "reason": "The article focuses on Paige Cognetti launching her campaign, which is positive press for her."
+    },
+    "459": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights Rob Bresnahan's advantage in campaign cash, which favors his campaign."
+    },
+    "2305": {
+      "favored": "Paige Cognetti",
+      "reason": "The article highlights a potential scandal involving Rob Bresnahan, which favors Paige Cognetti by drawing attention to Bresnahan's broken campaign promises."
+    },
+    "3614": {
+      "favored": "Paige Cognetti",
+      "reason": "The article highlights Paige Cognetti's support from nurses and emphasizes her commitment to public service, which favors her campaign."
+    },
+    "3689": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article critiques the Democratic coalition, which indirectly favors the Republican candidate."
+    },
+    "4750": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article focuses on Rob Bresnahan's participation in a legislative conference, highlighting his priorities and efforts, which would be beneficial for his campaign."
+    },
+    "6917": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights Rob Bresnahan's involvement in bipartisan legislation, which positively frames his actions."
+    },
+    "398": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights a positive action taken by Rob Bresnahan, which could be seen as an attempt to improve his public image."
+    },
+    "5787": {
+      "favored": "neutral",
+      "reason": "The article discusses a meeting that is off-topic and does not mention either candidate or their campaigns."
+    },
+    "3530": {
+      "favored": "neutral",
+      "reason": "The article discusses a bridge construction project that is unrelated to either candidate's campaign or political issues."
+    },
+    "9499": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article criticizes Paige Cognetti for neglecting local crime issues while focusing on her congressional campaign, which favors her opponent."
+    },
+    "8568": {
+      "favored": "Paige Cognetti",
+      "reason": "The article highlights Rob Bresnahan's involvement in stock trading while advocating for a ban, which casts him in a negative light, favoring Paige Cognetti."
+    },
+    "9329": {
+      "favored": "Paige Cognetti",
+      "reason": "The article discusses Governor Josh Shapiro's efforts to help Democrats, which indirectly supports Paige Cognetti's campaign against Rob Bresnahan."
+    }
+  },
+  "v2_party_framing": {
+    "8452": {
+      "favored": "Paige Cognetti",
+      "reason": "The article criticizes Rob Bresnahan for overpromising jobs and highlights negative impacts of his proposals, benefiting Cognetti."
+    },
+    "3273": {
+      "favored": "Rob Bresnahan",
+      "reason": "Coverage of a scandal or controversy regarding Cognetti benefits her opponent, Bresnahan."
+    },
+    "395": {
+      "favored": "neutral",
+      "reason": "The article discusses the dynamics of the race without favoring either candidate."
+    },
+    "9786": {
+      "favored": "Paige Cognetti",
+      "reason": "The article provides negative coverage of Rob Bresnahan, highlighting criticism of his stock trading and questioning his connection to constituents."
+    },
+    "3933": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article provides positive coverage of Rob Bresnahan's support for Linda Thomas-Hemak's appointment, highlighting his involvement."
+    },
+    "3770": {
+      "favored": "neutral",
+      "reason": "The article discusses Joe Biden's presidential campaign and does not mention either candidate or their race."
+    },
+    "3639": {
+      "favored": "neutral",
+      "reason": "The article does not mention either candidate or their parties, and it focuses on a national issue unrelated to the race."
+    },
+    "3370": {
+      "favored": "neutral",
+      "reason": "The article does not mention either candidate or their parties, and it focuses on a legal verdict unrelated to the race."
+    },
+    "9664": {
+      "favored": "Paige Cognetti",
+      "reason": "The article discusses corruption issues linked to Rob Bresnahan, which benefits Cognetti by highlighting negative coverage of her opponent."
+    },
+    "2944": {
+      "favored": "Paige Cognetti",
+      "reason": "Coverage of a scandal or controversy regarding Bresnahan benefits Cognetti."
+    },
+    "9114": {
+      "favored": "Paige Cognetti",
+      "reason": "Cognetti's unopposed primary may bolster her standing among Democrats, providing positive coverage."
+    },
+    "9731": {
+      "favored": "Paige Cognetti",
+      "reason": "The article expresses disappointment in Rob Bresnahan's vote, which negatively frames him and benefits Cognetti."
+    },
+    "13816": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article provides positive coverage of Rob Bresnahan's community project funding requests."
+    },
+    "5386": {
+      "favored": "neutral",
+      "reason": "The article is genuinely off-topic, focusing on a local community event with no direct connection to either candidate."
+    },
+    "2208": {
+      "favored": "Rob Bresnahan",
+      "reason": "Positive coverage of Bresnahan's engagement in healthcare issues."
+    },
+    "6426": {
+      "favored": "Paige Cognetti",
+      "reason": "The article critiques the Republican Party, which benefits the Democratic candidate."
+    },
+    "4394": {
+      "favored": "Paige Cognetti",
+      "reason": "Trump-skeptical framing benefits the Democratic candidate."
+    },
+    "465": {
+      "favored": "Paige Cognetti",
+      "reason": "Positive coverage of Paige Cognetti launching her campaign for the U.S. House."
+    },
+    "459": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article highlights Bresnahan's lead in campaign cash, which is negative coverage for Cognetti."
+    },
+    "2305": {
+      "favored": "Paige Cognetti",
+      "reason": "Coverage of a scandal regarding Bresnahan's stock trading suggests a conflict with his campaign promises, benefiting Cognetti."
+    },
+    "3614": {
+      "favored": "Paige Cognetti",
+      "reason": "Positive coverage of Cognetti's support from nurses and her commitment to public service."
+    },
+    "3689": {
+      "favored": "Paige Cognetti",
+      "reason": "The article provides positive framing for the Democratic Party, which benefits Cognetti."
+    },
+    "4750": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article features Rob Bresnahan discussing key legislative priorities, which provides positive coverage for him."
+    },
+    "6917": {
+      "favored": "Rob Bresnahan",
+      "reason": "Positive coverage of Bresnahan's involvement in bipartisan legislation."
+    },
+    "398": {
+      "favored": "Paige Cognetti",
+      "reason": "Bresnahan is mentioned in the context of stopping stock trading, which is part of the ongoing stock-trade attack vector against him."
+    },
+    "5787": {
+      "favored": "neutral",
+      "reason": "The article does not mention either candidate or their parties, making it off-topic."
+    },
+    "3530": {
+      "favored": "neutral",
+      "reason": "The article discusses a bridge replacement project that is off-topic and does not mention either candidate or their campaigns."
+    },
+    "9499": {
+      "favored": "Rob Bresnahan",
+      "reason": "The article criticizes Paige Cognetti for neglecting local crime issues in favor of her congressional campaign, which is negative coverage about her."
+    },
+    "8568": {
+      "favored": "Paige Cognetti",
+      "reason": "The article highlights Rob Bresnahan's involvement in stock trading despite advocating for a ban, which negatively frames him."
+    },
+    "9329": {
+      "favored": "Paige Cognetti",
+      "reason": "The article discusses Governor Josh Shapiro's efforts to help Democrats, which indirectly supports Cognetti's campaign against Bresnahan."
+    }
+  },
+  "v3_layered": {
+    "8452": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative framing (overpromising jobs and ignoring costs) \u2192 favors Cognetti."
+    },
+    "3273": {
+      "favored": "Rob Bresnahan",
+      "reason": "Cognetti + negative framing (scrutiny and need for explanation) \u2192 favors Bresnahan."
+    },
+    "395": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2014 The article mentions both candidates and discusses the race dynamics, making it neutral."
+    },
+    "9786": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative framing (criticism for stock trading) \u2192 favors Cognetti."
+    },
+    "3933": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2 \u2192 Bresnahan is mentioned positively for providing a letter of recommendation, which favors him."
+    },
+    "3770": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no candidate, no party, no attack vector"
+    },
+    "3639": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 3 \u2192 Trump (GOP frame) \u2192 favors Bresnahan."
+    },
+    "3370": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no candidate, no party, no attack vector"
+    },
+    "9664": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative framing (insider trading linked to corruption) \u2192 favors Cognetti."
+    },
+    "2944": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative framing (disputes ethics allegations) \u2192 favors Cognetti."
+    },
+    "9114": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 1 \u2014 mentions Paige Cognetti by name and discusses her unopposed primary, which is positive framing."
+    },
+    "9731": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative framing (disappointment in his vote) \u2192 favors Cognetti."
+    },
+    "13816": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2 \u2192 Bresnahan is the focus of the article, and the framing is neutral regarding his funding requests."
+    },
+    "5386": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no candidate, no party, no attack vector"
+    },
+    "2208": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 GOP action framing (Bresnahan welcoming Dr. Oz) favors Cognetti."
+    },
+    "6426": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 Critical framing of the Republican Party favors the Democratic candidate Cognetti."
+    },
+    "4394": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 3 \u2192 Trump (GOP frame) \u2192 favors Bresnahan."
+    },
+    "465": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Cognetti + positive framing (campaign launch announcement) \u2192 favors Cognetti."
+    },
+    "459": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2 \u2192 Bresnahan + positive framing (leading in campaign cash) \u2192 favors Bresnahan."
+    },
+    "2305": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative framing (accused of trading freely despite campaign promises) \u2192 favors Cognetti."
+    },
+    "3614": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Cognetti + positive framing (support from nurses) \u2192 favors Cognetti."
+    },
+    "3689": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 Dem party self-promotion \u2192 favors Cognetti (Dem candidate)."
+    },
+    "4750": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2 - Bresnahan is the focus of the article, and the framing is positive regarding his legislative priorities."
+    },
+    "6917": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 Positive framing of bipartisan legislation favors Cognetti as the Democratic candidate."
+    },
+    "398": {
+      "favored": "Paige Cognetti",
+      "reason": "Bresnahan + stock-trades is the opposition attack vector \u2192 still favors Cognetti."
+    },
+    "5787": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no candidate, no party, no attack vector"
+    },
+    "3530": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no candidate, no party, no attack vector"
+    },
+    "9499": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2 \u2192 Cognetti + negative framing (criticism of focus on Congress instead of crime) favors Bresnahan."
+    },
+    "8568": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2 \u2192 Bresnahan + negative-attack-vector framing \u2192 favors Cognetti."
+    },
+    "9329": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 Positive framing of the Democratic Party through Shapiro's efforts to help Democrats win key House seats favors Cognetti."
+    }
+  },
+  "v4_step2_dominates": {
+    "8452": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2a - Bresnahan is framed negatively for overpromising jobs and criticized for his claims about data centers, favoring Cognetti."
+    },
+    "3273": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2a - Cognetti is framed negatively due to scrutiny over her handling of a bank issue, favoring Bresnahan."
+    },
+    "395": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2014 The article discusses both candidates and the race dynamics without favoring either."
+    },
+    "9786": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2a \u2192 Bresnahan is framed negatively due to criticism for stock trading and legislation impacting his business interests, favoring Cognetti."
+    },
+    "3933": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2b - Bresnahan is the subject, positive framing (his letter of recommendation for an appointment)."
+    },
+    "3770": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no political content directly related to either candidate or their parties."
+    },
+    "3639": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no political content related to either candidate or their parties."
+    },
+    "3370": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no political content"
+    },
+    "9664": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2a - Bresnahan is framed negatively due to insider trading allegations, favoring Cognetti."
+    },
+    "2944": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2a - Bresnahan is framed negatively due to the ethics allegation, favoring Cognetti."
+    },
+    "9114": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2b \u2014 Cognetti is mentioned positively as unopposed in her primary, which may bolster her standing among Democrats."
+    },
+    "9731": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2a \u2192 Bresnahan is framed negatively due to criticism of his vote, favoring Cognetti."
+    },
+    "13816": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2b - Bresnahan is the subject, positive framing (official funding requests for community projects) favors Bresnahan."
+    },
+    "5386": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no political content, does not mention either candidate or their parties."
+    },
+    "2208": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2b \u2192 Bresnahan is the subject, positive framing (his event)"
+    },
+    "6426": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 Critical framing of Party_B (GOP) favors CANDIDATE_A."
+    },
+    "4394": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 3 \u2192 Trump (GOP frame) is being discussed, and the article is neutral to critical about his economic leadership, which favors Bresnahan."
+    },
+    "465": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2b \u2192 Cognetti is the subject, positive framing (launching her campaign) favors Cognetti."
+    },
+    "459": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2a - Bresnahan is the subject, framed negatively as leading in campaign cash, which favors Cognetti."
+    },
+    "2305": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2a - Bresnahan is framed negatively due to accusations of trading freely despite campaigning on a stock trade ban, favoring Cognetti."
+    },
+    "3614": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 2b \u2192 Cognetti is the subject, positive framing (her support from nurses and commitment to public service) \u2192 favors Cognetti."
+    },
+    "3689": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 3 \u2192 Dem self-promotion in the context of the article."
+    },
+    "4750": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2b - Bresnahan is the subject, positive framing (his participation in the conference and discussion of priorities) favors Bresnahan."
+    },
+    "6917": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2b \u2192 Bresnahan is the subject, positive framing (his involvement in bipartisan legislation) \u2192 favors Bresnahan."
+    },
+    "398": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2c - The article discusses Bresnahan stopping frequent stock trading, which is an established attack vector against him, thus favoring Cognetti."
+    },
+    "5787": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no political content"
+    },
+    "3530": {
+      "favored": "neutral",
+      "reason": "STEP 1 \u2192 no political content"
+    },
+    "9499": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2a - Cognetti is framed negatively for focusing on her congressional campaign instead of addressing crime, favoring Bresnahan."
+    },
+    "8568": {
+      "favored": "Rob Bresnahan",
+      "reason": "STEP 2c - The article discusses Bresnahan's involvement in stock trading, which is an established attack vector against him, thus favoring Cognetti."
+    },
+    "9329": {
+      "favored": "Paige Cognetti",
+      "reason": "STEP 1 \u2014 The article mentions Rob Bresnahan and the race, making it relevant."
+    }
+  },
+  "v5_blunt_attack_vector": {
+    "8452": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is criticized for overpromising jobs from data center projects."
+    },
+    "3273": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Cognetti is facing scrutiny, which favors Bresnahan."
+    },
+    "395": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article discusses the race dynamics without mentioning either candidate negatively or positively."
+    },
+    "9786": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is criticized for stock trading while in office, favoring Cognetti."
+    },
+    "3933": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 3; the article mentions Rob Bresnahan positively for providing a letter of recommendation."
+    },
+    "3770": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article doesn't mention either candidate, their party, the district, or any race topic."
+    },
+    "3639": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article does not mention either candidate, their party, the district, or any race topic."
+    },
+    "3370": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article does not mention either candidate, their party, the district, or any race topic."
+    },
+    "9664": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is criticized for insider trading."
+    },
+    "2944": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is in negative news."
+    },
+    "9114": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 3; the article mentions Paige Cognetti positively regarding her unopposed primary, which may bolster her standing among Democrats."
+    },
+    "9731": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is criticized for his vote regarding ICE, which favors Cognetti."
+    },
+    "13816": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 3; the article mentions Rob Bresnahan positively regarding his community project funding requests."
+    },
+    "5386": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article doesn't mention either candidate, their party, the district, or any race topic."
+    },
+    "2208": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 3; the article mentions Bresnahan positively for his engagement in healthcare issues."
+    },
+    "6426": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 5 \u2014 Article is critical of the Republican Party, which benefits the Democratic candidate."
+    },
+    "4394": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article does not mention either candidate, their party, the district, or any race topic."
+    },
+    "465": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 3; the article mentions Paige Cognetti positively as she officially launched her campaign."
+    },
+    "459": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 3; the article mentions Bresnahan positively regarding his campaign cash advantage."
+    },
+    "2305": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is criticized for trading freely despite campaigning on a stock trade ban, which favors Cognetti."
+    },
+    "3614": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 3; the article mentions Cognetti positively with support from nurses."
+    },
+    "3689": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 5 \u2014 Article advances a partisan framing that is positive about the Democratic Party."
+    },
+    "4750": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 3; the article mentions Rob Bresnahan positively in the context of discussing key legislative priorities."
+    },
+    "6917": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 3; Bresnahan is mentioned positively for his involvement in bipartisan legislation."
+    },
+    "398": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 4; the article discusses Bresnahan's stock trading, which is an attack vector against him, thus favoring Cognetti."
+    },
+    "5787": {
+      "favored": "neutral",
+      "reason": "RULE 1; Article doesn't mention either candidate, their party, the district, or any race topic."
+    },
+    "3530": {
+      "favored": "neutral",
+      "reason": "RULE 1; the article doesn't mention either candidate, their party, the district, or any race topic."
+    },
+    "9499": {
+      "favored": "Rob Bresnahan",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Cognetti is criticized for her focus on Congress instead of crime."
+    },
+    "8568": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 2 \u2014 One candidate is mentioned NEGATIVELY (criticism, scandal, complaint, controversy): Bresnahan is criticized for his involvement in stock trading."
+    },
+    "9329": {
+      "favored": "Paige Cognetti",
+      "reason": "RULE 5 \u2014 The article is positive about the Democratic Party and its efforts to win House seats."
+    }
+  }
+}

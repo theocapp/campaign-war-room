@@ -1,0 +1,60 @@
+{
+  "type_hits": {
+    "person": 790,
+    "event": 156,
+    "location": 320,
+    "organization": 342,
+    "bill": 155
+  },
+  "verb_hits": {
+    "endorses": 79,
+    "member_of": 9,
+    "criticizes": 79,
+    "attended": 4,
+    "attacks": 31,
+    "raised_money": 2,
+    "voted_for": 7,
+    "represents": 13,
+    "voted_against": 3,
+    "co_sponsored": 7,
+    "indicted": 9,
+    "predecessor_of": 7,
+    "polled": 1
+  },
+  "issue_hits": {
+    "ICE": 110,
+    "tax": 94,
+    "healthcare": 90,
+    "ACA": 86,
+    "Affordable Care Act": 79,
+    "school": 43,
+    "health care": 37,
+    "climate": 28,
+    "trade": 24,
+    "Medicaid": 21,
+    "economy": 18,
+    "police": 16,
+    "jobs": 15,
+    "inflation": 14,
+    "education": 13,
+    "border": 7,
+    "energy": 7,
+    "crime": 7,
+    "immigration": 6,
+    "tariff": 3
+  },
+  "missing_seed": [
+    [
+      "Four Republicans Join Democrats To Force House Vote On Obamacare Subsidies",
+      45
+    ],
+    [
+      "Four House Republicans",
+      33
+    ],
+    [
+      "Affordable Care Act",
+      31
+    ]
+  ]
+}
