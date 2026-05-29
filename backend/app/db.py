@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Load .env before reading DATABASE_URL — main.py imports this module before
@@ -33,8 +34,17 @@ log = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "war_room.db"
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DB_PATH}")
-_IS_SQLITE = DATABASE_URL.startswith("sqlite:")
-_IS_POSTGRES = DATABASE_URL.startswith(("postgresql:", "postgres:"))
+# Parse via SQLAlchemy so the `+driver` qualifier ("postgresql+psycopg://")
+# normalizes correctly — a naive `startswith("postgresql:")` check returns
+# False on the real URL and silently disables the dialect-conditional code
+# (connect listener, connect_args). Bug fixed 2026-05-29.
+#
+# `get_backend_name()` returns the literal scheme prefix ("postgres" for the
+# legacy `postgres://` alias, "postgresql" for the canonical form). Accept
+# both — matches the original intent of `startswith(("postgresql:", "postgres:"))`.
+_backend = make_url(DATABASE_URL).get_backend_name()
+_IS_SQLITE = _backend == "sqlite"
+_IS_POSTGRES = _backend in ("postgresql", "postgres")
 
 # Pool sized for the parallel rescore worker pool: 16 LLM keys × 2 sessions
 # (title read + scoring write) + headroom for the API and scheduler.
@@ -80,13 +90,24 @@ if _IS_POSTGRES:
         lock_timeout — fail fast on contention instead of stalling the
             request. Lock pile-ups become visible quickly.
         idle_in_transaction_session_timeout — kill sessions that hold a
-            transaction open and idle for 5 minutes. Prevents the
+            transaction open and idle for 30 minutes. Prevents the
             "long-running transaction blocks autovacuum" footgun.
+
+            Sized to the rescore worker pattern: `_process_item` opens a
+            session (which begins a tx on first SELECT) and then makes
+            LLM calls inside it. Provider rate-limit retries can sleep up
+            to 5 min × 3 attempts = 15 min, plus 2-3 min for the LLM call
+            itself. 30 min leaves headroom while still catching truly
+            leaked transactions.
+
+            Alembic migrations clear this (and statement_timeout) to 0
+            in `backend/alembic/env.py` — a long backfill migration must
+            never be killed by these defaults.
         """
         with dbapi_conn.cursor() as cur:
             cur.execute("SET statement_timeout = '60s'")
             cur.execute("SET lock_timeout = '10s'")
-            cur.execute("SET idle_in_transaction_session_timeout = '5min'")
+            cur.execute("SET idle_in_transaction_session_timeout = '30min'")
 
 
 # ── Pool observability ────────────────────────────────────────────────────
