@@ -18,12 +18,24 @@ dist/
 .env
 .env.local
 .env.backup-*
+.env.bak*
 .env.*-pending
+
+# Secrets — never commit private keys or API credentials
+*.pem
+*.key
+.kalshi_private_key*
+secrets/
 
 # Local backups / temp patches
 *.backup-*
 *.bak
+*.bak-*
+*.db.cutover-*
 *.patch
+
+# Frontend build caches
+.vite/
 
 # OS
 .DS_Store
