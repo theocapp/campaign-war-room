@@ -833,14 +833,26 @@ def auto_setup_monitors(db: Session) -> dict:
         if m.monitor_type == "rss" and m.url
     ]
     new_rss_feeds = [f for f in new_rss_feeds if f]
+    from app.services.rss_ingestion import mark_rss_feed_fetched
     for feed in new_rss_feeds:
         try:
             result = ingestion.ingest_rss(db, feed.url, feed.name)
             sources_ingested += result.added
-            feed.last_fetched_at = datetime.utcnow()
+            feed.last_fetched_at = mark_rss_feed_fetched(db, feed.url)
             db.commit()
         except Exception:
             pass
+
+    # Phase 2: try to auto-discover URLs for any remaining "X campaign website
+    # check" manual placeholders and convert them to webpage monitors.  Failures
+    # are non-fatal — they leave the manual placeholder intact with a stamped
+    # last_checked_at acting as a 24-hour retry cooldown.
+    websites_discovered = {"converted": 0, "failed": 0, "skipped_cooldown": 0}
+    try:
+        from app.services.monitor_url_discovery import convert_website_manuals_to_webpages
+        websites_discovered = convert_website_manuals_to_webpages(db)
+    except Exception as exc:
+        logger.warning("auto_setup_monitors: website URL discovery failed: %s", exc)
 
     return {
         "generated": len(created),
@@ -848,6 +860,8 @@ def auto_setup_monitors(db: Session) -> dict:
         "search_monitors_ingested": len(search_monitors),
         "sources_ingested": sources_ingested,
         "ingested": sources_ingested,
+        "websites_discovered": websites_discovered.get("converted", 0),
+        "websites_failed": websites_discovered.get("failed", 0),
     }
 
 
@@ -870,6 +884,150 @@ _INSTITUTIONAL_BYLINES = {
     "ap staff", "reuters staff", "newsroom", "the editors",
 }
 
+# Matches "Firstname Lastname"-style human names (two or more words, letters
+# plus punctuation only). Rejects handles like "@RepBresnahan", URLs, emails,
+# reddit names ("Fragrant-Pepper7710"), and Bluesky handles.
+_BYLINE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z .'\-]+(?:\s+[A-Za-z][A-Za-z .'\-]+)+$")
+
+# Multi-author bylines like "Hailey Fuchs and Meredith Lee Hill" or
+# "Predrag Milic, Reuters" — split on these and take the first author.
+_AUTHOR_SPLIT_RE = re.compile(r"\s+(?:and|&)\s+|\s*[,;|/]\s*", re.IGNORECASE)
+# Suffixes the byline often carries after the name: " for Spotlight PA",
+# " | NBC News", "(staff writer)", etc. Strip them before the name-shape check.
+_BYLINE_SUFFIX_RE = re.compile(
+    r"\s+(?:for|of|with|at|—|-|–)\s+.+$|"   # " for Spotlight PA", " of Reuters"
+    r"\s*\([^)]*\)$",                        # "(staff writer)"
+    re.IGNORECASE,
+)
+
+
+# "By Author Name" anywhere in the first portion of body text. Anchored on
+# a word-boundary "By"; the strict lookaheads prevent mid-sentence "passed
+# by Congress" matches. Title Case required (uppercase initial + lowercase
+# letter) so all-caps spans don't over-capture. Captures at most 4 name words.
+_BODY_BYLINE_RE = re.compile(
+    r"\b[Bb][Yy]\s+(?=[A-Z][a-z])"
+    r"([A-Z][A-Za-z'\-\.]+(?:\s+[A-Z][A-Za-z'\-\.]+){1,3})"
+    r"(?=\s*(?:[.,\n|;:]|$|\s+(?:for|of|with|at|—|-|–)\s+))"
+)
+# Same idea for ALL-CAPS press-release bylines ("By JONATHAN J. COOPER ...",
+# "By LIAM MAYO ..."). Captures exactly first + (optional middle initial) +
+# last so a trailing all-caps dateline doesn't bleed into the capture. The
+# downstream multi-author split + title-casing handles the rest.
+_BODY_BYLINE_ALL_CAPS_RE = re.compile(
+    r"\b[Bb][Yy]\s+"
+    r"([A-Z][A-Z'\-]+"           # first name (2+ caps)
+    r"(?:\s+[A-Z]\.)?"            # optional middle initial
+    r"\s+[A-Z][A-Z'\-]+)"         # last name (2+ caps)
+)
+# Tokens that strongly suggest "this is a publication, not a person".
+# Filters out two-word values like "Daily Mail", "Hindustan Times", "Red State"
+# (passes name-shape but is an outlet).
+_PUBLICATION_TOKENS = {
+    "times", "news", "post", "daily", "tribune", "herald", "journal",
+    "magazine", "press", "media", "report", "today", "weekly", "monthly",
+    "gazette", "express", "review", "observer", "chronicle", "examiner",
+    "wire", "service", "broadcasting", "network", "channel", "state",
+    "republic", "nation", "dispatch", "sentinel", "ledger", "globe",
+    "standard", "bulletin", "digest", "online", "newsroom",
+}
+# "Betsy McCaughey: The Geniuses in Congress" — opinion-column title format
+# where the author's name leads the title separated by a colon.
+_TITLE_BYLINE_RE = re.compile(
+    r"^\s*([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-\.]+){1,3})\s*:\s+\S"
+)
+
+
+def _byline_from_text(title: str | None, raw_text: str | None) -> str | None:
+    """Extract a byline candidate from article title or body.
+
+    Used as a fallback when SourceItem.source_author is NULL (RSS feed didn't
+    carry a byline and HTML had no <meta name="author">). Returns a candidate
+    string that the caller should still pass through _clean_byline for
+    validation.
+    """
+    if title:
+        m = _TITLE_BYLINE_RE.match(title)
+        if m:
+            return m.group(1)
+    if raw_text:
+        snippet = raw_text[:1500]
+        m = _BODY_BYLINE_RE.search(snippet)
+        if m:
+            return m.group(1).strip()
+        # Fallback for all-caps press-release bylines. Title-case the result
+        # before returning so _clean_byline accepts it.
+        m = _BODY_BYLINE_ALL_CAPS_RE.search(snippet)
+        if m:
+            captured = m.group(1).strip()
+            return _titlecase_name(captured)
+    return None
+
+
+def _titlecase_name(s: str) -> str:
+    """Convert "JONATHAN J. COOPER" → "Jonathan J. Cooper". Leaves Mc/Mac/O'
+    prefixes alone (we can't reliably recover those from all-caps text).
+    """
+    parts = []
+    for word in s.split():
+        if word.endswith("."):
+            parts.append(word.capitalize())
+        elif "'" in word:
+            # "O'BRIEN" → "O'Brien"
+            head, _, tail = word.partition("'")
+            parts.append(head.capitalize() + "'" + tail.capitalize())
+        elif "-" in word:
+            parts.append("-".join(p.capitalize() for p in word.split("-")))
+        else:
+            parts.append(word.capitalize())
+    return " ".join(parts)
+
+
+def _clean_byline(raw: str | None, outlet_names: "set[str] | None" = None) -> str | None:
+    """Normalize a raw source_author value into a journalist name, or return None.
+
+    Handles:
+      • "By Firstname Lastname" → "Firstname Lastname"
+      • "Predrag Milic, The Associated Press" → "Predrag Milic"
+      • "Hailey Fuchs and Meredith Lee Hill" → "Hailey Fuchs" (first author)
+      • "Ann Rejrat for Spotlight PA" → "Ann Rejrat"
+    Rejects institutional bylines, outlet names, handles, emails, URLs.
+    Pure function — safe to unit-test without DB or LLM.
+    """
+    if not raw:
+        return None
+    name = raw.strip().removeprefix("By ").removeprefix("by ").strip(" \"'.,:")
+    if not name:
+        return None
+
+    # Multi-author byline → take just the first author. Each segment is then
+    # validated independently below.
+    first = _AUTHOR_SPLIT_RE.split(name, maxsplit=1)[0].strip(" \"'.,:")
+    if not first:
+        return None
+    name = first
+
+    # Strip trailing descriptors like " for Spotlight PA" / " | NBC News" /
+    # "(staff writer)" so the name-shape regex sees just the person's name.
+    name = _BYLINE_SUFFIX_RE.sub("", name).strip(" \"'.,:")
+    if not name:
+        return None
+
+    if name.lower() in _INSTITUTIONAL_BYLINES:
+        return None
+    if outlet_names and name.lower() in outlet_names:
+        return None
+    if not (2 <= len(name) <= 60 and _BYLINE_NAME_RE.match(name)):
+        return None
+    # Publication-shape detector: any word in the candidate hits the
+    # publication-token blocklist. Catches "Red State", "Hindustan Times",
+    # "Daily Mail", "Patriot Post", etc. that pass the name regex but are
+    # actually outlets we haven't seeded into the Outlet table.
+    tokens = {w.lower().strip(".") for w in name.split()}
+    if tokens & _PUBLICATION_TOKENS:
+        return None
+    return name
+
 
 def auto_discover_journalists(
     db: "Session",
@@ -891,11 +1049,9 @@ def auto_discover_journalists(
 
     Idempotent: skips authors who already have a twitter_profile monitor.
     """
-    import re as _re
     from collections import Counter
     from datetime import datetime as _dt, timedelta as _td
-    from app.models import SourceItem, SourceMonitor
-    from app.services.llm_provider import get_provider, MockLLMProvider
+    from app.models import Outlet, SourceItem, SourceMonitor
     from app.services.twitter_scraper import ensure_twitter_feed
 
     cutoff = _dt.utcnow() - _td(days=days_back)
@@ -904,7 +1060,9 @@ def auto_discover_journalists(
         .filter(
             SourceItem.created_at >= cutoff,
             SourceItem.race_relevance_score >= 50,
-            SourceItem.title.isnot(None),
+            # Need at least one source of byline data: RSS author field or
+            # article body to regex-scan.
+            (SourceItem.source_author.isnot(None) | SourceItem.raw_text.isnot(None)),
         )
         .order_by(SourceItem.created_at.desc())
         .limit(article_cap)
@@ -915,43 +1073,30 @@ def auto_discover_journalists(
         return {"processed": 0, "candidates_found": 0, "monitors_created": 0,
                 "reason": "no recent race-relevant articles"}
 
-    provider = get_provider()
-    if isinstance(provider, MockLLMProvider):
-        return {"processed": 0, "candidates_found": 0, "monitors_created": 0,
-                "reason": "mock LLM provider — auto-discovery requires a real LLM"}
+    # Outlet names are deterministic byline rejects — "Times Leader" is the
+    # publication, not a journalist. Pull them from the Outlet table so the
+    # blocklist updates itself as new outlets are added.
+    outlet_names = {
+        (n or "").lower()
+        for (n,) in db.query(Outlet.name).filter(Outlet.name.isnot(None)).all()
+    }
 
-    logger.info("journalist_discovery: extracting bylines from %d articles", len(articles))
+    logger.info("journalist_discovery: reading bylines from %d articles", len(articles))
 
-    # Pass 1 — extract author from each article.
+    # Pass 1 — read author from SourceItem.source_author (populated during
+    # ingestion from RSS entry.author and HTML <meta name="author">). Fall
+    # back to a regex on title + raw_text when the structured field is empty.
+    # No LLM call needed.
     author_counts: Counter = Counter()
     author_outlets: dict = {}        # author -> set of outlets
-    looks_like_name = _re.compile(r"^[A-Za-z][A-Za-z .'\-]+(?:\s+[A-Za-z][A-Za-z .'\-]+)+$")
 
     for art in articles:
-        snippet = (art.raw_text or art.summary or "")[:1500]
-        prompt = (
-            f"Title: {art.title}\n"
-            f"Source: {art.source_name or 'unknown'}\n\n"
-            f"Article excerpt:\n{snippet}\n\n"
-            "Who is the byline (author) of this article? Return ONLY the author's "
-            "name — no titles, no quotes, no extra text. If the byline is an "
-            "institution (AP, Reuters, Staff, Editorial Board, etc.) or there is "
-            "no byline, return exactly: NONE"
-        )
-        try:
-            raw = (provider.complete(prompt) or "").strip()
-        except Exception as exc:
-            logger.debug("journalist_discovery: LLM byline extraction failed: %s", exc)
+        name = _clean_byline(art.source_author, outlet_names=outlet_names)
+        if not name:
+            candidate = _byline_from_text(art.title, art.raw_text)
+            name = _clean_byline(candidate, outlet_names=outlet_names)
+        if not name:
             continue
-
-        name = raw.removeprefix("By ").removeprefix("by ").strip(' "\'.,:')
-        if not name or name.upper() == "NONE":
-            continue
-        if name.lower() in _INSTITUTIONAL_BYLINES:
-            continue
-        if not (2 <= len(name) <= 60 and looks_like_name.match(name)):
-            continue
-
         author_counts[name] += 1
         author_outlets.setdefault(name, set()).add(art.source_name or "?")
 

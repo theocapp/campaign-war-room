@@ -23,6 +23,95 @@ except ImportError:
     pass
 
 
+# ── Deprecation alerting ─────────────────────────────────────────────────────
+#
+# Provider model names (`CEREBRAS_MODEL`, `GROQ_MODEL`, …) drift over time as
+# upstream platforms rationalize their lineups. When a configured model is
+# retired, the provider returns 404 with body like:
+#   {"message": "Model X does not exist or you do not have access to it.",
+#    "type": "not_found_error"}
+# Without a loud signal, those errors are easy to miss in normal log noise
+# — every per-article LLM call just silently falls back to mock. This module
+# catches that specific 404 pattern, logs an ERROR-level marker line once
+# per (provider, model) per process, and exposes a startup probe that hits
+# every configured provider with one tiny call so dead models are visible
+# immediately at boot.
+_deprecation_log_seen: set[tuple[str, str]] = set()
+# Phrases that strongly indicate "this model has been removed", not "this
+# call failed transiently." Conservative — false positives would cause us
+# to spam the log on every failure.
+_DEPRECATION_PHRASES = (
+    "does not exist",
+    "no longer exists",
+    "is no longer supported",
+    "has been deprecated",
+    "model_not_found",
+    "model is deprecated",
+)
+
+
+def _maybe_log_model_deprecation(provider_name: str, model: str, err: Exception) -> None:
+    """If `err` looks like a model-deprecation 404, log it loudly — once
+    per (provider, model) per process so we don't spam.
+    """
+    msg = str(err).lower()
+    if not any(phrase in msg for phrase in _DEPRECATION_PHRASES):
+        return
+    key = (provider_name, model)
+    if key in _deprecation_log_seen:
+        return
+    _deprecation_log_seen.add(key)
+    log.error(
+        "=========================================================================\n"
+        " LLM MODEL DEPRECATED: %s is configured to use %r but the provider says\n"
+        " the model no longer exists. Configured per-article LLM calls will keep\n"
+        " falling through to the next provider in the chain (or to mock if all\n"
+        " are dead). Check the provider's current model list and update the\n"
+        " corresponding env var (e.g. CEREBRAS_MODEL, GROQ_MODEL).\n"
+        " Underlying error: %s\n"
+        "=========================================================================",
+        provider_name, model, err,
+    )
+
+
+def probe_configured_providers() -> dict[str, str]:
+    """Run one tiny test call against each configured ingestion provider
+    and return {provider_label: status}. Called at app startup so dead
+    models are visible immediately rather than only on the next ingestion
+    cycle.
+
+    Status values: 'ok' | 'deprecated' | 'rate_limited' | 'error: <msg>'.
+    """
+    try:
+        provider = get_ingestion_provider()
+    except Exception as e:
+        return {"ingestion_provider": f"error: {e}"}
+
+    # Unwrap FallbackProvider so we can probe each sub-provider individually.
+    sub_providers: list[BaseLLMProvider] = []
+    if isinstance(provider, FallbackProvider):
+        sub_providers = list(provider._providers)  # noqa: SLF001 — intentional
+    else:
+        sub_providers = [provider]
+
+    results: dict[str, str] = {}
+    for sub in sub_providers:
+        label = f"{type(sub).__name__}({getattr(sub, '_model', '?')})"
+        try:
+            r = sub.complete("Reply with the single word OK.")
+            results[label] = "ok" if r and r.strip() and r.strip() != "[]" else "empty"
+        except ProviderRateLimitError:
+            results[label] = "rate_limited"
+        except Exception as e:
+            # _maybe_log_model_deprecation already fires inside complete()
+            # for this case — here we just record a short status.
+            if any(p in str(e).lower() for p in _DEPRECATION_PHRASES):
+                results[label] = "deprecated"
+            else:
+                results[label] = f"error: {str(e)[:80]}"
+    return results
+
+
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
 class ProviderRateLimitError(Exception):
@@ -183,7 +272,13 @@ def _build_tp_prompt(
 
 
 def _parse_json_response(raw: str) -> dict:
-    """Extract and parse JSON from an LLM response that may have markdown fences."""
+    """Extract and parse JSON from an LLM response that may have markdown fences.
+
+    Returns `{}` on parse failure. Callers should treat empty-dict as "no
+    structured data" and fall back to defaults. The parse failure is logged
+    at WARNING level so silent garbled responses don't disappear — previously
+    every parse failure was indistinguishable from a legitimate empty `{}`.
+    """
     # Strip markdown code fences
     text = re.sub(r"```(?:json)?\s*", "", raw).strip().strip("`").strip()
     # Find the first { ... } block
@@ -197,6 +292,12 @@ def _parse_json_response(raw: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        # B3 visibility: surface the failure (truncated payload) so we can
+        # diagnose prompt/model issues instead of silently returning {}.
+        log.warning(
+            "_parse_json_response: failed to parse LLM JSON output "
+            "(returning {}). raw[:240]=%r", raw[:240],
+        )
         return {}
 
 
@@ -526,7 +627,17 @@ class OpenAIProvider(BaseLLMProvider):
         except ImportError as e:
             raise RuntimeError("openai package not installed. Run: pip install openai") from e
 
-    def _chat(self, user_prompt: str, system_prompt: str = "", json_mode: bool = False) -> str:
+    def _chat(
+        self, user_prompt: str, system_prompt: str = "", json_mode: bool = False,
+        temperature: float | None = None, seed: int | None = None,
+    ) -> str:
+        """Send a chat completion. Optional temperature + seed for determinism.
+
+        temperature=0 with a fixed seed makes gpt-4o near-deterministic on
+        the same input. Used by narrative_triage to eliminate the 35% verdict
+        wobble we saw at default temperature. Other callers that don't pass
+        these args get the legacy behavior (unspecified → server default).
+        """
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -534,6 +645,10 @@ class OpenAIProvider(BaseLLMProvider):
         kwargs: dict = {"model": self._model, "messages": messages}
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if seed is not None:
+            kwargs["seed"] = seed
         try:
             response = self._client.chat.completions.create(**kwargs)
             return response.choices[0].message.content or ""
@@ -666,6 +781,7 @@ class OpenAIProvider(BaseLLMProvider):
         except ProviderRateLimitError:
             raise
         except Exception as e:
+            _maybe_log_model_deprecation(type(self).__name__, getattr(self, "_model", "?"), e)
             log.warning("OpenAI complete failed: %s", e)
             return "[]"
 
@@ -1147,7 +1263,7 @@ def get_provider() -> BaseLLMProvider:
     providers: list[BaseLLMProvider] = []
 
     # ── Cerebras keys (prepended to all chains when present) ──────────────────
-    cerebras_model = os.environ.get("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+    cerebras_model = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
     cerebras_keys: list[str] = []
     primary_cerebras = os.environ.get("CEREBRAS_API_KEY", "").strip()
     if primary_cerebras:
@@ -1400,7 +1516,7 @@ def get_ingestion_provider() -> BaseLLMProvider:
     providers: list[BaseLLMProvider] = []
 
     # Cerebras first — 1M tokens/day free tier
-    cerebras_model = os.environ.get("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507")
+    cerebras_model = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
     cerebras_keys: list[str] = []
     primary_cerebras = os.environ.get("CEREBRAS_API_KEY", "").strip()
     if primary_cerebras:

@@ -1,8 +1,9 @@
 """Fixture-based tests for the Reddit ingester.
 
-All PRAW and network calls are mocked — tests never hit Reddit.
+All HTTP calls are mocked — tests never hit Reddit. The ingester was
+rewritten from PRAW to direct `httpx.get(...)` against reddit.com's
+public `search.json` endpoint, so these tests mock at the HTTP layer.
 """
-from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import CampaignConfig, Opponent, SourceItem
-from app.services.ingestion_reddit import _post_text, _search_terms, ingest_reddit
+from app.services.ingestion_reddit import _search_terms, ingest_reddit
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -30,15 +31,63 @@ def db():
     Base.metadata.drop_all(engine)
 
 
-def _fake_submission(title="Test post", selftext="", permalink="/r/pennsylvania/comments/abc/test/", created_utc=1715000000.0, author="user1"):
-    sub = MagicMock()
-    sub.title = title
-    sub.selftext = selftext
-    sub.permalink = permalink
-    sub.created_utc = created_utc
-    sub.author = MagicMock()
-    sub.author.__str__ = lambda self: author
-    return sub
+def _fake_post(
+    title="Test post",
+    selftext="",
+    permalink="/r/pennsylvania/comments/abc/test/",
+    created_utc=1715000000.0,
+    author="user1",
+) -> dict:
+    """Build a dict matching the shape Reddit's search.json returns inside
+    `data.children[i].data` — what `_ingest_submission` consumes."""
+    return {
+        "title": title,
+        "selftext": selftext,
+        "permalink": permalink,
+        "created_utc": created_utc,
+        "author": author,
+    }
+
+
+def _wrap_children(posts: list[dict]) -> dict:
+    """Wrap a list of post dicts in Reddit's search.json envelope so
+    `_search_subreddit` / `_search_site_wide` see the expected shape."""
+    return {"data": {"children": [{"kind": "t3", "data": p} for p in posts]}}
+
+
+def _http_response(json_payload: dict, status_code: int = 200):
+    """Minimal stand-in for an httpx.Response object."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = json_payload
+    return resp
+
+
+# A V2-shape analyze_with_frames return value. Ingestion consumes the
+# back-compat-derived legacy fields (relevance_score, relevant, framing,
+# sentiment, opponent_attacks, reason), all of which the v2 path computes
+# from the verdict enum + extracted_claims. We pre-bake those here.
+_LEGACY_RELEVANT = {
+    "verdict": "relevant",
+    "summary": "Reddit post about Cognetti.",
+    "campaign_action": "monitor",
+    "sentiment_new": "neutral",
+    "source_credibility": "medium",
+    "extracted_claims": [],
+    # Back-compat derived fields (what ingestion actually reads):
+    "relevance_score": 65,
+    "relevant": True,
+    "one_sentence": "Reddit post about Cognetti.",
+    "framing": "background",
+    "reason": "",
+    "sentiment": "neutral",
+    "opponent_attacks": [],
+    "frame_matches": [],
+    "candidate_new_frames": [],
+    "_used_fallback": False,
+    "needs_attention": False,
+    "needs_attention_reason": None,
+}
 
 
 # ── unit helpers ───────────────────────────────────────────────────────────────
@@ -49,104 +98,81 @@ def test_search_terms_includes_candidate_and_opponent(db):
     assert "Rob Bresnahan" in terms
 
 
-def test_post_text_combines_title_and_selftext():
-    sub = _fake_submission(title="Cognetti on healthcare", selftext="She said healthcare is a priority.")
-    assert "Cognetti on healthcare" in _post_text(sub)
-    assert "healthcare is a priority" in _post_text(sub)
+# ── ingest_reddit integration (HTTP mocked) ───────────────────────────────────
 
 
-def test_post_text_title_only_for_link_posts():
-    sub = _fake_submission(title="Bresnahan endorsement", selftext="")
-    assert _post_text(sub) == "Bresnahan endorsement"
-
-
-def test_post_text_ignores_deleted_selftext():
-    sub = _fake_submission(title="A title", selftext="[deleted]")
-    assert _post_text(sub) == "A title"
-
-
-# ── ingest_reddit integration ──────────────────────────────────────────────────
-
-def _make_reddit_mock(submissions):
-    """Build a mock praw.Reddit whose subreddit().search() yields submissions.
-
-    Returns a fresh list on every call so the iterator is never exhausted across
-    multiple ingest_reddit() calls in the same test.
-    """
-    reddit = MagicMock()
-    subreddit = MagicMock()
-    subreddit.search.side_effect = lambda *a, **kw: list(submissions)
-    reddit.subreddit.return_value = subreddit
-    return reddit
-
-
-@patch("app.services.ingestion_reddit._get_reddit")
+@patch("app.services.ingestion_reddit._probe_reddit_access", return_value=True)
+@patch("app.services.ingestion_reddit._fetch_comments", return_value=[])
+@patch("app.services.ingestion_reddit.httpx.get")
 @patch("app.services.campaign_analysis.analyze_with_frames")
-def test_ingest_reddit_adds_posts(mock_analyze, mock_get_reddit, db):
-    mock_analyze.return_value = {
-        "relevant": True, "relevance_score": 70, "one_sentence": "Reddit post about Cognetti.",
-        "framing": "neutral", "sentiment": "neutral", "needs_attention": False,
-        "reason": "", "opponent_attacks": [], "frame_matches": [],
-    }
-    sub = _fake_submission(
+def test_ingest_reddit_adds_posts(mock_analyze, mock_httpx_get, mock_fetch_comments,
+                                  mock_probe, db):
+    mock_analyze.return_value = _LEGACY_RELEVANT
+    post = _fake_post(
         title="Cognetti town hall in Scranton",
         selftext="She spoke about healthcare and infrastructure at today's event.",
         permalink="/r/pennsylvania/comments/xyz/cognetti_town_hall/",
     )
-    mock_get_reddit.return_value = _make_reddit_mock([sub])
+    # Every Reddit endpoint we hit returns this single post.
+    mock_httpx_get.return_value = _http_response(_wrap_children([post]))
 
     import os
-    with patch.dict(os.environ, {"REDDIT_SUBREDDITS": "pennsylvania"}):
+    with patch.dict(os.environ, {"REDDIT_SUBREDDITS": "pennsylvania",
+                                  "REDDIT_COMMENTS_ENABLED": "false"}):
         result = ingest_reddit(db)
 
-    # Two search terms (Cognetti + Bresnahan) × 1 subreddit = 2 search calls
-    # but same submission returned each time — second call deduped
-    assert result.subreddits_searched == 1
     assert result.added >= 1
     item = db.query(SourceItem).filter(SourceItem.source_type == "social").first()
     assert item is not None
-    assert item.source_name == "Reddit r/pennsylvania"
     assert "Cognetti" in item.title
+    assert item.source_url == "https://www.reddit.com/r/pennsylvania/comments/xyz/cognetti_town_hall/"
 
 
-@patch("app.services.ingestion_reddit._get_reddit")
+@patch("app.services.ingestion_reddit._probe_reddit_access", return_value=True)
+@patch("app.services.ingestion_reddit._fetch_comments", return_value=[])
+@patch("app.services.ingestion_reddit.httpx.get")
 @patch("app.services.campaign_analysis.analyze_with_frames")
-def test_ingest_reddit_deduplicates(mock_analyze, mock_get_reddit, db):
-    mock_analyze.return_value = {
-        "relevant": False, "relevance_score": 20, "one_sentence": ".",
-        "framing": "neutral", "sentiment": "neutral", "needs_attention": False,
-        "reason": "", "opponent_attacks": [], "frame_matches": [],
-    }
-    sub = _fake_submission(permalink="/r/pennsylvania/comments/dup/post/")
-    mock_get_reddit.return_value = _make_reddit_mock([sub])
+def test_ingest_reddit_deduplicates(mock_analyze, mock_httpx_get, mock_fetch_comments,
+                                    mock_probe, db):
+    mock_analyze.return_value = {**_LEGACY_RELEVANT, "relevant": False,
+                                  "verdict": "loosely_related", "relevance_score": 25}
+    post = _fake_post(permalink="/r/pennsylvania/comments/dup/post/")
+    mock_httpx_get.return_value = _http_response(_wrap_children([post]))
 
     import os
-    with patch.dict(os.environ, {"REDDIT_SUBREDDITS": "pennsylvania"}):
+    with patch.dict(os.environ, {"REDDIT_SUBREDDITS": "pennsylvania",
+                                  "REDDIT_COMMENTS_ENABLED": "false"}):
         ingest_reddit(db)
         result = ingest_reddit(db)
 
+    # Same post URL across two runs → second run skips it (source_url uniqueness)
     assert db.query(SourceItem).filter(SourceItem.source_type == "social").count() == 1
     assert result.skipped >= 1
 
 
-@patch("app.services.ingestion_reddit._get_reddit", return_value=None)
-def test_ingest_reddit_no_credentials_returns_zeros(mock_get_reddit, db):
+@patch("app.services.ingestion_reddit._probe_reddit_access", return_value=False)
+def test_ingest_reddit_blocked_access_returns_zeros(mock_probe, db):
+    """When `_probe_reddit_access` reports Reddit is blocking unauthed
+    requests (post-2024 anti-bot stance), the ingester short-circuits
+    before doing any work. Replaces the v1 `_get_reddit returns None`
+    case — credentials no longer pass through a PRAW factory."""
     result = ingest_reddit(db)
     assert result.subreddits_searched == 0
     assert result.added == 0
 
 
-def test_ingest_reddit_no_campaign_config_returns_zeros():
-    """Without a campaign config there are no search terms — ingester short-circuits."""
+@patch("app.services.ingestion_reddit._probe_reddit_access", return_value=True)
+def test_ingest_reddit_no_campaign_config_returns_zeros(mock_probe):
+    """Without a campaign config there are no search terms — ingester
+    short-circuits even when Reddit access is fine."""
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
-
-    with patch("app.services.ingestion_reddit._get_reddit") as mock_get_reddit:
-        mock_get_reddit.return_value = MagicMock()
+    try:
         result = ingest_reddit(session)
-
-    assert result.added == 0
-    session.close()
-    Base.metadata.drop_all(engine)
+        assert result.added == 0
+        assert result.subreddits_searched == 0
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)

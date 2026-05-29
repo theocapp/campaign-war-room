@@ -27,6 +27,45 @@ class IngestAllResult:
     total_errors: int
 
 
+def mark_rss_feed_fetched(db, feed_url: str, ts: datetime | None = None) -> datetime:
+    """Stamp `RssFeed.last_fetched_at` AND any matching `SourceMonitor.last_checked_at`.
+
+    The two tables hold overlapping data:
+      - `rss_feeds` is the canonical, actively-updated table (111 rows,
+        108/111 fresh as of 2026-05-24).
+      - `source_monitors` (monitor_type='rss') was a partial unification
+        migration that never completed (51 rows that exactly duplicate
+        51 of the 111 rss_feeds URLs — all 51 had NULL last_checked_at
+        because the scheduler only wrote to the rss_feeds column).
+
+    Until we decide which table is canonical and migrate fully, this
+    helper keeps both columns in sync so the UI's monitor-health view
+    isn't lying. Caller is responsible for db.commit() / rollback.
+
+    Returns the timestamp that was written (so the caller can reuse it
+    for logging or other writes).
+    """
+    from app.models import RssFeed, SourceMonitor
+    if ts is None:
+        ts = datetime.utcnow()
+    # Update the canonical table by URL (caller may have already done this
+    # via the ORM object — repeating is idempotent).
+    db.query(RssFeed).filter(RssFeed.url == feed_url).update(
+        {RssFeed.last_fetched_at: ts}, synchronize_session=False,
+    )
+    # Mirror to source_monitors.last_checked_at for any rss-type monitor
+    # with the same URL. Update returns the row count, which we log if
+    # something is matched (mostly just so a missing-monitor case isn't
+    # silent).
+    n = db.query(SourceMonitor).filter(
+        SourceMonitor.url == feed_url,
+        SourceMonitor.monitor_type == "rss",
+    ).update({SourceMonitor.last_checked_at: ts}, synchronize_session=False)
+    if n > 0:
+        log.debug("rss_ingestion: mirrored last_fetched_at to %d source_monitor row(s) for %s", n, feed_url)
+    return ts
+
+
 def ingest_all_active_rss_feeds() -> IngestAllResult:
     """
     Ingest every active RSS feed.  Creates and closes its own DB session so
@@ -45,7 +84,9 @@ def ingest_all_active_rss_feeds() -> IngestAllResult:
         for feed in feeds:
             try:
                 r = ingestion.ingest_rss(db, feed.url, feed.name)
-                feed.last_fetched_at = datetime.utcnow()
+                # Stamp BOTH the canonical rss_feeds column AND any mirrored
+                # source_monitors row (see mark_rss_feed_fetched docstring).
+                feed.last_fetched_at = mark_rss_feed_fetched(db, feed.url)
                 total_added += r.added
                 total_skipped += r.skipped
                 log.info(

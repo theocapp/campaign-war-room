@@ -1,7 +1,8 @@
-import { Plus, Radio, RefreshCw, Trash2, X } from 'lucide-react'
+import { Plus, Radio, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '@/api/client'
 import type { MonitorType, SourceMonitor } from '@/api/types'
+import { formatArticleDate } from '@/lib/formatDate'
 
 const TYPE_LABELS: Record<MonitorType, string> = {
   rss: 'RSS FEED',
@@ -14,11 +15,21 @@ const TYPE_COLORS: Record<MonitorType, string> = {
   rss: '#4f8ef7',
   search_query: '#f0a020',
   webpage: '#2db866',
-  manual: '#7d8fa8',
+  manual: 'var(--text-2)',
 }
 
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+function formatAgo(iso: string): string {
+  // Compact relative-time formatter for "last checked" labels. Returns
+  // "2m", "4h", "3d" etc. Empty string for invalid / missing input.
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  if (isNaN(ms) || ms < 0) return ''
+  const m = Math.floor(ms / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
 }
 
 function AddMonitorModal({ onClose, onCreated }: { onClose: () => void; onCreated: (m: SourceMonitor) => void }) {
@@ -54,10 +65,10 @@ function AddMonitorModal({ onClose, onCreated }: { onClose: () => void; onCreate
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-box" onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 18, fontWeight: 700, color: '#dce7f3', letterSpacing: '0.06em' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-1)', letterSpacing: '0.06em' }}>
             ADD MONITOR
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7d8fa8' }}><X size={18} /></button>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-2)' }}><X size={18} /></button>
         </div>
         <form onSubmit={submit}>
           <div style={{ marginBottom: 14 }}>
@@ -73,14 +84,13 @@ function AddMonitorModal({ onClose, onCreated }: { onClose: () => void; onCreate
                   type="button"
                   onClick={() => setType(t)}
                   style={{
-                    fontFamily: "'IBM Plex Mono', monospace",
                     fontSize: 9,
                     letterSpacing: '0.1em',
                     padding: '5px 10px',
                     borderRadius: 2,
                     cursor: 'pointer',
-                    border: `1px solid ${type === t ? TYPE_COLORS[t] : '#1c2a3f'}44`,
-                    color: type === t ? TYPE_COLORS[t] : '#7d8fa8',
+                    border: `1px solid ${type === t ? TYPE_COLORS[t] : 'var(--bg-3)'}44`,
+                    color: type === t ? TYPE_COLORS[t] : 'var(--text-2)',
                     background: type === t ? `${TYPE_COLORS[t]}11` : 'transparent',
                     outline: type === t ? `1px solid ${TYPE_COLORS[t]}` : 'none',
                     outlineOffset: 1,
@@ -120,6 +130,12 @@ export function Monitors() {
   const [showAdd, setShowAdd] = useState(false)
   const [toggling, setToggling] = useState<Set<number>>(new Set())
   const [crawling, setCrawling] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverResult, setDiscoverResult] = useState<{
+    converted: number
+    failed: number
+    skipped_cooldown: number
+  } | null>(null)
 
   useEffect(() => {
     api.monitors().then(setMonitors).catch(() => {}).finally(() => setLoading(false))
@@ -152,6 +168,26 @@ export function Monitors() {
     }
   }
 
+  async function discoverUrls() {
+    setDiscovering(true)
+    setDiscoverResult(null)
+    try {
+      const res = await api.discoverMonitorUrls()
+      setDiscoverResult({
+        converted: res.converted,
+        failed: res.failed,
+        skipped_cooldown: res.skipped_cooldown,
+      })
+      // If anything converted, refetch the monitors list so the UI reflects
+      // the manual → webpage type flip + new URLs without a page reload.
+      if (res.converted > 0) {
+        api.monitors().then(setMonitors).catch(() => {})
+      }
+    } catch { /* silently fail */ } finally {
+      setDiscovering(false)
+    }
+  }
+
   const byType: Record<string, SourceMonitor[]> = {}
   for (const m of monitors) {
     if (!byType[m.monitor_type]) byType[m.monitor_type] = []
@@ -163,8 +199,8 @@ export function Monitors() {
       {/* Action bar */}
       <div style={{
         padding: '14px 28px',
-        borderBottom: '1px solid #1c2a3f',
-        background: 'rgba(6,8,16,0.8)',
+        borderBottom: '1px solid var(--bg-3)',
+        background: 'var(--bg-1)',
         backdropFilter: 'blur(8px)',
         position: 'sticky',
         top: 0,
@@ -174,6 +210,15 @@ export function Monitors() {
         justifyContent: 'flex-end',
       }}>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={discoverUrls}
+            disabled={discovering}
+            className="btn btn-ghost"
+            title="Try to find URLs for any manual website monitors and convert them to webpage monitors."
+          >
+            <Search size={13} style={discovering ? { animation: 'spin 1s linear infinite' } : {}} />
+            {discovering ? 'Discovering...' : 'Discover URLs'}
+          </button>
           <button
             onClick={triggerCrawl}
             disabled={crawling}
@@ -189,15 +234,50 @@ export function Monitors() {
         </div>
       </div>
 
+      {/* Discover URLs result banner — auto-dismisses on close click */}
+      {discoverResult && (
+        <div style={{
+          margin: '12px 28px 0',
+          padding: '10px 14px',
+          background: 'var(--bg-2)',
+          border: `1px solid ${discoverResult.converted > 0 ? '#2db866' : 'var(--bg-3)'}`,
+          borderLeft: `3px solid ${discoverResult.converted > 0 ? '#2db866' : '#f0a020'}`,
+          borderRadius: 3,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          fontSize: 12,
+          color: 'var(--text-1)',
+        }}>
+          <div>
+            <span style={{ fontWeight: 600 }}>Discovery complete.</span>{' '}
+            Converted <strong style={{ color: '#2db866' }}>{discoverResult.converted}</strong> ·{' '}
+            Failed <strong style={{ color: '#f05050' }}>{discoverResult.failed}</strong> ·{' '}
+            Skipped (cooldown) <strong style={{ color: 'var(--text-3)' }}>{discoverResult.skipped_cooldown}</strong>
+            {discoverResult.failed > 0 && discoverResult.converted === 0 && (
+              <span style={{ marginLeft: 8, color: 'var(--text-3)' }}>
+                — check that a search provider (e.g. Tavily) is configured.
+              </span>
+            )}
+          </div>
+          <button
+            onClick={() => setDiscoverResult(null)}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 2 }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       <div style={{ padding: '20px 28px', maxWidth: 960, margin: '0 auto' }}>
         {loading && Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="skeleton" style={{ height: 60, borderRadius: 4, marginBottom: 8 }} />
         ))}
 
         {!loading && monitors.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '80px 0', color: '#3d4f63' }}>
+          <div style={{ textAlign: 'center', padding: '80px 0', color: 'var(--text-3)' }}>
             <Radio size={48} style={{ margin: '0 auto 16px', opacity: 0.3 }} />
-            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 20, marginBottom: 8 }}>No monitors configured</div>
+            <div style={{ fontSize: 20, marginBottom: 8 }}>No monitors configured</div>
             <div style={{ fontSize: 13 }}>Add RSS feeds, search queries, or webpage monitors.</div>
           </div>
         )}
@@ -210,12 +290,11 @@ export function Monitors() {
               return (
                 <div key={type} style={{
                   padding: '12px 14px',
-                  background: '#090c17',
-                  border: '1px solid #1c2a3f',
+                  background: 'var(--bg-2)',
+                  border: '1px solid var(--bg-3)',
                   borderRadius: 3,
                 }}>
                   <div style={{
-                    fontFamily: "'IBM Plex Mono', monospace",
                     fontSize: 22,
                     fontWeight: 600,
                     color: TYPE_COLORS[type],
@@ -233,8 +312,8 @@ export function Monitors() {
         {/* Table */}
         {monitors.length > 0 && (
           <div style={{
-            background: '#090c17',
-            border: '1px solid #1c2a3f',
+            background: 'var(--bg-2)',
+            border: '1px solid var(--bg-3)',
             borderRadius: 4,
             overflow: 'hidden',
           }}>
@@ -244,7 +323,7 @@ export function Monitors() {
               gridTemplateColumns: '1fr 120px 180px 100px 80px',
               gap: 0,
               padding: '10px 16px',
-              borderBottom: '1px solid #1c2a3f',
+              borderBottom: '1px solid var(--bg-3)',
             }}>
               {['NAME', 'TYPE', 'URL / QUERY', 'ADDED', 'STATUS'].map(h => (
                 <div key={h} className="section-label">{h}</div>
@@ -259,23 +338,31 @@ export function Monitors() {
                   gridTemplateColumns: '1fr 120px 180px 100px 80px',
                   gap: 0,
                   padding: '12px 16px',
-                  borderBottom: idx < monitors.length - 1 ? '1px solid #1c2a3f' : 'none',
+                  borderBottom: idx < monitors.length - 1 ? '1px solid var(--bg-3)' : 'none',
                   alignItems: 'center',
                   opacity: monitor.active ? 1 : 0.5,
                   transition: 'opacity 0.15s',
                 }}
               >
-                {/* Name */}
+                {/* Name + last-checked subtitle */}
                 <div>
-                  <div style={{ fontSize: 13, color: '#dce7f3', fontWeight: 500, marginBottom: 2 }}>
+                  <div style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500, marginBottom: 2 }}>
                     {monitor.name}
+                  </div>
+                  <div style={{
+                    fontSize: 9,
+                    color: monitor.last_checked_at ? '#5d6f88' : 'var(--text-3)',
+                    letterSpacing: '0.04em',
+                  }}>
+                    {monitor.last_checked_at
+                      ? `last checked ${formatAgo(monitor.last_checked_at)}`
+                      : 'never checked'}
                   </div>
                 </div>
 
                 {/* Type */}
                 <div>
                   <span style={{
-                    fontFamily: "'IBM Plex Mono', monospace",
                     fontSize: 9,
                     color: TYPE_COLORS[monitor.monitor_type],
                     background: `${TYPE_COLORS[monitor.monitor_type]}11`,
@@ -290,9 +377,8 @@ export function Monitors() {
 
                 {/* URL/Query */}
                 <div style={{
-                  fontFamily: "'IBM Plex Mono', monospace",
                   fontSize: 10,
-                  color: '#3d4f63',
+                  color: 'var(--text-3)',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -302,11 +388,10 @@ export function Monitors() {
 
                 {/* Added */}
                 <div style={{
-                  fontFamily: "'IBM Plex Mono', monospace",
                   fontSize: 10,
-                  color: '#3d4f63',
+                  color: 'var(--text-3)',
                 }}>
-                  {formatDate(monitor.created_at)}
+                  {formatArticleDate(monitor.created_at)}
                 </div>
 
                 {/* Status + actions */}
@@ -319,7 +404,7 @@ export function Monitors() {
                       width: 32,
                       height: 18,
                       borderRadius: 9,
-                      background: monitor.active ? '#1d6ae5' : '#1c2a3f',
+                      background: monitor.active ? '#1d6ae5' : 'var(--bg-3)',
                       border: 'none',
                       cursor: 'pointer',
                       position: 'relative',
@@ -344,7 +429,7 @@ export function Monitors() {
                       background: 'none',
                       border: 'none',
                       cursor: 'pointer',
-                      color: '#3d4f63',
+                      color: 'var(--text-3)',
                       padding: 3,
                       borderRadius: 3,
                     }}

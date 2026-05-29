@@ -1,5 +1,6 @@
 """Generate campaign-specific source monitor suggestions."""
 import json
+import os
 import re
 from typing import Any
 from urllib.parse import urlencode
@@ -279,6 +280,54 @@ def _youtube_channel_rss(channel_id: str) -> str:
     return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
 
+# RSSHub turns Instagram and Facebook pages into RSS we can ingest via the
+# normal pipeline. Override with a self-hosted RSSHub URL via RSSHUB_BASE.
+_RSSHUB_BASE = os.environ.get("RSSHUB_BASE", "https://rsshub.app").rstrip("/")
+
+# Gate for emitting Instagram/Facebook social monitors. Disabled by default
+# (2026-05-28) because the public rsshub.app mirror returns 403 for anonymous
+# IG/FB access ("Due to cost considerations… restrict access to rsshub.app"),
+# and self-hosted RSSHub still needs IGUSERID/IGPASSWORD/FBCOOKIE env vars
+# for those specific routes. Saved handles persist in the DB so when a real
+# fetcher (self-hosted RSSHub with auth, or an Apify adapter) is wired in,
+# flip this on and the existing handles auto-generate monitors. See
+# INTER_SESSION.md for the full path.
+_SOCIAL_HANDLE_MONITORS_ENABLED = (
+    os.environ.get("SOCIAL_HANDLE_MONITORS_ENABLED", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+
+def _instagram_rss(handle: str) -> str:
+    """RSS feed for an Instagram username via RSSHub."""
+    return f"{_RSSHUB_BASE}/instagram/user/{handle}"
+
+
+def _facebook_rss(page: str) -> str:
+    """RSS feed for a Facebook page via RSSHub."""
+    return f"{_RSSHUB_BASE}/facebook/page/{page}"
+
+
+def _parse_handle_list(raw: Any) -> list[str]:
+    """Decode the stored social-handles column into a clean list.
+
+    Accepts either a JSON-encoded string from the TEXT column or, defensively,
+    a list that's already been deserialized somewhere upstream. Trims
+    whitespace, drops empties.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(h).strip() for h in raw if h and str(h).strip()]
+    try:
+        v = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(v, list):
+        return []
+    return [str(h).strip() for h in v if h and str(h).strip()]
+
+
 def _reddit_search_url(query: str, subreddit: str | None = None) -> str:
     """Build a Reddit RSS search URL. subreddit=None searches all of Reddit."""
     params = urlencode({"q": query, "sort": "new", "limit": "25", "t": "all"})
@@ -357,9 +406,37 @@ def _q(*parts: str | None) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _humanize_person_name(name: str) -> str:
+    """Flip 'LAST, FIRST' (FEC SHOUTY format) → 'First Last' for search use.
+
+    The FEC catalog stores candidates as 'COGNETTI, PAIGE'. Quoting that
+    verbatim in a Google News search ("COGNETTI, PAIGE") almost never
+    matches real coverage — news copy writes 'Paige Cognetti' or just
+    'Cognetti'. This helper normalizes only person-name strings (those
+    containing a comma); other inputs ("PA-08", "Healthcare") are
+    returned untouched.
+    """
+    if not name or "," not in name:
+        return (name or "").strip()
+    last, _, rest = name.partition(",")
+    first = rest.strip()
+    last = last.strip()
+    if not first or not last:
+        return name.strip()
+    # Title-case both parts (handles "MCKINNEY" → "Mckinney"; acceptable).
+    return f"{first.title()} {last.title()}"
+
+
 def _quoted(value: str | None) -> str | None:
     value = (value or "").strip()
     return f'"{value}"' if value else None
+
+
+def _quoted_person(value: str | None) -> str | None:
+    """Like _quoted, but humanizes FEC-format names first."""
+    if not value:
+        return None
+    return _quoted(_humanize_person_name(value))
 
 
 def _add(monitors: list[dict[str, Any]], seen: set[tuple], **data: Any) -> None:
@@ -516,6 +593,37 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
              ),
              category="national",
              relevance_hint="Detects when national outlets pick up the candidate's story — the key signal for narrative escaping local coverage.")
+    # ── Reddit via Google News (workaround for Reddit's unauthed-API lockout) ──
+    # Reddit's direct .rss / .json endpoints return 403 to unauthed clients
+    # as of mid-2024. Google News indexes Reddit submissions and surfaces
+    # them via RSS — coverage lags by hours and misses comments, but it's
+    # zero-config and reliable. These feeds go through the same RSS
+    # ingestion pipeline as everything else.
+    if cand_last_for_search:
+        _add(monitors, seen,
+             name=f"Reddit via Google News: {cand_last_for_search}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:reddit.com "{cand_last_for_search}"'),
+             category="candidate",
+             relevance_hint="Reddit submissions about the candidate, surfaced via Google News (works around Reddit's unauthed-API block).")
+    for opp_last in opp_last_names:
+        if opp_last:
+            _add(monitors, seen,
+                 name=f"Reddit via Google News: {opp_last}",
+                 monitor_type="rss",
+                 url=_gnews_url(f'site:reddit.com "{opp_last}"'),
+                 category="opponent",
+                 source_type="opponent_statement",
+                 relevance_hint="Reddit submissions about the opponent via Google News.")
+    if district:
+        _add(monitors, seen,
+             name=f"Reddit via Google News: {district}",
+             monitor_type="rss",
+             url=_gnews_url(f'site:reddit.com "{district}"'),
+             category="race",
+             relevance_hint="Reddit submissions tagging the district code via Google News.")
+    # ── End Reddit via Google News ────────────────────────────────────────────
+
     # ── End Google News RSS feeds ─────────────────────────────────────────────
 
     # ── Reddit RSS feeds (no credentials required) ────────────────────────────
@@ -573,60 +681,99 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
     # ── End Reddit RSS feeds ──────────────────────────────────────────────────
 
     if candidate:
+        # Use _quoted_person for the candidate name so the query string
+        # contains "Paige Cognetti" rather than "COGNETTI, PAIGE".
         _add(monitors, seen, name=f"{candidate} news search", monitor_type="search_query",
-             query=_q(_quoted(candidate), _quoted(district) or _quoted(location)),
+             query=_q(_quoted_person(candidate), _quoted(district) or _quoted(location)),
              category="candidate", required_terms=[candidate], excluded_terms=excluded,
              relevance_hint="Find reporting that mentions the candidate in the campaign geography.")
         if small_race:
             if office:
                 _add(monitors, seen, name=f"{candidate} {office} search", monitor_type="search_query",
-                     query=_q(_quoted(candidate), _quoted(office)), category="candidate",
+                     query=_q(_quoted_person(candidate), _quoted(office)), category="candidate",
                      required_terms=[candidate, office], excluded_terms=excluded,
                      relevance_hint="Small-race query anchored to candidate and office.")
             for geo in geo_terms[:5]:
                 _add(monitors, seen, name=f"{candidate} in {geo}", monitor_type="search_query",
-                     query=_q(_quoted(candidate), _quoted(geo)), category="candidate",
+                     query=_q(_quoted_person(candidate), _quoted(geo)), category="candidate",
                      required_terms=[candidate, geo], excluded_terms=excluded,
                      relevance_hint="Small-race query anchored to candidate and local geography.")
+        # Campaign website is auto-discovered by monitor_url_discovery.py and
+        # converted to a webpage monitor on setup. The manual placeholder is
+        # kept as a fallback when search/LLM can't find a URL — see
+        # convert_manuals_to_webpages.
         _add(monitors, seen, name=f"{candidate} campaign website check", monitor_type="manual",
              category="candidate", required_terms=[candidate],
              relevance_hint="Add the candidate campaign website URL if known; do not assume an official URL.")
-        _add(monitors, seen, name=f"{candidate} social check", monitor_type="manual",
-             category="candidate", required_terms=[candidate],
-             relevance_hint="Add official social profile URLs after verifying them manually.")
-        if small_race:
-            for label in ["Facebook", "Instagram", "X/Twitter", "Threads", "LinkedIn"]:
-                _add(monitors, seen, name=f"{candidate} {label} check", monitor_type="manual",
-                     category="candidate", required_terms=[candidate],
-                     relevance_hint=f"Verify the candidate's official {label} page before adding a URL.")
+        # Social profiles: Twitter and Bluesky are auto-discovered via
+        # twitter_profile / bluesky_profile monitor types (see
+        # ensure_twitter_feed and ensure_bluesky_monitor). Instagram and
+        # Facebook would flow through RSSHub when the candidate has
+        # confirmed handles in the DB — but emission is gated by
+        # _SOCIAL_HANDLE_MONITORS_ENABLED (off by default; see comment at
+        # the top of the file for why and how to re-enable).
+        # Politicians often run multiple parallel accounts (campaign /
+        # office / personal) — when enabled, emit one feed per handle.
+        if _SOCIAL_HANDLE_MONITORS_ENABLED:
+            for ig_handle in _parse_handle_list(getattr(campaign_profile, "instagram_handles", None)):
+                _add(monitors, seen,
+                     name=f"Instagram: @{ig_handle}",
+                     monitor_type="rss",
+                     url=_instagram_rss(ig_handle),
+                     category="social", source_type="social",
+                     relevance_hint="Candidate Instagram posts via RSSHub.")
+            for fb_page in _parse_handle_list(getattr(campaign_profile, "facebook_pages", None)):
+                _add(monitors, seen,
+                     name=f"Facebook: {fb_page}",
+                     monitor_type="rss",
+                     url=_facebook_rss(fb_page),
+                     category="social", source_type="social",
+                     relevance_hint="Candidate Facebook posts via RSSHub.")
 
     for opponent in opponents:
         if not opponent.name:
             continue
         _add(monitors, seen, name=f"{opponent.name} news search", monitor_type="search_query",
-             query=_q(_quoted(opponent.name), _quoted(district) or _quoted(location)),
+             query=_q(_quoted_person(opponent.name), _quoted(district) or _quoted(location)),
              category="opponent", source_type="opponent_statement",
              required_terms=[opponent.name], excluded_terms=excluded,
              relevance_hint="Track opponent mentions tied to the race geography.")
         if small_race and office:
             _add(monitors, seen, name=f"{opponent.name} {office} search", monitor_type="search_query",
-                 query=_q(_quoted(opponent.name), _quoted(office)), category="opponent",
+                 query=_q(_quoted_person(opponent.name), _quoted(office)), category="opponent",
                  source_type="opponent_statement", required_terms=[opponent.name, office],
                  excluded_terms=excluded, relevance_hint="Small-race query anchored to opponent and office.")
             for geo in geo_terms[:5]:
                 _add(monitors, seen, name=f"{opponent.name} in {geo}", monitor_type="search_query",
-                     query=_q(_quoted(opponent.name), _quoted(geo)), category="opponent",
+                     query=_q(_quoted_person(opponent.name), _quoted(geo)), category="opponent",
                      source_type="opponent_statement", required_terms=[opponent.name, geo],
                      excluded_terms=excluded, relevance_hint="Small-race query anchored to opponent and local geography.")
+        # See note above for candidate: website is auto-discovered;
+        # Twitter/Bluesky go through their dedicated profile monitor types.
+        # Instagram/Facebook would flow through RSSHub when handles are set,
+        # but emission is gated by _SOCIAL_HANDLE_MONITORS_ENABLED (off by
+        # default — see file-level comment for why and how to re-enable).
+        if _SOCIAL_HANDLE_MONITORS_ENABLED:
+            for ig_handle in _parse_handle_list(getattr(opponent, "instagram_handles", None)):
+                _add(monitors, seen,
+                     name=f"Instagram: @{ig_handle}",
+                     monitor_type="rss",
+                     url=_instagram_rss(ig_handle),
+                     category="opponent", source_type="opponent_statement",
+                     relevance_hint="Opponent Instagram posts via RSSHub.")
+            for fb_page in _parse_handle_list(getattr(opponent, "facebook_pages", None)):
+                _add(monitors, seen,
+                     name=f"Facebook: {fb_page}",
+                     monitor_type="rss",
+                     url=_facebook_rss(fb_page),
+                     category="opponent", source_type="opponent_statement",
+                     relevance_hint="Opponent Facebook posts via RSSHub.")
         _add(monitors, seen, name=f"{opponent.name} campaign website check", monitor_type="manual",
              category="opponent", source_type="opponent_statement", required_terms=[opponent.name],
              relevance_hint="Add the opponent campaign website URL only after verifying it.")
-        _add(monitors, seen, name=f"{opponent.name} social check", monitor_type="manual",
-             category="opponent", source_type="opponent_statement", required_terms=[opponent.name],
-             relevance_hint="Add verified opponent social profile URLs manually.")
         if candidate:
             _add(monitors, seen, name=f"{candidate} vs {opponent.name}", monitor_type="search_query",
-                 query=_q(_quoted(candidate), _quoted(opponent.name)),
+                 query=_q(_quoted_person(candidate), _quoted_person(opponent.name)),
                  category="race", required_terms=[candidate, opponent.name], excluded_terms=excluded,
                  relevance_hint="Find coverage that compares the candidate and opponent directly.")
 
@@ -655,7 +802,7 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
                      relevance_hint="Sparse-race query combining local geography, office, and election type.")
             if candidate:
                 _add(monitors, seen, name=f"{geo} {candidate} search", monitor_type="search_query",
-                     query=_q(_quoted(geo), _quoted(candidate)),
+                     query=_q(_quoted(geo), _quoted_person(candidate)),
                      category="race", required_terms=[geo, candidate], excluded_terms=excluded,
                      relevance_hint="Sparse-race neighborhood query for candidate mentions.")
 
@@ -672,12 +819,12 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
                  relevance_hint="Find local coverage of a campaign priority.")
         if candidate:
             _add(monitors, seen, name=f"{candidate} on {priority}", monitor_type="search_query",
-                 query=_q(_quoted(candidate), priority), category="issue",
+                 query=_q(_quoted_person(candidate), priority), category="issue",
                  required_terms=[candidate, priority], excluded_terms=excluded,
                  relevance_hint="Find candidate statements or coverage tied to a priority.")
         for opponent in opponents[:3]:
             _add(monitors, seen, name=f"{opponent.name} on {priority}", monitor_type="search_query",
-                 query=_q(_quoted(opponent.name), priority), category="issue",
+                 query=_q(_quoted_person(opponent.name), priority), category="issue",
                  source_type="opponent_statement", required_terms=[opponent.name, priority],
                  excluded_terms=excluded, relevance_hint="Find opponent claims tied to a campaign priority.")
         if small_race:
@@ -862,12 +1009,14 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
                  relevance_hint=f"Polls FEC schedule_e for all independent expenditure notices targeting {district} — catches dark money and PAC activity across the whole race.")
     # ── End FEC filing monitors ───────────────────────────────────────────────
 
+    # FEC checks are handled by the fec_filings / fec_ie_district monitors above
+    # when a candidate ID exists; campaign finance / ballot deadlines are not
+    # webpage-shaped (they're FEC API queries or calendar dates), so we don't
+    # create manual placeholders for them. State + county election boards are
+    # legitimate webpage URLs and stay as auto-discovery targets.
     public_record_names = [
-        "FEC candidate or committee check",
         "State election board check",
         "County election board check",
-        "Campaign finance filing check",
-        "Ballot access and deadline check",
     ]
     for name in public_record_names:
         _add(monitors, seen, name=name, monitor_type="manual", source_type="public_record",
@@ -896,9 +1045,77 @@ def generate_monitors_for_campaign(campaign_profile: CampaignConfig, opponents: 
         _add(monitors, seen, name="School board agenda check", monitor_type="manual",
              source_type="public_record", category="local_government",
              relevance_hint="Add the verified school board agenda page if education is a campaign priority.")
-    if any("job" in p.lower() or "economy" in p.lower() or "economic" in p.lower() for p in priorities):
-        _add(monitors, seen, name="Economic development and layoffs check", monitor_type="manual",
-             source_type="public_record", category="local_government",
-             relevance_hint="Track local employer layoffs, WARN notices, and economic development agendas.")
+
+    # ── Phase 2: tracked third-party accounts ────────────────────────────────
+    # Accounts/pages confirmed via the Setup wizard's third-party discovery
+    # flow — local news, county committees, PACs, statewide subreddits,
+    # journalists. One monitor per row. Bluesky / Reddit / YouTube-with-id
+    # have a usable rss_url stored and emit RSS monitors immediately. IG /
+    # FB rows are gated by the same SOCIAL_HANDLE_MONITORS_ENABLED flag as
+    # Phase 1.5 handles — emission is suppressed until a real fetcher
+    # (self-hosted RSSHub with auth, or an Apify adapter) is wired in.
+    if db is not None:
+        _add_tracked_third_party_monitors(monitors, seen, db)
 
     return monitors
+
+
+def _add_tracked_third_party_monitors(
+    monitors: list[dict[str, Any]],
+    seen: set[tuple],
+    db,
+) -> None:
+    """Append one RSS monitor per tracked-third-party-account row.
+
+    Bluesky / Reddit / YouTube-with-id rows fire immediately. IG / FB rows
+    are gated behind the same SOCIAL_HANDLE_MONITORS_ENABLED flag as
+    Phase 1.5 candidate/opponent handles, because the same auth wall
+    applies regardless of who owns the account.
+
+    Maps inferred_role → source_type so frame matching and the article
+    list see news-outlet posts as news and other accounts as social.
+    Unknown / no role defaults to "social".
+    """
+    from app.models import TrackedThirdPartyAccount
+
+    rows = db.query(TrackedThirdPartyAccount).all()
+    for row in rows:
+        # Platform gate: IG and FB are paused — same reason as Phase 1.5.
+        gated = row.platform in ("instagram", "facebook")
+        if gated and not _SOCIAL_HANDLE_MONITORS_ENABLED:
+            continue
+
+        # No rss_url means we don't have an ingestable feed yet — e.g.
+        # YouTube @handle that needs a channel-id resolution, or an IG/FB
+        # account when the gate is OFF. Skip these silently; they stay
+        # in the DB for when ingestion is wired in.
+        if not row.rss_url:
+            continue
+
+        # Map role → source_type. News-ish roles use "news" so they
+        # flow into the standard news classification; everything else
+        # is "social" (the platform-axis bucket).
+        if row.inferred_role in ("news", "journalist"):
+            source_type = "news"
+        else:
+            source_type = "social"
+
+        label = row.display_name or row.identifier
+        platform_label = {
+            "instagram": "Instagram",
+            "facebook": "Facebook",
+            "bluesky": "Bluesky",
+            "reddit_subreddit": "Reddit",
+            "reddit_user": "Reddit",
+            "youtube": "YouTube",
+        }.get(row.platform, row.platform)
+
+        _add(monitors, seen,
+             name=f"{platform_label}: {label}",
+             monitor_type="rss",
+             url=row.rss_url,
+             category="third_party",
+             source_type=source_type,
+             relevance_hint=(
+                 f"Third-party {row.inferred_role or 'account'} tracked via Setup discovery."
+             ))

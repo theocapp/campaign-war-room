@@ -30,8 +30,21 @@ REALTIME_LOOKBACK_MINUTES = 30
 INGEST_DELAY = 0.5
 
 
-def _gdelt_artlist(query: str, start: datetime, end: datetime) -> list[dict]:
-    """Fetch articles from GDELT DOC artlist mode for the given window."""
+def _gdelt_artlist(
+    query: str, start: datetime, end: datetime, *, max_retries: int = 3,
+) -> tuple[list[dict], Optional[str]]:
+    """Fetch articles from GDELT DOC artlist mode for the given window.
+
+    Returns (articles, error_reason). On success error_reason is None;
+    on failure (after all retries) articles is [] and error_reason is the
+    last exception string. The caller can count throttled calls separately
+    from "0 articles in window" so the scheduler-health view doesn't
+    silently report success when GDELT is rejecting us.
+
+    Retries 429s with exponential backoff (10s, 20s, 40s) since GDELT
+    throttle windows are typically ~minute-long. Other errors (network,
+    parse, 5xx) also retry the same way — cheap insurance.
+    """
     params = {
         "query": query,
         "mode": "artlist",
@@ -42,13 +55,27 @@ def _gdelt_artlist(query: str, start: datetime, end: datetime) -> list[dict]:
         "sourcelang": "english",
         "sourcecountry": "US",
     }
-    try:
-        resp = httpx.get(GDELT_DOC_API, params=params, timeout=20)
-        resp.raise_for_status()
-        return resp.json().get("articles") or []
-    except Exception as exc:
-        logger.warning("gdelt_artlist failed for '%s': %s", query, exc)
-        return []
+    last_exc: Optional[str] = None
+    for attempt in range(max_retries):
+        try:
+            resp = httpx.get(GDELT_DOC_API, params=params, timeout=20)
+            resp.raise_for_status()
+            return resp.json().get("articles") or [], None
+        except Exception as exc:
+            last_exc = str(exc)
+            if attempt == max_retries - 1:
+                logger.warning(
+                    "gdelt_artlist failed for '%s' after %d attempts: %s",
+                    query, max_retries, exc,
+                )
+                return [], last_exc
+            backoff = 10 * (2 ** attempt)  # 10s, 20s, 40s
+            logger.info(
+                "gdelt_artlist for '%s' failed (%s) — retry %d/%d in %ds",
+                query, exc, attempt + 1, max_retries - 1, backoff,
+            )
+            time.sleep(backoff)
+    return [], last_exc
 
 
 def _gdelt_timelinetone(query: str, days_back: int = 7, *, max_retries: int = 4) -> list[dict]:
@@ -141,9 +168,16 @@ def poll_gdelt_realtime(db) -> dict:
 
     seen_urls: set[str] = set()
     added = skipped = errors = 0
+    throttled_queries = 0  # count of GDELT API calls that failed all retries
+    last_throttle_reason: Optional[str] = None
 
     for query_str, label in queries:
-        articles = _gdelt_artlist(query_str, start, end)
+        articles, fetch_err = _gdelt_artlist(query_str, start, end)
+        if fetch_err is not None:
+            # The fetch itself failed (e.g. 429 after retries). This is an
+            # observability signal, not a "0 articles in window" success.
+            throttled_queries += 1
+            last_throttle_reason = fetch_err
         for art in articles:
             url = art.get("url", "").strip()
             if not url or url in seen_urls:
@@ -162,11 +196,17 @@ def poll_gdelt_realtime(db) -> dict:
         time.sleep(0.5)  # be polite to GDELT between queries
 
     logger.info(
-        "gdelt_realtime: added=%d skipped=%d errors=%d (window=%s→%s)",
-        added, skipped, errors,
+        "gdelt_realtime: added=%d skipped=%d errors=%d throttled=%d (window=%s→%s)",
+        added, skipped, errors, throttled_queries,
         start.strftime("%H:%M"), end.strftime("%H:%M"),
     )
-    return {"added": added, "skipped": skipped, "errors": errors}
+    return {
+        "added": added,
+        "skipped": skipped,
+        "errors": errors,
+        "throttled_queries": throttled_queries,
+        "last_throttle_reason": last_throttle_reason,
+    }
 
 
 def collect_tone_snapshots(db, days_back: int = 7) -> dict:

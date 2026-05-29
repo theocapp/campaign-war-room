@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import IssueMention, NarrativeFrame, NarrativeFrameMention, SourceItem
 from app.schemas import FrameMentionOut, IssueOut, SourceItemOut, SourceItemDetail, RSSFeedIn, TextSourceIn, URLSourceIn
 from app.services import ingestion
+from app.services.search_index import search_articles
 from app.services.snapshots import build_source_snapshot, source_out
 
 router = APIRouter()
@@ -43,27 +43,18 @@ def list_sources(
 @router.get("/search", response_model=list[SourceItemOut])
 def search_sources(
     q: str = Query(..., min_length=1, description="Full-text search query"),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    """FTS5 full-text search over article titles and body text."""
-    # Sanitize: FTS5 MATCH syntax uses special chars; escape double-quotes and
-    # wrap the raw query in double-quotes so it's treated as a phrase/prefix search.
-    safe_q = q.replace('"', '""')
-    rows = db.execute(
-        text(
-            "SELECT rowid FROM source_items_fts "
-            "WHERE source_items_fts MATCH :q "
-            "ORDER BY rank "
-            "LIMIT :lim"
-        ),
-        {"q": f'"{safe_q}"', "lim": limit},
-    ).fetchall()
-    ids = [r[0] for r in rows]
+    """Full-text search over article titles and body text.
+
+    Dialect-aware via app.services.search_index — SQLite uses FTS5,
+    Postgres uses tsvector + GIN.
+    """
+    ids = search_articles(db, q, limit)
     if not ids:
         return []
     items = db.query(SourceItem).filter(SourceItem.id.in_(ids)).all()
-    # Re-order to match FTS5 rank order
     order = {row_id: idx for idx, row_id in enumerate(ids)}
     items.sort(key=lambda it: order.get(it.id, 9999))
     return [source_out(item) for item in items]

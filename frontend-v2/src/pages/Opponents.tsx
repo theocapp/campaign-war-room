@@ -2,19 +2,16 @@ import { ChevronDown, ChevronRight, Plus, User, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '@/api/client'
 import type { Opponent, OpponentActivity } from '@/api/types'
+import { formatArticleDate } from '@/lib/formatDate'
 
 type Tab = 'attacks' | 'claims' | 'promises'
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
 
 function ActivityCard({ item, type }: { item: OpponentActivity; type: Tab }) {
   const text = type === 'attacks' ? item.attack : type === 'claims' ? item.claim : item.promise
   if (!text) return null
   const colors = {
     attacks: { border: '#c91c1c', dim: 'rgba(201,28,28,0.06)', text: '#f05050', label: 'ATTACK' },
-    claims: { border: '#1c2a3f', dim: 'rgba(20,32,46,0.4)', text: '#7d8fa8', label: 'CLAIM' },
+    claims: { border: 'var(--bg-3)', dim: 'rgba(20,32,46,0.4)', text: 'var(--text-2)', label: 'CLAIM' },
     promises: { border: '#c47800', dim: 'rgba(196,120,0,0.06)', text: '#f0a020', label: 'PROMISE' },
   }
   const c = colors[type]
@@ -29,7 +26,7 @@ function ActivityCard({ item, type }: { item: OpponentActivity; type: Tab }) {
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, color: '#dce7f3', lineHeight: 1.45, marginBottom: 8 }}>
+          <div style={{ fontSize: 13, color: 'var(--text-1)', lineHeight: 1.45, marginBottom: 8 }}>
             "{text}"
           </div>
           {item.contradiction_note && (
@@ -48,8 +45,7 @@ function ActivityCard({ item, type }: { item: OpponentActivity; type: Tab }) {
           {item.repeated_theme && (
             <div style={{
               fontSize: 10,
-              color: '#7d8fa8',
-              fontFamily: "'IBM Plex Mono', monospace",
+              color: 'var(--text-2)',
               letterSpacing: '0.06em',
             }}>
               THEME: {item.repeated_theme}
@@ -58,7 +54,6 @@ function ActivityCard({ item, type }: { item: OpponentActivity; type: Tab }) {
         </div>
         <div style={{ textAlign: 'right', flexShrink: 0 }}>
           <div style={{
-            fontFamily: "'IBM Plex Mono', monospace",
             fontSize: 9,
             color: c.text,
             letterSpacing: '0.1em',
@@ -66,12 +61,12 @@ function ActivityCard({ item, type }: { item: OpponentActivity; type: Tab }) {
           }}>
             {c.label}
           </div>
-          <div style={{ fontSize: 10, color: '#3d4f63', fontFamily: "'IBM Plex Mono', monospace" }}>
-            {formatDate(item.first_seen_at)}
+          <div style={{ fontSize: 10, color: 'var(--text-3)' }}>
+            {formatArticleDate(item.first_seen_at)}
           </div>
           {item.first_seen_at !== item.last_seen_at && (
-            <div style={{ fontSize: 10, color: '#3d4f63', fontFamily: "'IBM Plex Mono', monospace" }}>
-              → {formatDate(item.last_seen_at)}
+            <div style={{ fontSize: 10, color: 'var(--text-3)' }}>
+              → {formatArticleDate(item.last_seen_at)}
             </div>
           )}
         </div>
@@ -86,20 +81,22 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
   const [loadingActivity, setLoadingActivity] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('attacks')
 
-  async function loadActivity() {
-    if (activity.length || loadingActivity) return
+  // Load activity on mount so the collapsed row can show attack / claim /
+  // promise counts. Previously we only loaded on expand, which made the
+  // page render as an empty single row giving no signal that there were
+  // hundreds of activities behind it.
+  useEffect(() => {
+    let cancelled = false
     setLoadingActivity(true)
-    try {
-      const data = await api.opponentActivity(opponent.id)
-      setActivity(data)
-    } catch { /* silently fail */ } finally {
-      setLoadingActivity(false)
-    }
-  }
+    api.opponentActivity(opponent.id)
+      .then(data => { if (!cancelled) setActivity(data) })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoadingActivity(false) })
+    return () => { cancelled = true }
+  }, [opponent.id])
 
   function handleExpand() {
     setExpanded(e => !e)
-    if (!expanded) loadActivity()
   }
 
   const attacks = activity.filter(a => a.attack)
@@ -125,29 +122,27 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
           width: 36,
           height: 36,
           borderRadius: '50%',
-          background: '#14202e',
-          border: '1px solid #2a3f5c',
+          background: 'var(--bg-3)',
+          border: '1px solid var(--border)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
         }}>
-          <User size={16} style={{ color: '#7d8fa8' }} />
+          <User size={16} style={{ color: 'var(--text-2)' }} />
         </div>
         <div style={{ flex: 1 }}>
           <div style={{
-            fontFamily: "'Barlow Condensed', sans-serif",
             fontSize: 17,
             fontWeight: 700,
-            color: '#dce7f3',
+            color: 'var(--text-1)',
             letterSpacing: '0.02em',
             marginBottom: 2,
           }}>
             {opponent.name}
           </div>
           <div style={{
-            color: '#7d8fa8',
-            fontFamily: "'IBM Plex Mono', monospace",
+            color: 'var(--text-2)',
             fontSize: 10,
             letterSpacing: '0.06em',
           }}>
@@ -157,7 +152,7 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
         <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
           {attacks.length > 0 && (
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: '#f05050', lineHeight: 1 }}>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#f05050', lineHeight: 1 }}>
                 {attacks.length}
               </div>
               <div className="section-label" style={{ marginTop: 2 }}>ATTACKS</div>
@@ -165,7 +160,7 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
           )}
           {claims.length > 0 && (
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: '#7d8fa8', lineHeight: 1 }}>
+              <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-2)', lineHeight: 1 }}>
                 {claims.length}
               </div>
               <div className="section-label" style={{ marginTop: 2 }}>CLAIMS</div>
@@ -173,16 +168,16 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
           )}
           {promises.length > 0 && (
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18, fontWeight: 600, color: '#f0a020', lineHeight: 1 }}>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#f0a020', lineHeight: 1 }}>
                 {promises.length}
               </div>
               <div className="section-label" style={{ marginTop: 2 }}>PROMISES</div>
             </div>
           )}
           {!loadingActivity && activity.length === 0 && expanded && (
-            <span style={{ fontSize: 11, color: '#3d4f63' }}>No activity yet</span>
+            <span style={{ fontSize: 11, color: 'var(--text-3)' }}>No activity yet</span>
           )}
-          <div style={{ color: '#3d4f63' }}>
+          <div style={{ color: 'var(--text-3)' }}>
             {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           </div>
         </div>
@@ -190,17 +185,17 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
 
       {/* Expanded activity */}
       {expanded && (
-        <div style={{ borderTop: '1px solid #1c2a3f', padding: '16px 20px' }}>
+        <div style={{ borderTop: '1px solid var(--bg-3)', padding: '16px 20px' }}>
           {loadingActivity && (
             <div className="skeleton" style={{ height: 80, borderRadius: 3 }} />
           )}
           {!loadingActivity && activity.length > 0 && (
             <>
               {/* Tabs */}
-              <div style={{ display: 'flex', gap: 2, marginBottom: 16, borderBottom: '1px solid #1c2a3f', paddingBottom: 0 }}>
+              <div style={{ display: 'flex', gap: 2, marginBottom: 16, borderBottom: '1px solid var(--bg-3)', paddingBottom: 0 }}>
                 {([
                   { key: 'attacks', label: `ATTACKS (${attacks.length})`, color: '#f05050' },
-                  { key: 'claims', label: `CLAIMS (${claims.length})`, color: '#7d8fa8' },
+                  { key: 'claims', label: `CLAIMS (${claims.length})`, color: 'var(--text-2)' },
                   { key: 'promises', label: `PROMISES (${promises.length})`, color: '#f0a020' },
                 ] as const).map(tab => (
                   <button
@@ -212,10 +207,9 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
                       borderBottom: activeTab === tab.key ? `2px solid ${tab.color}` : '2px solid transparent',
                       padding: '6px 14px',
                       cursor: 'pointer',
-                      fontFamily: "'IBM Plex Mono', monospace",
                       fontSize: 10,
                       letterSpacing: '0.1em',
-                      color: activeTab === tab.key ? tab.color : '#3d4f63',
+                      color: activeTab === tab.key ? tab.color : 'var(--text-3)',
                       marginBottom: -1,
                     }}
                   >
@@ -224,7 +218,7 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
                 ))}
               </div>
               {tabItems.length === 0 ? (
-                <div style={{ color: '#3d4f63', fontSize: 12, textAlign: 'center', padding: '20px 0' }}>
+                <div style={{ color: 'var(--text-3)', fontSize: 12, textAlign: 'center', padding: '20px 0' }}>
                   No {activeTab} recorded
                 </div>
               ) : (
@@ -235,7 +229,7 @@ function OpponentRow({ opponent }: { opponent: Opponent }) {
             </>
           )}
           {!loadingActivity && activity.length === 0 && (
-            <div style={{ color: '#3d4f63', fontSize: 12, textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ color: 'var(--text-3)', fontSize: 12, textAlign: 'center', padding: '20px 0' }}>
               No activity data available yet. Ingest more sources to track opponent activity.
             </div>
           )}
@@ -267,10 +261,10 @@ function AddOpponentModal({ onClose, onCreated }: { onClose: () => void; onCreat
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-box" onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 18, fontWeight: 700, color: '#dce7f3', letterSpacing: '0.06em' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-1)', letterSpacing: '0.06em' }}>
             ADD OPPONENT
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7d8fa8' }}><X size={18} /></button>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-2)' }}><X size={18} /></button>
         </div>
         <form onSubmit={submit}>
           <div style={{ marginBottom: 14 }}>
@@ -308,8 +302,8 @@ export function Opponents() {
     <div style={{ minHeight: '100vh' }}>
       <div style={{
         padding: '14px 28px',
-        borderBottom: '1px solid #1c2a3f',
-        background: 'rgba(6,8,16,0.8)',
+        borderBottom: '1px solid var(--bg-3)',
+        background: 'var(--bg-1)',
         backdropFilter: 'blur(8px)',
         position: 'sticky',
         top: 0,
@@ -319,7 +313,7 @@ export function Opponents() {
         justifyContent: 'space-between',
       }}>
         <div>
-          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 20, fontWeight: 900, letterSpacing: '0.06em', color: '#dce7f3' }}>
+          <div style={{ fontSize: 20, fontWeight: 900, letterSpacing: '0.06em', color: 'var(--text-1)' }}>
             OPPONENT TRACKER
           </div>
           <div className="section-label" style={{ marginTop: 2 }}>
@@ -338,9 +332,9 @@ export function Opponents() {
         ))}
 
         {!loading && opponents.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '80px 0', color: '#3d4f63' }}>
+          <div style={{ textAlign: 'center', padding: '80px 0', color: 'var(--text-3)' }}>
             <User size={48} style={{ margin: '0 auto 16px', opacity: 0.3 }} />
-            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 20, marginBottom: 8 }}>No opponents tracked yet</div>
+            <div style={{ fontSize: 20, marginBottom: 8 }}>No opponents tracked yet</div>
             <div style={{ fontSize: 13 }}>Add your opponent to start monitoring their activity.</div>
           </div>
         )}

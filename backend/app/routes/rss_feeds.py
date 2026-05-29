@@ -50,10 +50,11 @@ def ingest_all_feeds(db: Session = Depends(get_db)):
     try:
         feeds = db.query(RssFeed).filter_by(active=True).all()
         results = []
+        from app.services.rss_ingestion import mark_rss_feed_fetched
         for feed in feeds:
             try:
                 r = ingestion.ingest_rss(db, feed.url, feed.name)
-                feed.last_fetched_at = datetime.utcnow()
+                feed.last_fetched_at = mark_rss_feed_fetched(db, feed.url)
                 results.append({
                     "feed_id": feed.id,
                     "feed_name": feed.name,
@@ -111,7 +112,8 @@ def ingest_feed(feed_id: int, db: Session = Depends(get_db)):
     if not feed:
         raise HTTPException(status_code=404, detail="Feed not found")
     result = ingestion.ingest_rss(db, feed.url, feed.name)
-    feed.last_fetched_at = datetime.utcnow()
+    from app.services.rss_ingestion import mark_rss_feed_fetched
+    feed.last_fetched_at = mark_rss_feed_fetched(db, feed.url)
     db.commit()
     return RssFeedIngestResult(
         feed_id=feed_id,

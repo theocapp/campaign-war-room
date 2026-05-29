@@ -268,6 +268,68 @@ def _parse_html_published_date(html: str) -> Optional[datetime]:
     return None
 
 
+# ── Junk-title filter ────────────────────────────────────────────────────────
+#
+# Some scraper paths produce SourceItem rows whose `title` is a placeholder
+# left over from a paywall / login wall / SVG icon / aggregator front page,
+# not real article content. Confirmed live in this DB:
+#   - "Instagram", "Facebook" (scraper hit login wall on social-share URLs)
+#   - "chevron-right" (SVG icon name pulled from a CSS class on the page)
+#   - "Untitled", "Latest Articles", "BizToc", "Targeted News Service"
+#     (generic placeholder titles from aggregator front pages)
+#   - "idahostatejournal.com" (bare hostname after a paywall)
+#   - "breeze 4.jpg", anything ending in .pdf / .png etc. (binary files
+#     ingested as articles)
+# These rows still get persisted (audit trail), but immediately archived so
+# they don't reach clustering, outlet linking, LLM scoring, or the Articles
+# list. Without this filter the "Instagram" cluster grew to 23 members.
+_PLATFORM_PLACEHOLDER_TITLES = {
+    "instagram", "facebook", "twitter", "x", "tiktok",
+    "linkedin", "pinterest", "snapchat", "threads", "mastodon",
+}
+_GENERIC_PLACEHOLDER_TITLES = {
+    "untitled", "latest articles", "biztoc", "chevron-right",
+    "targeted news service", "home", "menu", "404", "page not found",
+    "redirecting", "loading", "sign in", "log in", "subscribe",
+}
+# Match titles ending in a binary file extension — these are image / video
+# / document URLs misingested as articles.
+_FILE_EXT_TITLE_RE = re.compile(
+    r"\.(jpg|jpeg|png|gif|webp|svg|pdf|mp4|mov|mp3|wav|webm|tiff?|csv|xlsx?|zip)$",
+    re.IGNORECASE,
+)
+# Match titles that are just a bare hostname (paywall fallback) — examples
+# from the live DB: "idahostatejournal.com", "rockymounttelegram.com",
+# "bozemandailychronicle.com". Accepts either `domain.tld` or
+# `sub.domain.tld`. No spaces allowed (legitimate news titles always have
+# spaces).
+_BARE_HOSTNAME_RE = re.compile(
+    r"^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_title(title: str | None) -> bool:
+    """Return True if `title` looks like a scraper artifact rather than
+    real article content. See the constants above for examples.
+    """
+    if not title:
+        return True
+    t = title.strip()
+    if not t:
+        return True
+    lower = t.lower()
+    if lower in _PLATFORM_PLACEHOLDER_TITLES:
+        return True
+    if lower in _GENERIC_PLACEHOLDER_TITLES:
+        return True
+    if _FILE_EXT_TITLE_RE.search(t):
+        return True
+    if _BARE_HOSTNAME_RE.match(t):
+        return True
+    return False
+
+
 _REFERENCE_DOMAINS = {
     "ballotpedia.org",
     "votesmart.org",
@@ -406,7 +468,68 @@ def _persist_cluster_native(
             )
 
 
+def _classify_perspective(db: Session, item: SourceItem) -> None:
+    """V13.21 — classify per-article perspective for landscape dot color.
+
+    Runs the cascading classifier: existing labels (free) → outlet bias
+    (free) → attribution heuristic (free) → LLM fallback. The LLM phase
+    fires here on every race-relevant new article (~1-2s added latency);
+    we accept the latency because (a) cost is tiny (gpt-4o-mini ~$0.0001/call)
+    and (b) the chart only shows useful color if perspective is populated
+    immediately rather than lagging a daily backfill.
+
+    Skipped for off-topic items (race_relevance_score < 50) — they won't
+    appear on the landscape anyway and shouldn't cost an LLM call.
+    """
+    if (item.race_relevance_score or 0) < 50:
+        return
+    if item.archived_as_irrelevant:
+        return
+    from app.services.article_perspective import (
+        get_classifier, classify_with_llm,
+    )
+    from app.models import CampaignConfig, Opponent
+
+    classify = get_classifier(db)
+    r = classify(item)
+    if r.method == "fallback":
+        # Cascade to LLM. Reload campaign/opponent metadata for the prompt.
+        cfg = db.query(CampaignConfig).first()
+        opp = db.query(Opponent).first()
+        if cfg and opp:
+            r = classify_with_llm(
+                item,
+                candidate_name=cfg.candidate_name or "",
+                candidate_party=cfg.party or "",
+                opponent_name=opp.name or "",
+                opponent_party=opp.party or "",
+            )
+    item.perspective = r.perspective
+    item.perspective_method = r.method
+    item.perspective_confidence = r.confidence
+    item.perspective_reason = (r.reason or "")[:240]
+
+
 def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
+    # Junk-title short-circuit: scraper artifacts (placeholder titles,
+    # binary file URLs, bare hostnames, social-platform login walls) get
+    # persisted as archived so the audit trail exists, but skip
+    # clustering, outlet linking, and the LLM call. Without this filter
+    # the "Instagram" cluster grew to 23 members in this DB.
+    if _is_junk_title(item.title):
+        logger.info(
+            "ingestion: junk-title filter dropped item title=%r url=%s",
+            item.title, (item.source_url or "")[:80],
+        )
+        item.archived_as_irrelevant = True
+        item.race_relevance_score = 0
+        item.race_relevance_label = "irrelevant"
+        item.content_category = "irrelevant"
+        item.reviewed = True  # treat as auto-triaged so it doesn't sit in queue
+        db.add(item)
+        db.flush()
+        return item
+
     db.add(item)
     db.flush()
     ownership = classify_source_owner(db, item)
@@ -502,7 +625,7 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
 
         reason = (analysis.get("reason") or "").strip()
         if reason:
-            item.relevance_reasons = reason
+            item.relevance_reasons = json.dumps([reason])
 
         if analysis.get("needs_attention"):
             item.urgency = "high"
@@ -523,6 +646,22 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
                 analysis.get("frame_matches") or [],
             )
             db.commit()
+
+            # V13.21 — classify article perspective (pro_candidate /
+            # pro_opponent / neutral) so dot color on the landscape
+            # reflects this specific article's framing, not just the
+            # narrative's owner_type. Cheap phases (existing labels +
+            # outlet bias + attribution) are instant; LLM phase adds
+            # ~1-2s to ingest. Wrapped in try/except so any failure
+            # (no LLM key, rate limit, etc.) doesn't break ingestion.
+            try:
+                _classify_perspective(db, item)
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "ingestion: perspective classification failed for item %s: %s",
+                    item.id, exc,
+                )
 
     item.priority_score = _compute_priority_score(db, item)
     item.evidence_score = scoring.compute_evidence_score(item)
@@ -745,12 +884,253 @@ def _fetch_rss_content(feed_url: str) -> str | None:
     return None
 
 
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/|/embed/|/v/|/shorts/)([A-Za-z0-9_-]{11})")
+# Cap transcript text to keep LLM-scoring token costs bounded. A 4000-char
+# RSS summary + ~20K of transcript = ~24K total, well below the LLM context
+# window but big enough to capture most political-content speeches.
+_YOUTUBE_TRANSCRIPT_CHAR_CAP = 20000
+
+
+def _youtube_video_id(url: Optional[str]) -> Optional[str]:
+    """Extract the 11-char video ID from a YouTube URL, or None."""
+    if not url:
+        return None
+    if "youtube.com" not in url and "youtu.be" not in url:
+        return None
+    m = _YOUTUBE_VIDEO_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+# ── Transcript proper-noun cleanup ───────────────────────────────────────────
+#
+# YouTube auto-generated captions garble proper nouns ("Cognetti" came back
+# as "Connetty" in a real session run). The LLM scoring tolerates these
+# fuzzy errors, but FTS5 search and downstream string matches don't. We
+# apply per-word fuzzy substitution using a campaign-specific canonical
+# list derived from CampaignConfig.candidate_name + every Opponent.name.
+#
+# Trade-offs in the heuristic:
+#   - SequenceMatcher ratio threshold (>= 0.75) is roughly "1-2 edits for
+#     short words, more for longer ones." Catches typical caption errors.
+#   - First-letter match gate prevents cross-name confusion ("Connecticut"
+#     scoring high against "Cognetti" because of the matching middle).
+#   - Min length 4 — too-short tokens have too many false-positive matches
+#     against random words.
+#   - Single-pass `re.sub` is O(transcript-tokens × canonical-names);
+#     canonical is usually ≤ 4 names so this stays fast.
+
+from difflib import SequenceMatcher as _SequenceMatcher
+
+_TRANSCRIPT_WORD_RE = re.compile(r"\b[A-Za-z]+\b")
+
+
+def _campaign_canonical_names(db: Session) -> list[str]:
+    """Build the list of proper-noun words we want preserved in transcript
+    text. Pulled from the candidate's first/last/middle parts and every
+    opponent's name, since those are the words auto-captions garble most
+    consistently and where FTS5 search precision matters most.
+    """
+    from app.models import CampaignConfig, Opponent  # local to avoid cycles
+
+    nouns: list[str] = []
+    config = db.query(CampaignConfig).first()
+    if config and config.candidate_name:
+        for word in config.candidate_name.split():
+            if len(word) >= 4 and word.isalpha():
+                nouns.append(word)
+    for opp in db.query(Opponent).all():
+        if opp.name:
+            for word in opp.name.split():
+                if len(word) >= 4 and word.isalpha():
+                    nouns.append(word)
+    # Case-insensitive de-dup, preserving the canonical capitalization.
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in nouns:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def _correct_transcript_proper_nouns(transcript: str, canonical_names: list[str]) -> str:
+    """Two-pass fuzzy substitution to fix caption-mangled proper nouns.
+
+    Pass 1 — single-word: each word in the transcript is compared against
+    each canonical via SequenceMatcher; high enough ratio + first-letter
+    match + length tolerance ≤ 2 → substitute.
+
+    Pass 2 — multi-word (added 2026-05-29): some caption errors split a
+    name across multiple tokens ("Bresnahan" → "press no hand"). After
+    pass 1, scan for 2-word windows whose concatenation fuzzy-matches a
+    canonical name. Stricter gates here (only canonicals ≥ 6 chars,
+    length tolerance ≤ 3, first-letter match still required) because
+    multi-word substitution is more user-visible if wrong.
+    """
+    if not transcript or not canonical_names:
+        return transcript
+    canonical_by_lower = {c.lower(): c for c in canonical_names}
+
+    # ── Pass 1: single-word ───────────────────────────────────────────────
+    def replace_word(match: re.Match) -> str:
+        word = match.group()
+        if len(word) < 4:
+            return word
+        wl = word.lower()
+        if wl in canonical_by_lower:
+            return canonical_by_lower[wl]
+        for cl, canonical in canonical_by_lower.items():
+            if wl[0] != cl[0]:
+                continue
+            if abs(len(cl) - len(wl)) > 2:
+                continue
+            ratio = _SequenceMatcher(None, wl, cl).ratio()
+            if ratio >= 0.75:
+                return canonical
+        return word
+
+    out = _TRANSCRIPT_WORD_RE.sub(replace_word, transcript)
+
+    # ── Pass 2: multi-word ────────────────────────────────────────────────
+    # Only attempt windows when there are canonicals long enough that
+    # caption splits make sense — short names (≤ 5 chars) rarely garble
+    # into multiple tokens, and the false-positive risk on small windows
+    # is high.
+    multi_canonicals = [c for c in canonical_names if len(c) >= 6]
+    if not multi_canonicals:
+        return out
+
+    # Walk through the text matching 2-word windows. We do a single pass
+    # left-to-right; once a window is replaced we skip past it.
+    result_parts: list[str] = []
+    pos = 0
+    word_iter = list(_TRANSCRIPT_WORD_RE.finditer(out))
+    i = 0
+    while i < len(word_iter) - 1:
+        m1 = word_iter[i]
+        m2 = word_iter[i + 1]
+        if m1.end() >= m2.start():
+            # Shouldn't happen for our pattern but guard anyway
+            i += 1
+            continue
+        between = out[m1.end():m2.start()]
+        # Only attempt when the two words are separated by simple
+        # whitespace (typical caption rendering); skip across punctuation.
+        if not between.isspace():
+            i += 1
+            continue
+        w1 = m1.group()
+        w2 = m2.group()
+        # Skip windows where either word is already a canonical name —
+        # those tokens were just fixed by pass 1, and combining them with
+        # an adjacent unrelated word would over-consume content
+        # ("Cognetti for" should not collapse back into "Cognetti").
+        if w1.lower() in canonical_by_lower or w2.lower() in canonical_by_lower:
+            i += 1
+            continue
+        # Both must be alphabetic short-ish tokens — caption garbling
+        # tends to produce short common-looking words.
+        if len(w1) > 8 or len(w2) > 8:
+            i += 1
+            continue
+        concat = (w1 + w2).lower()
+        if len(concat) < 5:
+            i += 1
+            continue
+        matched_canonical: str | None = None
+        for canonical in multi_canonicals:
+            cl = canonical.lower()
+            if concat[0] != cl[0]:
+                continue
+            if abs(len(concat) - len(cl)) > 3:
+                continue
+            ratio = _SequenceMatcher(None, concat, cl).ratio()
+            if ratio >= 0.70:
+                matched_canonical = canonical
+                break
+        if matched_canonical is not None:
+            # Emit everything up to w1, then the canonical, then resume
+            # past w2 (skip the whitespace in between).
+            result_parts.append(out[pos:m1.start()])
+            result_parts.append(matched_canonical)
+            pos = m2.end()
+            i += 2  # consume both words
+            continue
+        i += 1
+    result_parts.append(out[pos:])
+    return "".join(result_parts)
+
+
+def _fetch_youtube_transcript(video_id: str) -> Optional[str]:
+    """Fetch auto-generated or manual captions for a YouTube video.
+
+    Returns the joined transcript text, capped at
+    `_YOUTUBE_TRANSCRIPT_CHAR_CAP` chars. Returns None on any failure —
+    videos without captions, age-restricted videos, network errors, etc.
+    Never raises; the caller treats a missing transcript as "no signal
+    beyond the RSS description" and moves on.
+
+    NOTE: the proper-noun correction step is applied in `ingest_rss` after
+    this returns, not inside here — it needs a DB session to look up the
+    campaign's canonical names.
+    """
+    try:
+        # Import here so the module doesn't hard-fail if the package isn't
+        # installed in some deployment.
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        logger.debug("youtube-transcript-api not installed; skipping transcript fetch")
+        return None
+    try:
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id)
+        # The result is iterable of segment objects with a `.text` attribute.
+        # Join with spaces; YouTube captions don't include punctuation that
+        # would help our scoring pipeline distinguish sentences, but the LLM
+        # handles unpunctuated speech well.
+        parts = []
+        char_count = 0
+        for segment in transcript:
+            text = getattr(segment, "text", "") or ""
+            text = text.strip()
+            if not text:
+                continue
+            parts.append(text)
+            char_count += len(text) + 1
+            if char_count >= _YOUTUBE_TRANSCRIPT_CHAR_CAP:
+                break
+        if not parts:
+            return None
+        return " ".join(parts)[:_YOUTUBE_TRANSCRIPT_CHAR_CAP]
+    except Exception as e:
+        # Catch broadly because the upstream library raises a wide variety
+        # of types (TranscriptsDisabled, VideoUnavailable, NoTranscriptFound,
+        # plus generic network errors). Treating all as "no transcript" is
+        # the right policy — never block ingestion on transcript failure.
+        logger.debug("transcript fetch failed for %s: %s", video_id, e)
+        return None
+
+
 def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIngestResult:
     raw = _fetch_rss_content(feed_url)
-    feed = feedparser.parse(raw if raw else feed_url)
+    if not raw:
+        # CRITICAL: do NOT fall back to feedparser.parse(feed_url). That
+        # path uses Python's stdlib urllib internally with NO timeout —
+        # a slow/dead feed will hang FOREVER, holding ingest_lock and
+        # blocking every subsequent RSS cycle. This was the root cause
+        # of a 4-hour ingestion outage on 2026-05-23: one bad feed stalled
+        # the entire scheduler. Always use the timeout-bounded httpx
+        # path; if it returns None, skip this feed for this cycle.
+        logger.warning("ingest_rss: skipping %s (httpx fetch failed)", feed_url)
+        return RSSIngestResult(added=0, skipped=0, items=[])
+    feed = feedparser.parse(raw)
     added_items: list[SourceItem] = []
     skipped = 0
     _build_outlet_index_cache: dict = {}  # lazy-loaded once per feed, not per entry
+    # Cache the campaign's canonical proper-noun list once per feed cycle —
+    # used to fix auto-caption garbling on YouTube transcripts. Cheap query
+    # and small payload, so doing it eagerly per ingest_rss call is fine.
+    _canonical_names_cache: list[str] = _campaign_canonical_names(db)
 
     for entry in feed.entries[:50]:
         url = entry.get("link") or ""
@@ -762,6 +1142,27 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
             continue
 
         raw_text = _strip_tags(entry.get("summary") or entry.get("description") or "")[:4000]
+
+        # YouTube videos: the RSS feed only carries title + description, not
+        # the spoken content. Fetch the auto-generated transcript when we
+        # can — politicians' video remarks are first-party signal that
+        # otherwise wouldn't reach the scoring pipeline. Append to raw_text
+        # so downstream LLM scoring / frame matching sees it as if it were
+        # article body.
+        video_id = _youtube_video_id(url)
+        if video_id:
+            transcript = _fetch_youtube_transcript(video_id)
+            if transcript:
+                # Normalize caption-mangled proper nouns ("Connetty" →
+                # "Cognetti") so FTS5 search and string matches don't
+                # silently miss transcript hits.
+                transcript = _correct_transcript_proper_nouns(
+                    transcript, _canonical_names_cache
+                )
+                if raw_text:
+                    raw_text = f"{raw_text}\n\n[Transcript]\n{transcript}"
+                else:
+                    raw_text = f"[Transcript]\n{transcript}"
 
         published = _rss_published_at(getattr(entry, "published_parsed", None))
 
@@ -796,6 +1197,7 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
             source_type=inferred_type,
             published_at=published,
             source_author=source_author,
+            publisher_domain=publisher_domain,
         )
 
         # Resolve outlet before persisting so reach weighting is immediate.

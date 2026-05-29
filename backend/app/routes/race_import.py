@@ -59,7 +59,11 @@ async def import_race_csv(file: UploadFile = File(...), db: Session = Depends(ge
         category = (row.get("category") or "").strip() or None
         source_type = (row.get("source_type") or "news").strip()
 
+        # SAVEPOINT-per-row so a bad row doesn't discard earlier valid rows.
+        # Context-manager form: commits on normal exit (including early
+        # `continue`), rolls back on exception.
         try:
+          with db.begin_nested():
             if row_type == "campaign":
                 if not name:
                     errors.append(f"Row {i}: campaign row requires 'name'")
@@ -157,7 +161,6 @@ async def import_race_csv(file: UploadFile = File(...), db: Session = Depends(ge
 
         except Exception as e:
             errors.append(f"Row {i}: {e}")
-            db.rollback()
             continue
 
     db.commit()
