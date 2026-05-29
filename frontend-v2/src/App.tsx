@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { Layout } from './components/Layout'
+import { ToastProvider } from './components/Toast'
 import { Analytics } from './pages/Analytics'
 import { ArticleDetail } from './pages/ArticleDetail'
 import { Articles } from './pages/Articles'
@@ -21,34 +22,36 @@ import { Timeline } from './pages/Timeline'
 export default function App() {
   return (
     <BrowserRouter>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/forecast" element={<Forecast />} />
-          <Route path="/briefing" element={<MorningBriefing />} />
-          <Route path="/articles" element={<Articles />} />
-          <Route path="/articles/:id" element={<ArticleDetail />} />
-          <Route path="/narratives" element={<Narratives />} />
-          <Route path="/narratives/:id" element={<NarrativeDetail />} />
-          <Route path="/landscape" element={<Landscape />} />
-          {/* /entity-network and /entity-review hidden 2026-05-29 —
-              backing data is legacy v14.x extraction. v15.0 claim_records
-              surface as evidence inside frames + briefing, not as a
-              standalone graph page. Component files preserved for reference.
-              See INTER_SESSION.md Session F. */}
-          <Route path="/entity-network" element={<Navigate to="/" replace />} />
-          <Route path="/entity-review" element={<Navigate to="/review" replace />} />
-          <Route path="/map" element={<GeographicOverlay />} />
-          <Route path="/timeline" element={<Timeline />} />
-          <Route path="/review" element={<ReviewQueue />} />
-          <Route path="/opponents" element={<Opponents />} />
-          <Route path="/monitors" element={<Monitors />} />
-          <Route path="/analytics" element={<Analytics />} />
-          <Route path="/notifications" element={<Notifications />} />
-          <Route path="/search" element={<SearchResults />} />
-          <Route path="/setup" element={<Setup />} />
-        </Routes>
-      </Layout>
+      <ToastProvider>
+        <Layout>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/forecast" element={<Forecast />} />
+            <Route path="/briefing" element={<MorningBriefing />} />
+            <Route path="/articles" element={<Articles />} />
+            <Route path="/articles/:id" element={<ArticleDetail />} />
+            <Route path="/narratives" element={<Narratives />} />
+            <Route path="/narratives/:id" element={<NarrativeDetail />} />
+            <Route path="/landscape" element={<Landscape />} />
+            {/* /entity-network and /entity-review hidden 2026-05-29 —
+                backing data is legacy v14.x extraction. v15.0 claim_records
+                surface as evidence inside frames + briefing, not as a
+                standalone graph page. Component files preserved for reference.
+                See INTER_SESSION.md Session F. */}
+            <Route path="/entity-network" element={<Navigate to="/" replace />} />
+            <Route path="/entity-review" element={<Navigate to="/review" replace />} />
+            <Route path="/map" element={<GeographicOverlay />} />
+            <Route path="/timeline" element={<Timeline />} />
+            <Route path="/review" element={<ReviewQueue />} />
+            <Route path="/opponents" element={<Opponents />} />
+            <Route path="/monitors" element={<Monitors />} />
+            <Route path="/analytics" element={<Analytics />} />
+            <Route path="/notifications" element={<Notifications />} />
+            <Route path="/search" element={<SearchResults />} />
+            <Route path="/setup" element={<Setup />} />
+          </Routes>
+        </Layout>
+      </ToastProvider>
     </BrowserRouter>
   )
 }

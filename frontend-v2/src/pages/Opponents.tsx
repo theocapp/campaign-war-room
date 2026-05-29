@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, Plus, User, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '@/api/client'
 import type { Opponent, OpponentActivity } from '@/api/types'
+import { describeError, useToast } from '@/components/Toast'
 import { formatArticleDate } from '@/lib/formatDate'
 
 type Tab = 'attacks' | 'claims' | 'promises'
@@ -244,15 +245,24 @@ function AddOpponentModal({ onClose, onCreated }: { onClose: () => void; onCreat
   const [office, setOffice] = useState('')
   const [party, setParty] = useState('')
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const toast = useToast()
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setSaving(true)
+    setError(null)
     try {
       const opp = await api.createOpponent({ name, office, party })
       onCreated(opp)
       onClose()
-    } catch { /* silently fail */ } finally {
+    } catch (err) {
+      // Inline error inside the modal AND a toast so it stays readable
+      // after the user closes the modal accidentally.
+      const message = describeError(err, 'Failed to create opponent')
+      setError(message)
+      toast.push(message, 'error')
+    } finally {
       setSaving(false)
     }
   }
@@ -279,6 +289,20 @@ function AddOpponentModal({ onClose, onCreated }: { onClose: () => void; onCreat
             <label className="section-label" style={{ display: 'block', marginBottom: 6 }}>PARTY</label>
             <input className="input" value={party} onChange={e => setParty(e.target.value)} placeholder="e.g. Republican" />
           </div>
+          {error && (
+            <div role="alert" style={{
+              marginBottom: 14,
+              padding: '8px 12px',
+              background: '#7f1d1d',
+              color: '#fecaca',
+              border: '1px solid #dc2626',
+              borderRadius: 4,
+              fontSize: 12,
+              lineHeight: 1.4,
+            }}>
+              {error}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button type="button" onClick={onClose} className="btn btn-ghost">Cancel</button>
             <button type="submit" disabled={saving} className="btn btn-primary">{saving ? 'Adding...' : 'Add Opponent'}</button>

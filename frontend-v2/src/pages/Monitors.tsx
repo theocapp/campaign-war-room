@@ -2,6 +2,7 @@ import { Plus, Radio, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '@/api/client'
 import type { MonitorType, SourceMonitor } from '@/api/types'
+import { describeError, useToast } from '@/components/Toast'
 import { formatArticleDate } from '@/lib/formatDate'
 
 const TYPE_LABELS: Record<MonitorType, string> = {
@@ -136,6 +137,20 @@ export function Monitors() {
     failed: number
     skipped_cooldown: number
   } | null>(null)
+  // Per-row error map keyed by monitor.id — set when a toggle or delete
+  // fails so the operator can tell the row from a successful no-op.
+  const [rowErrors, setRowErrors] = useState<Map<number, string>>(new Map())
+  const toast = useToast()
+
+  function clearRowError(id: number) {
+    setRowErrors(prev => {
+      if (!prev.has(id)) return prev
+      const n = new Map(prev); n.delete(id); return n
+    })
+  }
+  function setRowError(id: number, message: string) {
+    setRowErrors(prev => { const n = new Map(prev); n.set(id, message); return n })
+  }
 
   useEffect(() => {
     api.monitors().then(setMonitors).catch(() => {}).finally(() => setLoading(false))
@@ -143,27 +158,40 @@ export function Monitors() {
 
   async function toggleActive(monitor: SourceMonitor) {
     setToggling(t => new Set([...t, monitor.id]))
+    clearRowError(monitor.id)
     try {
       const updated = await api.updateMonitor(monitor.id, { active: !monitor.active })
       setMonitors(prev => prev.map(m => m.id === monitor.id ? updated : m))
-    } catch { /* silently fail */ } finally {
+    } catch (err) {
+      const message = describeError(err, `Failed to ${monitor.active ? 'pause' : 'resume'} monitor`)
+      setRowError(monitor.id, message)
+      toast.push(message, 'error')
+    } finally {
       setToggling(t => { const n = new Set(t); n.delete(monitor.id); return n })
     }
   }
 
   async function deleteMonitor(id: number) {
     if (!confirm('Delete this monitor?')) return
+    clearRowError(id)
     try {
       await api.deleteMonitor(id)
       setMonitors(prev => prev.filter(m => m.id !== id))
-    } catch { /* silently fail */ }
+    } catch (err) {
+      const message = describeError(err, 'Failed to delete monitor')
+      setRowError(id, message)
+      toast.push(message, 'error')
+    }
   }
 
   async function triggerCrawl() {
     setCrawling(true)
     try {
       await api.triggerCrawl()
-    } catch { /* silently fail */ } finally {
+      toast.push('Crawl triggered', 'success')
+    } catch (err) {
+      toast.push(describeError(err, 'Failed to trigger crawl'), 'error')
+    } finally {
       setCrawling(false)
     }
   }
@@ -183,7 +211,9 @@ export function Monitors() {
       if (res.converted > 0) {
         api.monitors().then(setMonitors).catch(() => {})
       }
-    } catch { /* silently fail */ } finally {
+    } catch (err) {
+      toast.push(describeError(err, 'URL discovery failed'), 'error')
+    } finally {
       setDiscovering(false)
     }
   }
@@ -334,11 +364,15 @@ export function Monitors() {
               <div
                 key={monitor.id}
                 style={{
+                  borderBottom: idx < monitors.length - 1 ? '1px solid var(--bg-3)' : 'none',
+                }}
+              >
+              <div
+                style={{
                   display: 'grid',
                   gridTemplateColumns: '1fr 120px 180px 100px 80px',
                   gap: 0,
                   padding: '12px 16px',
-                  borderBottom: idx < monitors.length - 1 ? '1px solid var(--bg-3)' : 'none',
                   alignItems: 'center',
                   opacity: monitor.active ? 1 : 0.5,
                   transition: 'opacity 0.15s',
@@ -437,6 +471,17 @@ export function Monitors() {
                     <Trash2 size={12} />
                   </button>
                 </div>
+              </div>
+              {rowErrors.has(monitor.id) && (
+                <div role="alert" style={{
+                  padding: '6px 16px 10px 16px',
+                  fontSize: 11, color: '#fca5a5', lineHeight: 1.4,
+                  background: 'rgba(220,38,38,0.08)',
+                  borderTop: '1px solid rgba(220,38,38,0.25)',
+                }}>
+                  {rowErrors.get(monitor.id)}
+                </div>
+              )}
               </div>
             ))}
           </div>

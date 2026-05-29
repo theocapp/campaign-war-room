@@ -5,6 +5,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '@/api/client'
 import { PromoteModal } from '@/components/PromoteModal'
 import { InfoTooltip } from '@/components/InfoTooltip'
+import { describeError, useToast } from '@/components/Toast'
 import type {
   CandidateFrameCluster,
   NarrativeFrame, NarrativeLandscape, NarrativeLandscapeCluster, NarrativeLandscapePoint,
@@ -128,6 +129,11 @@ export function ReviewQueue() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [processing, setProcessing] = useState<Set<number>>(new Set())
   const [done, setDone] = useState<Set<number>>(new Set())
+  // Per-row error message — set when an action fails so the operator can
+  // distinguish "did nothing" from "tried and failed." Cleared when the
+  // row is retried successfully or removed from the list.
+  const [actionErrors, setActionErrors] = useState<Map<number, string>>(new Map())
+  const toast = useToast()
   // V13.10 — proposed-cluster review section. Lives above the article queue;
   // moved here from the Landscape page so the landscape can focus on the
   // established narrative ecosystem.
@@ -407,11 +413,20 @@ export function ReviewQueue() {
 
   async function doAction(id: number, action: () => Promise<unknown>) {
     setProcessing(p => new Set([...p, id]))
+    // Clear any prior error for this row so a retry visually resets.
+    setActionErrors(prev => {
+      if (!prev.has(id)) return prev
+      const n = new Map(prev); n.delete(id); return n
+    })
     try {
       await action()
       setDone(d => new Set([...d, id]))
       setSelected(s => { const n = new Set(s); n.delete(id); return n })
-    } catch { /* silently fail */ } finally {
+    } catch (err) {
+      const message = describeError(err, 'Action failed')
+      setActionErrors(prev => { const n = new Map(prev); n.set(id, message); return n })
+      toast.push(message, 'error')
+    } finally {
       setProcessing(p => { const n = new Set(p); n.delete(id); return n })
     }
   }
@@ -424,7 +439,18 @@ export function ReviewQueue() {
       await action(ids)
       setDone(d => new Set([...d, ...ids]))
       setSelected(new Set())
-    } catch { /* silently fail */ } finally {
+      // Bulk success implicitly clears any per-row errors on the same ids.
+      setActionErrors(prev => {
+        if (ids.every(id => !prev.has(id))) return prev
+        const n = new Map(prev); ids.forEach(id => n.delete(id)); return n
+      })
+    } catch (err) {
+      const message = describeError(err, `Bulk action failed (${ids.length} items)`)
+      setActionErrors(prev => {
+        const n = new Map(prev); ids.forEach(id => n.set(id, message)); return n
+      })
+      toast.push(message, 'error')
+    } finally {
       ids.forEach(id => setProcessing(p => { const n = new Set(p); n.delete(id); return n }))
     }
   }
@@ -1090,6 +1116,17 @@ export function ReviewQueue() {
                     </button>
                   </div>
                 </div>
+                {actionErrors.has(item.id) && (
+                  <div role="alert" style={{
+                    marginTop: 10, padding: '6px 10px',
+                    background: 'rgba(220,38,38,0.12)',
+                    border: '1px solid rgba(220,38,38,0.4)',
+                    borderRadius: 4,
+                    fontSize: 11, color: '#fca5a5', lineHeight: 1.4,
+                  }}>
+                    {actionErrors.get(item.id)}
+                  </div>
+                )}
               </div>
             </div>
           )
