@@ -1,37 +1,36 @@
 /**
- * Geographic Overlay — real map view.
+ * Geographic Overlay — district map view.
  *
- * Leaflet + OpenStreetMap tiles. Pulls the district boundary GeoJSON from
- * /api/race/district-geojson (backend caches per-district, fetched on demand
- * from US Census TIGERweb). Works automatically for any US House race —
- * just set the campaign config's `district` to standard `STATE-NN` format.
+ * Leaflet + Carto-themed OpenStreetMap tiles. Shows:
+ *   - District polygon from /api/race/district-geojson (cached per-district
+ *     by the backend, fetched live from US Census TIGERweb)
+ *   - City markers from /api/race/cities (top N places by land area in the
+ *     district's bounding box, derived from the US Census Gazetteer)
  *
- * Overlays:
- *   - District polygon (yellow outline, slight fill)
- *   - City circle markers (sized by article volume, colored by majority
- *     article stance)
- *   - Filter chips toggle visible activity layer
+ * Both data sources are real. Click a city to see its name + Census-typed
+ * place label.
  *
- * When the campaign config changes district, the map re-fetches and auto-
- * fits the new boundary. City positions are currently hand-curated for
- * PA-08; future work: derive automatically from campaign.geography_keywords
- * + a geocoding lookup.
+ * History note: this page previously had a side panel showing entity
+ * lists, endorsement/attack/event counts, and a D/R stance bar — all
+ * sourced from MOCK_ENTITIES / MOCK_RELATIONS and a `placeholderStats()`
+ * hash function. The "LIVE MAP" badge falsely implied that content was
+ * real. Stripped 2026-05-29 alongside the KG-policy retreat (see
+ * CLAUDE.md). The map continues to surface the genuinely-real district
+ * geography; everything that pretended to be real has been removed.
  */
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
-import { Calendar, Filter, MapPin, Sparkles, Users } from 'lucide-react'
+import { MapPin } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { CircleMarker, GeoJSON, MapContainer, TileLayer, useMap } from 'react-leaflet'
 import { api } from '@/api/client'
 import { useTheme } from '@/components/ThemeToggle'
-import { entities as MOCK_ENTITIES, relations as MOCK_RELATIONS, type Entity } from '@/data/entityNetworkMock'
 
 // ── City data model ──────────────────────────────────────────────────────
-// Cities are auto-fetched from /api/race/cities — derived from the US
-// Census Gazetteer + district GeoJSON bounding box. Article counts and
-// stance breakdown are PLACEHOLDERS for now (TODO: real article-by-location
-// aggregation backend). Once Feature A's entity-extraction lands, these
-// become real from extracted location entities per article.
+// Cities come from /api/race/cities — derived from the US Census Gazetteer
+// inside the district's bounding box. Every field is real. The earlier
+// `articleCount` / `stance` / generated `description` placeholders are
+// gone; nothing per-city beyond the Census record is claimed here.
 
 interface CityNode {
   id: string
@@ -39,39 +38,17 @@ interface CityNode {
   lat: number
   lon: number
   lsad: string
-  // Placeholders below — filled in deterministically from name hash so the
-  // mockup feels consistent. Real values plug in via a backend aggregation.
-  articleCount: number
-  stance: { d: number; r: number; neutral: number }
-  description: string
-}
-
-/** Deterministic placeholder generator — same city always gets same numbers
- *  so the UX feels stable. Replace with real /api/articles/by-location query. */
-function placeholderStats(name: string): { articleCount: number; stance: { d: number; r: number; neutral: number } } {
-  // Hash the name to a stable 32-bit int
-  let h = 0
-  for (let i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0
-  const seed = Math.abs(h)
-  const articleCount = 8 + (seed % 200)
-  // Lean per-city based on seed parity
-  const lean = (seed % 100) / 100  // 0..1
-  const total = articleCount
-  // Bias toward neutral with a moderate lean either way
-  const dShare = 0.25 + (lean > 0.5 ? lean * 0.4 : (1 - lean) * 0.2)
-  const rShare = 0.25 + (lean > 0.5 ? (1 - lean) * 0.2 : lean * 0.4)
-  const d = Math.round(total * dShare)
-  const r = Math.round(total * rShare)
-  return { articleCount: total, stance: { d, r, neutral: Math.max(0, total - d - r) } }
+  /** Human-readable category derived directly from LSAD ("city" / "borough"
+   * / "town" / "township" / "community"). NOT a generated bio. */
+  lsadLabel: string
+  /** State abbreviation, straight from Census. */
+  state: string
 }
 
 // ── Component ────────────────────────────────────────────────────────────
 
-type FilterMode = 'all' | 'events' | 'endorsements' | 'attacks'
-
 export function GeographicOverlay() {
   const [selectedCity, setSelectedCity] = useState<string | null>(null)
-  const [filterMode, setFilterMode] = useState<FilterMode>('all')
   const [districtGeoJSON, setDistrictGeoJSON] = useState<GeoJSON.FeatureCollection | null>(null)
   const [cities, setCities] = useState<CityNode[]>([])
   const [loadingMap, setLoadingMap] = useState(true)
@@ -91,8 +68,8 @@ export function GeographicOverlay() {
           }
           const augmented: CityNode[] = res.cities.map(c => ({
             id: c.id, name: c.name, lat: c.lat, lon: c.lon, lsad: c.lsad,
-            description: `${c.name} (${lsadName[c.lsad] ?? 'place'} in ${c.state}).`,
-            ...placeholderStats(c.name),
+            lsadLabel: lsadName[c.lsad] ?? 'place',
+            state: c.state,
           }))
           setCities(augmented)
         })
@@ -100,57 +77,12 @@ export function GeographicOverlay() {
     ]).finally(() => setLoadingMap(false))
   }, [])
 
-  // For the selected city, aggregate entities + relations geographically.
-  const cityIndex = useMemo(() => {
-    const idx: Record<string, { entities: Entity[]; eventCount: number; endorsementCount: number; attackCount: number }> = {}
-    for (const c of cities) {
-      idx[c.id] = { entities: [], eventCount: 0, endorsementCount: 0, attackCount: 0 }
-    }
-    MOCK_ENTITIES.forEach(e => {
-      const lower = e.name.toLowerCase()
-      for (const c of cities) {
-        if (lower === c.name.toLowerCase() && idx[c.id]) {
-          idx[c.id].entities.push(e)
-        }
-      }
-      if (e.type === 'event' || e.type === 'organization') {
-        for (const c of cities) {
-          if (e.description.toLowerCase().includes(c.name.toLowerCase()) && idx[c.id]) {
-            if (!idx[c.id].entities.find(x => x.id === e.id)) {
-              idx[c.id].entities.push(e)
-            }
-            if (e.type === 'event') idx[c.id].eventCount++
-          }
-        }
-      }
-    })
-    MOCK_RELATIONS.forEach(r => {
-      for (const c of cities) {
-        const cityEnts = new Set(idx[c.id].entities.map(e => e.id))
-        if (cityEnts.has(r.source as string) || cityEnts.has(r.target as string)) {
-          if (r.type === 'endorses' || r.type === 'allies_with') idx[c.id].endorsementCount++
-          if (r.type === 'attacks' || r.type === 'criticizes') idx[c.id].attackCount++
-        }
-      }
-    })
-    return idx
-  }, [cities])
-
   const selected = selectedCity ? cities.find(c => c.id === selectedCity) : null
-  const selectedData = selected ? cityIndex[selected.id] : null
 
-  function stanceColor(s: CityNode['stance']) {
-    const total = s.d + s.r + s.neutral
-    if (total === 0) return 'var(--text-3)'
-    const dShare = s.d / total
-    const rShare = s.r / total
-    if (Math.abs(dShare - rShare) < 0.1) return 'var(--text-3)'
-    return dShare > rShare ? 'var(--candidate)' : 'var(--opponent)'
-  }
-
-  function cityRadius(count: number) {
-    return Math.max(6, Math.min(30, Math.sqrt(count) * 1.2))
-  }
+  // Every marker shares the same radius — the data doesn't support
+  // size-coding cities by anything real (the prior "scaled by article
+  // volume" was sourced from placeholderStats, which made up the count).
+  const MARKER_RADIUS = 9
 
   // Map view defaults — center on PA-08 if no boundary yet.
   // Once boundary loads, FitBoundsToGeoJSON inside the map auto-fits.
@@ -166,39 +98,12 @@ export function GeographicOverlay() {
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>
               Geographic Overlay
-              <span style={{ fontSize: 11, color: 'var(--green)', marginLeft: 6, padding: '2px 7px', background: 'rgba(34, 197, 94, 0.1)', borderRadius: 4, fontWeight: 600 }}>LIVE MAP</span>
+              <span style={{ fontSize: 11, color: 'var(--text-3)', marginLeft: 6, padding: '2px 7px', background: 'var(--bg-3)', borderRadius: 4, fontWeight: 600, letterSpacing: '0.06em' }}>DISTRICT MAP</span>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 1 }}>
-              {district || 'district'} · {cities.length} cities · auto-derived from US Census Gazetteer
+              {district || 'district'} · {cities.length} cities · US Census Gazetteer + TIGERweb boundary
             </div>
           </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto' }}>
-          <Filter size={12} color="var(--text-3)" />
-          {([
-            { v: 'all', label: 'All overlays' },
-            { v: 'events', label: 'Events' },
-            { v: 'endorsements', label: 'Endorsements' },
-            { v: 'attacks', label: 'Attacks' },
-          ] as const).map(opt => {
-            const active = filterMode === opt.v
-            return (
-              <button
-                key={opt.v}
-                onClick={() => setFilterMode(opt.v)}
-                style={{
-                  padding: '5px 10px', borderRadius: 6,
-                  border: '1px solid ' + (active ? 'var(--accent)' : 'var(--bg-4)'),
-                  background: active ? 'rgba(255, 191, 0, 0.12)' : 'var(--bg-2)',
-                  color: active ? 'var(--accent)' : 'var(--text-2)',
-                  cursor: 'pointer', fontSize: 12, fontWeight: 500, fontFamily: 'inherit',
-                }}
-              >
-                {opt.label}
-              </button>
-            )
-          })}
         </div>
       </div>
 
@@ -248,29 +153,22 @@ export function GeographicOverlay() {
                 marker + label children. Recomputes on map pan/zoom. */}
             <CollisionAwareLabels cities={cities} />
 
-            {/* City markers — circles only, labels handled by CollisionAwareLabels above */}
+            {/* City markers — uniform size and color. Labels are handled by
+                CollisionAwareLabels above. Selected city gets a brighter
+                outline. */}
             {cities.map(c => {
-              const data = cityIndex[c.id]
-              const r = cityRadius(c.articleCount)
-              const fill = stanceColor(c.stance)
               const isSelected = selectedCity === c.id
-
-              let dim = false
-              if (filterMode === 'events' && data.eventCount === 0) dim = true
-              if (filterMode === 'endorsements' && data.endorsementCount === 0) dim = true
-              if (filterMode === 'attacks' && data.attackCount === 0) dim = true
-
               return (
                 <CircleMarker
                   key={c.id}
                   center={[c.lat, c.lon]}
-                  radius={r}
+                  radius={MARKER_RADIUS}
                   pathOptions={{
                     color: isSelected ? 'var(--accent)' : 'var(--text-1)',
                     weight: isSelected ? 3 : 1.2,
-                    opacity: dim ? 0.3 : 0.85,
-                    fillColor: fill,
-                    fillOpacity: dim ? 0.15 : 0.75,
+                    opacity: 0.9,
+                    fillColor: 'var(--accent)',
+                    fillOpacity: 0.55,
                   }}
                   eventHandlers={{
                     click: () => setSelectedCity(c.id),
@@ -301,103 +199,30 @@ export function GeographicOverlay() {
             </div>
           )}
 
-          {/* Legend */}
-          <div style={{
-            position: 'absolute', top: 14, right: 14,
-            background: 'var(--bg-2)', border: '1px solid var(--border)',
-            borderRadius: 8, padding: '10px 14px', fontSize: 11,
-            zIndex: 1000, boxShadow: 'var(--shadow-elev)',
-          }}>
-            <div style={{ fontSize: 10, color: 'var(--text-3)', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.08em', marginBottom: 6 }}>
-              Majority stance
-            </div>
-            {[
-              { label: 'Lean Dem', c: 'var(--candidate)' },
-              { label: 'Lean GOP', c: 'var(--opponent)' },
-              { label: 'Mixed / neutral', c: 'var(--text-3)' },
-            ].map(x => (
-              <div key={x.label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                <span style={{ width: 10, height: 10, background: x.c, borderRadius: '50%' }} />
-                <span style={{ color: 'var(--text-1)' }}>{x.label}</span>
-              </div>
-            ))}
-            <div style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 10 }}>
-              Circle size = article volume
-            </div>
-          </div>
         </div>
 
-        {/* Side panel: selected city details */}
-        {selected && selectedData && (
-          <div style={{ width: 340, flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--bg-2)', overflowY: 'auto' }}>
-            <div style={{ padding: '18px 20px', borderBottom: '1px solid var(--border)' }}>
+        {/* Side panel: selected city — just the Census facts. No fabricated
+            article counts, stance, or entity lists.  */}
+        {selected && (
+          <div style={{ width: 320, flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--bg-2)', overflowY: 'auto' }}>
+            <div style={{ padding: '18px 20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <MapPin size={12} color="var(--text-2)" />
                 <span style={{ fontSize: 10, color: 'var(--text-2)', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.08em' }}>
-                  {selected.lsad === '25' ? 'City'
-                    : selected.lsad === '21' ? 'Borough'
-                    : selected.lsad === '43' ? 'Town'
-                    : selected.lsad === '47' ? 'Township'
-                    : 'Community'} in {district}
+                  {selected.lsadLabel} in {district}
                 </span>
               </div>
               <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2, marginBottom: 6 }}>
                 {selected.name}
               </div>
-              <div style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.5, marginBottom: 12 }}>
-                {selected.description}
+              <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 12 }}>
+                {selected.lat.toFixed(4)}°, {selected.lon.toFixed(4)}° &middot; {selected.state}
               </div>
-              <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                <strong style={{ color: 'var(--text-1)' }}>{selected.articleCount}</strong> articles mention this city
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 16, fontStyle: 'italic', lineHeight: 1.5 }}>
+                Per-city article volume, stance, and entity activity are not
+                currently tracked. The map shows the district boundary and
+                Census-listed places only.
               </div>
-              <div style={{ marginTop: 10 }}>
-                <div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: 'var(--bg-sidebar)' }}>
-                  <div style={{ flex: selected.stance.d, background: 'var(--candidate)' }} />
-                  <div style={{ flex: selected.stance.neutral, background: 'var(--text-3)' }} />
-                  <div style={{ flex: selected.stance.r, background: 'var(--opponent)' }} />
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 10, color: 'var(--text-2)' }}>
-                  <span style={{ color: '#60a5fa' }}>D {selected.stance.d}</span>
-                  <span>Neutral {selected.stance.neutral}</span>
-                  <span style={{ color: '#f87171' }}>R {selected.stance.r}</span>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-              <StatCard icon={<Calendar size={14} />} label="Events" value={selectedData.eventCount} />
-              <StatCard icon={<Sparkles size={14} />} label="Endorsements" value={selectedData.endorsementCount} />
-              <StatCard icon={<Users size={14} />} label="Attacks" value={selectedData.attackCount} />
-            </div>
-
-            <div style={{ padding: '14px 20px' }}>
-              <div style={{ fontSize: 10, color: 'var(--text-3)', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.08em', marginBottom: 8 }}>
-                Entities here ({selectedData.entities.length})
-              </div>
-              {selectedData.entities.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--text-3)', fontStyle: 'italic' }}>
-                  No entities tied to this location yet.
-                </div>
-              )}
-              {selectedData.entities.map(e => {
-                const Icon = e.type === 'event' ? Calendar : e.type === 'organization' ? Users : MapPin
-                return (
-                  <div key={e.id} style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 8,
-                    padding: '8px 0', borderBottom: '1px solid rgba(67, 67, 67, 0.3)',
-                  }}>
-                    <Icon size={12} color="var(--text-2)" style={{ marginTop: 2, flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500 }}>
-                        {e.name}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 1 }}>
-                        {e.type} · {e.mention_count} mentions
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
             </div>
           </div>
         )}
@@ -442,7 +267,7 @@ function CollisionAwareLabels({ cities }: { cities: CityNode[] }) {
       const ta = LSAD_TIER[a.lsad] ?? 9
       const tb = LSAD_TIER[b.lsad] ?? 9
       if (ta !== tb) return ta - tb
-      return b.articleCount - a.articleCount
+      return a.name.localeCompare(b.name) // stable tiebreak inside the same tier
     })
 
     // Approx label bbox in screen pixels: width = 7px/char, height = 26 (name + count)
@@ -465,7 +290,7 @@ function CollisionAwareLabels({ cities }: { cities: CityNode[] }) {
 
     for (const city of ranked) {
       const pt = map.latLngToContainerPoint([city.lat, city.lon])
-      const r = Math.max(6, Math.min(30, Math.sqrt(city.articleCount) * 1.2))
+      const r = 9 // matches MARKER_RADIUS — all markers are uniform now
       // Try 4 directions; pick the first one that doesn't overlap another LABEL.
       // We allow the label to touch other markers (those are small enough that
       // it doesn't hurt readability, and we'd rather show the label than drop it).
@@ -494,7 +319,7 @@ function CollisionAwareLabels({ cities }: { cities: CityNode[] }) {
           containerX={p.px}
           containerY={p.py}
           direction={p.dir}
-          radius={Math.max(6, Math.min(30, Math.sqrt(p.city.articleCount) * 1.2))}
+          radius={9}
         />
       ))}
     </>
@@ -537,14 +362,11 @@ function CityLabelDOM({
           text-shadow: 0 0 3px #0f0f0f, 0 0 5px #0f0f0f;
           font-family: 'Inter', sans-serif;
           text-align: center;
-        ">
-          ${city.name}<br>
-          <span style="font-size: 10px; color: #a1a1a1; font-weight: 500;">${city.articleCount} articles</span>
-        </div>`
+        ">${city.name}</div>`
       )
     tooltip.addTo(map)
     return () => { try { tooltip.remove() } catch { /* ignore */ } }
-  }, [map, city.lat, city.lon, city.name, city.articleCount, radius, direction])
+  }, [map, city.lat, city.lon, city.name, radius, direction])
   return null
 }
 
@@ -581,21 +403,4 @@ function FitBoundsToGeoJSON({ data }: { data: GeoJSON.FeatureCollection }) {
     }
   }, [map, data])
   return null
-}
-
-function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
-  return (
-    <div style={{
-      background: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: 6,
-      padding: '10px 12px', textAlign: 'center',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, color: 'var(--text-2)', marginBottom: 4 }}>
-        {icon}
-      </div>
-      <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-1)', lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 10, color: 'var(--text-3)', marginTop: 4, textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>
-        {label}
-      </div>
-    </div>
-  )
 }

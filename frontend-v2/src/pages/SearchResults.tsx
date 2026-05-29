@@ -1,25 +1,20 @@
 /**
  * Search results page — full-text search across all articles via /api/search
- * (SQLite FTS5, 16k+ indexed rows). Narratives and entities remain client-side
- * filtered since they're small datasets.
+ * (Postgres tsvector / GIN, 21k+ indexed rows). Narratives stay client-side
+ * filtered since the dataset is small (<200 frames).
+ *
+ * The entity tab was removed 2026-05-29: it was backed by MOCK_ENTITIES and
+ * clicking a result navigated to /entity-network, which the KG-policy
+ * retreat redirects to /. See CLAUDE.md "KG / entity-extraction policy".
  */
-import { Building2, Calendar, FileText, Inbox, Layers, MapPin, Search as SearchIcon, Sparkles, User } from 'lucide-react'
+import { Inbox, Layers, Search as SearchIcon } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '@/api/client'
-import { entities as MOCK_ENTITIES, type Entity, type EntityType } from '@/data/entityNetworkMock'
 import type { NarrativeFrame, SourceItem } from '@/api/types'
 import { formatArticleDate } from '@/lib/formatDate'
 
-const TYPE_ICONS: Record<EntityType, typeof User> = {
-  person: User,
-  organization: Building2,
-  bill: FileText,
-  event: Calendar,
-  location: MapPin,
-}
-
-type Tab = 'all' | 'articles' | 'narratives' | 'entities'
+type Tab = 'all' | 'articles' | 'narratives'
 
 export function SearchResults() {
   const [params] = useSearchParams()
@@ -42,22 +37,17 @@ export function SearchResults() {
 
   const results = useMemo(() => {
     const term = q.toLowerCase()
-    if (!term) return { articles: [], frames: [], entities: [] as Entity[] }
+    if (!term) return { articles: [], frames: [] }
     return {
       articles,
       frames: frames.filter(f => f.name.toLowerCase().includes(term)),
-      entities: MOCK_ENTITIES.filter(e =>
-        e.name.toLowerCase().includes(term) ||
-        e.description.toLowerCase().includes(term)
-      ),
     }
   }, [q, articles, frames])
 
-  const total = results.articles.length + results.frames.length + results.entities.length
+  const total = results.articles.length + results.frames.length
   const visible = {
     articles: tab === 'all' || tab === 'articles' ? results.articles : [],
     frames: tab === 'all' || tab === 'narratives' ? results.frames : [],
-    entities: tab === 'all' || tab === 'entities' ? results.entities : [],
   }
 
   return (
@@ -78,7 +68,7 @@ export function SearchResults() {
         </div>
         {q && !loading && (
           <div style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 6 }}>
-            {total} {total === 1 ? 'result' : 'results'} across articles, narratives, and entities
+            {total} {total === 1 ? 'result' : 'results'} across articles and narratives
           </div>
         )}
       </div>
@@ -90,7 +80,6 @@ export function SearchResults() {
             { v: 'all', label: 'All', count: total },
             { v: 'articles', label: 'Articles', count: results.articles.length },
             { v: 'narratives', label: 'Narratives', count: results.frames.length },
-            { v: 'entities', label: 'Entities', count: results.entities.length },
           ] as const).map(t => {
             const active = tab === t.v
             return (
@@ -178,35 +167,6 @@ export function SearchResults() {
         </ResultSection>
       )}
 
-      {visible.entities.length > 0 && (
-        <ResultSection icon={<Sparkles size={14} />} label="Entities" count={visible.entities.length}>
-          {visible.entities.map(e => {
-            const Icon = TYPE_ICONS[e.type]
-            return (
-              <Link
-                key={e.id}
-                to={`/entity-network?focus=${e.id}`}
-                style={resultRowStyle}
-                onMouseEnter={ev => { (ev.currentTarget as HTMLElement).style.background = 'var(--bg-2)' }}
-                onMouseLeave={ev => { (ev.currentTarget as HTMLElement).style.background = 'transparent' }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Icon size={14} style={{ color: 'var(--text-3)' }} />
-                  <span style={{ fontSize: 14, color: 'var(--text-1)', fontWeight: 500 }}>
-                    {e.name}
-                  </span>
-                  <span style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', fontWeight: 600 }}>
-                    {e.type}
-                  </span>
-                </div>
-                <div style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 4 }}>
-                  {e.description}
-                </div>
-              </Link>
-            )
-          })}
-        </ResultSection>
-      )}
     </div>
   )
 }
