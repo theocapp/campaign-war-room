@@ -30,6 +30,8 @@ def _build_context(db: Session) -> dict:
             "location": "Unknown",
             "opponents": ["Unknown"],
             "issues": [],
+            "district": None,
+            "geography_keywords": [],
         }
 
     priorities = []
@@ -48,13 +50,102 @@ def _build_context(db: Session) -> dict:
         + (f", {config.district}" if config.district else "")
     )
 
+    geo_keywords: list[str] = []
+    gk_raw = getattr(config, "geography_keywords", None) or ""
+    try:
+        gk = json.loads(gk_raw) if isinstance(gk_raw, str) else gk_raw
+        if isinstance(gk, list):
+            geo_keywords = [str(k).strip() for k in gk if str(k).strip()]
+    except Exception:
+        pass
+
     return {
         "candidate": config.candidate_name or "Unknown",
         "race": race,
         "location": config.location or config.district or "Unknown",
         "opponents": [o.name for o in opponents] if opponents else ["Unknown"],
         "issues": [str(p) for p in priorities if p],
+        "district": (config.district or "").strip() or None,
+        "geography_keywords": geo_keywords,
     }
+
+
+def _name_tokens(full_name: str) -> list[str]:
+    """Return name + last + first tokens for substring matching."""
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return []
+    out = [full_name.strip()]
+    if len(parts) > 1:
+        out.append(parts[-1])  # surname
+        out.append(parts[0])   # first name
+    return out
+
+
+def _race_mention_tokens(ctx: dict) -> set[str]:
+    """Build the set of tokens that count as 'this article touches the race'.
+
+    Mirrors the gating logic in article_perspective._mentions_race. Includes
+    candidate + opponent names (and their surname/first-name variants), the
+    district code (e.g. 'PA-08'), and any geography_keywords from config
+    that are specific enough not to fire on generic content.
+    """
+    tokens: set[str] = set()
+    for name in [ctx.get("candidate"), *ctx.get("opponents", [])]:
+        if not name or name == "Unknown":
+            continue
+        for t in _name_tokens(name):
+            if t and len(t) >= 3:
+                tokens.add(t.lower())
+    district = ctx.get("district")
+    if district and len(district) >= 3:
+        tokens.add(district.lower())
+    for term in ctx.get("geography_keywords", []) or []:
+        s = str(term).strip().lower()
+        # Skip overly-generic tokens that match unrelated content.
+        if len(s) < 4 or s in {"pa", "n/a", "none"}:
+            continue
+        if len(s) > 50:
+            s = s.split(".")[0].split(",")[0].strip()
+        if len(s) >= 4:
+            tokens.add(s)
+    return tokens
+
+
+def _mentions_race(item: SourceItem, tokens: set[str]) -> bool:
+    """True if article title/summary/body contains any race-identifying token."""
+    if not tokens:
+        return True  # no tokens to check → degrade safely
+    blob = " ".join([
+        (item.title or ""),
+        (item.summary or ""),
+        (item.raw_text or "")[:2000],
+    ]).lower()
+    return any(t in blob for t in tokens if t)
+
+
+def _count_name_mentions(item: SourceItem, ctx: dict) -> tuple[int, int]:
+    """Return (title_mentions, body_mentions) of candidate/opponent names.
+
+    Used by the finer-grained scoring. Counts distinct names in title vs.
+    body — not occurrences (so an article that says "Cognetti" 20 times
+    counts the same as one that says it 3 times).
+    """
+    names = [ctx.get("candidate")] + list(ctx.get("opponents", []))
+    name_tokens: list[str] = []
+    for n in names:
+        if not n or n == "Unknown":
+            continue
+        for t in _name_tokens(n):
+            if t and len(t) >= 3:
+                name_tokens.append(t.lower())
+
+    title = (item.title or "").lower()
+    body = ((item.summary or "") + " " + (item.raw_text or "")[:3000]).lower()
+
+    title_hits = sum(1 for t in set(name_tokens) if t in title)
+    body_hits = sum(1 for t in set(name_tokens) if t in body)
+    return title_hits, body_hits
 
 
 def _article_text(item: SourceItem, max_words: int = 8000) -> tuple[str, bool]:
@@ -403,14 +494,69 @@ _VALID_TEMPORAL = {"past", "present", "future"}
 _VALID_ATTRIBUTION = {"direct_quote", "paraphrased", "reported", "unattributed"}
 _VALID_NEW_OWNER = {"candidate", "opponent", "media"}
 
-# Maps verdict tier → race_relevance_score. Preserves the 0-100 column without
-# pretending to 100 levels of precision — there are only 4 real tiers.
-_VERDICT_TO_SCORE = {
+# Base score per verdict tier. The final race_relevance_score combines this
+# with name-mention bonuses, claim count/confidence, and a cap when the LLM
+# claims a relevant verdict on an article that doesn't actually name anyone
+# in the race (catches hallucinated relevance — see _compute_relevance_score).
+_VERDICT_BASE_SCORE = {
     "irrelevant": 0,
-    "loosely_related": 25,
-    "relevant": 65,
-    "critical": 90,
+    "loosely_related": 20,
+    "relevant": 50,
+    "critical": 75,
 }
+
+# Floor for the LLM-fallback / gate path. Kept separate so callers (e.g. the
+# rescore worker) can still distinguish "we judged this irrelevant" from
+# "we never asked the LLM".
+_GATE_SCORE = 0
+
+
+def _compute_relevance_score(
+    verdict: str,
+    item: SourceItem,
+    ctx: dict,
+    cleaned_claims: list[dict],
+    source_credibility: str,
+) -> int:
+    """Combine verdict tier + name mentions + claim quality into a 0-100 score.
+
+    Replaces the old 4-bucket _VERDICT_TO_SCORE. The base is still the verdict
+    tier, but on-topic articles (candidate in headline) score meaningfully
+    higher than borderline ones, and articles that the LLM marked relevant
+    without actually naming a candidate get capped (catches the hallucination
+    case where the model writes a summary about Bresnahan from an article
+    that's really about someone else).
+    """
+    base = _VERDICT_BASE_SCORE.get(verdict, 0)
+    if verdict == "irrelevant":
+        return 0
+
+    title_hits, body_hits = _count_name_mentions(item, ctx)
+
+    # Candidate/opponent named in the headline is the strongest signal that
+    # the article is genuinely about this race. +12 per distinct name, cap +20.
+    title_bonus = min(20, title_hits * 12)
+    # Body mention is a weaker but still positive signal. +4 per name, cap +8.
+    body_bonus = min(8, body_hits * 4)
+
+    # Claim quality — high-confidence extracted claims push the score up.
+    # Capped so a verbose article with many low-conf claims doesn't dominate.
+    high_conf = sum(1 for c in cleaned_claims if c.get("confidence") == "high")
+    med_conf = sum(1 for c in cleaned_claims if c.get("confidence") == "medium")
+    claim_bonus = min(10, high_conf * 3 + med_conf * 1)
+
+    cred_bonus = 3 if source_credibility == "high" else 0
+
+    score = base + title_bonus + body_bonus + claim_bonus + cred_bonus
+
+    # Hallucination cap: if the LLM said relevant/critical but neither
+    # candidate nor opponent is named anywhere in the article, the verdict
+    # is suspect. Cap at 40 (medium-low) so the article still surfaces if a
+    # human wants to review it, but doesn't get featured as headline-relevant.
+    if verdict in ("relevant", "critical") and title_hits == 0 and body_hits == 0:
+        score = min(score, 40)
+
+    return max(0, min(100, score))
 
 
 def _normalize_text(s: str) -> str:
@@ -679,6 +825,50 @@ def analyze_with_frames(
             return _fallback_result()
 
         ctx = _build_context(db)
+
+        # Pre-LLM race-mention gate. If the article doesn't contain any
+        # candidate/opponent name, district code, or specific geography
+        # keyword, skip the LLM call entirely — these are off-topic articles
+        # the ingestion prefilter sometimes lets through (e.g. a Fox News
+        # piece on faith in higher education that happens to mention
+        # "Pennsylvania"). Returning a clean irrelevant verdict here saves
+        # the LLM cost AND prevents the model from inventing relevance.
+        # NOTE: we set _used_fallback=False so ingestion treats this as a
+        # successful judgment ("irrelevant") and does NOT fall back to the
+        # keyword scorer — which would re-score the article from scratch
+        # and could give it a positive score.
+        gate_tokens = _race_mention_tokens(ctx)
+        if gate_tokens and not _mentions_race(item, gate_tokens):
+            logger.info(
+                "campaign_analysis: gate fired for item=%d (no race mention) "
+                "title=%r",
+                item.id, (item.title or "")[:80],
+            )
+            return {
+                "verdict": "irrelevant",
+                "summary": None,
+                "campaign_action": "ignore",
+                "needs_attention": False,
+                "needs_attention_reason": None,
+                "sentiment_new": "neutral",
+                "source_credibility": "medium",
+                "extracted_claims": [],
+                "relevance_score": 0,
+                "relevant": False,
+                "one_sentence": None,
+                "framing": "irrelevant",
+                "reason": (
+                    "Pre-LLM gate: article does not mention candidate, "
+                    "opponent, district, or campaign-specific geography."
+                ),
+                "sentiment": "neutral",
+                "opponent_attacks": [],
+                "frame_matches": [],
+                "candidate_new_frames": [],
+                "_used_fallback": False,
+                "_gated_no_race_mention": True,
+            }
+
         # Pull frames here if caller didn't pass them — the v2 prompt needs
         # the full list to do candidate_new_frame correctly.
         if frames is None:
@@ -754,6 +944,14 @@ def analyze_with_frames(
             if isinstance(raw_claims, list) else 0
         )
 
+        # Compute the finer-grained relevance score. Combines verdict tier
+        # with name mentions, claim quality, and source credibility — and
+        # caps articles where the LLM claimed relevance but no candidate
+        # is actually named (catches hallucinated relevance).
+        relevance_score = _compute_relevance_score(
+            verdict, item, ctx, cleaned_claims, source_credibility,
+        )
+
         # ---- assemble result ----
         result = {
             # v2 native fields
@@ -766,8 +964,8 @@ def analyze_with_frames(
             "source_credibility": source_credibility,
             "extracted_claims": cleaned_claims,
             # back-compat fields (computed) — keep _rescore_one & ingestion working
-            "relevance_score": _VERDICT_TO_SCORE[verdict],
-            "relevant": verdict in ("relevant", "critical"),
+            "relevance_score": relevance_score,
+            "relevant": verdict in ("relevant", "critical") and relevance_score >= 40,
             "one_sentence": summary,
             "framing": _v2_action_to_legacy_framing(campaign_action, sentiment_v2),
             "reason": needs_attention_reason or "",

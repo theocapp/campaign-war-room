@@ -1,0 +1,320 @@
+{
+  "district": "PA-08",
+  "schema_version": 1,
+  "notes": "Pre-populated canonical entities for the PA-08 race. Extraction pipeline matches mentions against this list first to avoid duplicating known entities. Add new races by creating canonical_entities.<DISTRICT>.json with the same shape.",
+
+  "entities": [
+    {
+      "canonical_id": "person:cognetti",
+      "type": "person",
+      "name": "Paige Cognetti",
+      "aliases": [
+        "Cognetti", "Mayor Cognetti", "Paige", "Scranton Mayor Cognetti", "Mayor Paige Cognetti",
+        "Paige Gebhardt Cognetti", "Paige Gebhardt", "Gebhardt Cognetti"
+      ],
+      "description": "Democratic candidate, PA-08. Mayor of Scranton. Maiden name: Gebhardt.",
+      "affiliation": "D",
+      "role": "candidate",
+      "city": "Scranton",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:bresnahan",
+      "type": "person",
+      "name": "Rob Bresnahan",
+      "aliases": ["Bresnahan", "Rep. Bresnahan", "Robert Bresnahan", "Robert Bresnahan Jr.", "Congressman Rob Bresnahan", "Rep. Rob Bresnahan"],
+      "description": "Republican incumbent, PA-08.",
+      "affiliation": "R",
+      "role": "incumbent",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:trump",
+      "type": "person",
+      "name": "Donald Trump",
+      "aliases": ["Trump", "President Trump", "President Donald Trump", "Donald J. Trump", "DJT"],
+      "description": "47th President of the United States (R).",
+      "affiliation": "R",
+      "role": "president"
+    },
+    {
+      "canonical_id": "person:shapiro",
+      "type": "person",
+      "name": "Josh Shapiro",
+      "aliases": ["Shapiro", "Governor Shapiro", "Gov. Shapiro"],
+      "description": "Governor of Pennsylvania (D).",
+      "affiliation": "D",
+      "role": "governor",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:vance",
+      "type": "person",
+      "name": "JD Vance",
+      "aliases": ["Vance", "VP Vance", "Vice President Vance", "J.D. Vance"],
+      "description": "Vice President of the United States (R).",
+      "affiliation": "R",
+      "role": "vice_president"
+    },
+    {
+      "canonical_id": "person:cartwright",
+      "type": "person",
+      "name": "Matt Cartwright",
+      "aliases": ["Cartwright", "Former Rep. Cartwright", "Matthew Cartwright"],
+      "description": "Former U.S. Representative for PA-08 (D). Lost to Bresnahan in 2024.",
+      "affiliation": "D",
+      "role": "former_congressman",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:johnson_mike",
+      "type": "person",
+      "name": "Mike Johnson",
+      "aliases": ["Speaker Johnson", "Speaker Mike Johnson"],
+      "description": "Speaker of the U.S. House of Representatives (R).",
+      "affiliation": "R",
+      "role": "house_speaker"
+    },
+    {
+      "canonical_id": "person:jeffries",
+      "type": "person",
+      "name": "Hakeem Jeffries",
+      "aliases": ["Jeffries", "Minority Leader Jeffries", "Leader Jeffries"],
+      "description": "U.S. House Minority Leader (D).",
+      "affiliation": "D",
+      "role": "house_minority_leader"
+    },
+    {
+      "canonical_id": "person:fetterman",
+      "type": "person",
+      "name": "John Fetterman",
+      "aliases": ["Fetterman", "Sen. Fetterman"],
+      "description": "U.S. Senator from Pennsylvania (D).",
+      "affiliation": "D",
+      "role": "senator",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:mccormick",
+      "type": "person",
+      "name": "Dave McCormick",
+      "aliases": ["McCormick", "Sen. McCormick", "David McCormick"],
+      "description": "U.S. Senator from Pennsylvania (R).",
+      "affiliation": "R",
+      "role": "senator",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:casey",
+      "type": "person",
+      "name": "Bob Casey",
+      "aliases": ["Casey", "Former Sen. Casey", "Robert Casey"],
+      "description": "Former U.S. Senator from Pennsylvania (D).",
+      "affiliation": "D",
+      "role": "former_senator",
+      "state": "PA"
+    },
+    {
+      "canonical_id": "person:krawczeniuk",
+      "type": "person",
+      "name": "Borys Krawczeniuk",
+      "aliases": ["Krawczeniuk"],
+      "description": "Political reporter, Scranton Times-Tribune.",
+      "affiliation": null,
+      "role": "journalist",
+      "state": "PA"
+    },
+
+    {
+      "canonical_id": "org:nrcc",
+      "type": "organization",
+      "name": "NRCC",
+      "aliases": ["National Republican Congressional Committee", "N.R.C.C."],
+      "description": "National Republican Congressional Committee — the Republican House campaign arm.",
+      "subtype": "party_committee",
+      "affiliation": "R"
+    },
+    {
+      "canonical_id": "org:dccc",
+      "type": "organization",
+      "name": "DCCC",
+      "aliases": ["Democratic Congressional Campaign Committee", "D.C.C.C."],
+      "description": "Democratic Congressional Campaign Committee.",
+      "subtype": "party_committee",
+      "affiliation": "D"
+    },
+    {
+      "canonical_id": "org:emilys_list",
+      "type": "organization",
+      "name": "EMILY's List",
+      "aliases": ["EMILYs List", "EMILY List"],
+      "description": "Pro-choice Democratic women candidate PAC.",
+      "subtype": "pac",
+      "affiliation": "D"
+    },
+    {
+      "canonical_id": "org:club_for_growth",
+      "type": "organization",
+      "name": "Club for Growth",
+      "aliases": [],
+      "description": "Conservative anti-tax advocacy PAC.",
+      "subtype": "pac",
+      "affiliation": "R"
+    },
+    {
+      "canonical_id": "org:aflcio",
+      "type": "organization",
+      "name": "AFL-CIO",
+      "aliases": ["AFL CIO", "American Federation of Labor"],
+      "description": "Labor federation; major Dem-aligned union umbrella.",
+      "subtype": "union",
+      "affiliation": "D"
+    },
+    {
+      "canonical_id": "org:freedom_caucus",
+      "type": "organization",
+      "name": "House Freedom Caucus",
+      "aliases": ["Freedom Caucus"],
+      "description": "Conservative House Republican caucus.",
+      "subtype": "caucus",
+      "affiliation": "R"
+    },
+    {
+      "canonical_id": "org:heritage",
+      "type": "organization",
+      "name": "Heritage Foundation",
+      "aliases": ["Heritage"],
+      "description": "Conservative policy think tank. Project 2025 author.",
+      "subtype": "think_tank",
+      "affiliation": "R"
+    },
+    {
+      "canonical_id": "org:scranton_times",
+      "type": "organization",
+      "name": "Scranton Times-Tribune",
+      "aliases": ["Times-Tribune", "The Times-Tribune", "thetimes-tribune.com", "Scranton Times"],
+      "description": "Local newspaper of record for PA-08.",
+      "subtype": "news",
+      "affiliation": null,
+      "home_state": "PA"
+    },
+    {
+      "canonical_id": "org:times_leader",
+      "type": "organization",
+      "name": "Times Leader",
+      "aliases": ["Wilkes-Barre Times Leader", "The Times Leader", "timesleader.com"],
+      "description": "Daily newspaper covering Wilkes-Barre and Luzerne County (PA-08).",
+      "subtype": "news",
+      "affiliation": null,
+      "home_state": "PA"
+    },
+    {
+      "canonical_id": "org:pa_capital_star",
+      "type": "organization",
+      "name": "Pennsylvania Capital-Star",
+      "aliases": ["Capital-Star", "PA Capital-Star", "Pennsylvania Capital Star"],
+      "description": "Statewide news outlet covering Pennsylvania politics.",
+      "subtype": "news",
+      "affiliation": null,
+      "home_state": "PA"
+    },
+
+    {
+      "canonical_id": "loc:scranton",
+      "type": "location",
+      "name": "Scranton",
+      "aliases": ["Scranton, PA"],
+      "description": "Largest city in PA-08. Cognetti is mayor. Lackawanna County seat.",
+      "location_type": "city",
+      "state": "PA",
+      "parent_id": "loc:lackawanna"
+    },
+    {
+      "canonical_id": "loc:wilkes-barre",
+      "type": "location",
+      "name": "Wilkes-Barre",
+      "aliases": ["Wilkes Barre", "Wilkes-Barre, PA"],
+      "description": "Second-largest city in PA-08. Luzerne County seat.",
+      "location_type": "city",
+      "state": "PA",
+      "parent_id": "loc:luzerne"
+    },
+    {
+      "canonical_id": "loc:hazleton",
+      "type": "location",
+      "name": "Hazleton",
+      "aliases": ["Hazleton, PA"],
+      "description": "Southern PA-08 city with significant Latino population.",
+      "location_type": "city",
+      "state": "PA",
+      "parent_id": "loc:luzerne"
+    },
+    {
+      "canonical_id": "loc:lackawanna",
+      "type": "location",
+      "name": "Lackawanna County",
+      "aliases": ["Lackawanna", "Lackawanna Co."],
+      "description": "Northern PA-08 county. Contains Scranton.",
+      "location_type": "county",
+      "state": "PA",
+      "parent_id": "loc:pa-08"
+    },
+    {
+      "canonical_id": "loc:luzerne",
+      "type": "location",
+      "name": "Luzerne County",
+      "aliases": ["Luzerne", "Luzerne Co."],
+      "description": "Central PA-08 county. Contains Wilkes-Barre and Hazleton.",
+      "location_type": "county",
+      "state": "PA",
+      "parent_id": "loc:pa-08"
+    },
+    {
+      "canonical_id": "loc:pa-08",
+      "type": "location",
+      "name": "PA-08",
+      "aliases": ["Pennsylvania 8th Congressional District", "PA-8", "8th District", "PA's 8th"],
+      "description": "Pennsylvania's 8th Congressional District. Northeastern PA covering Lackawanna, Luzerne, and parts of Monroe / Wayne / Pike counties.",
+      "location_type": "district",
+      "state": "PA",
+      "parent_id": null
+    },
+
+    {
+      "canonical_id": "bill:aca-subsidies",
+      "type": "bill",
+      "name": "ACA Subsidy Extension",
+      "aliases": ["Affordable Care Act subsidies", "ACA premium subsidies", "Obamacare subsidies"],
+      "description": "Bipartisan bill to extend Affordable Care Act premium subsidies. Major partisan flashpoint.",
+      "status": "pending",
+      "congress_session": "119"
+    },
+    {
+      "canonical_id": "bill:medicaid-cuts",
+      "type": "bill",
+      "name": "Federal Medicaid Cuts",
+      "aliases": ["Medicaid reductions", "Medicaid scaleback", "Medicaid funding cuts"],
+      "description": "Proposed reductions to federal Medicaid funding tied to budget reconciliation.",
+      "status": "pending",
+      "congress_session": "119"
+    },
+    {
+      "canonical_id": "bill:stock-act",
+      "type": "bill",
+      "name": "Congressional Stock Trading Ban",
+      "aliases": ["STOCK Act reform", "stock trading ban", "congressional stock ban"],
+      "description": "Bipartisan effort to ban active stock trading by sitting members of Congress.",
+      "status": "pending",
+      "congress_session": "119"
+    },
+    {
+      "canonical_id": "bill:tax-cuts",
+      "type": "bill",
+      "name": "Trump Tax Cut Extension",
+      "aliases": ["TCJA extension", "2017 tax cut extension", "Trump tax cuts"],
+      "description": "Extension of the 2017 Tax Cuts and Jobs Act provisions, set to expire without action.",
+      "status": "pending",
+      "congress_session": "119"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "race": "PA-08",
+  "schema_version": 1,
+  "notes": "Known role transitions for entities involved in the PA-08 race. The apply script sets valid_from / valid_to on matching EntityRelation rows. Only `represents` and `predecessor_of` transitions are captured here — those are the role-bound predicates in our 9-verb ontology. Predicates like 'president of' or 'governor of' would need new predicates we haven't defined yet.",
+
+  "transitions": [
+    {
+      "subject_canonical_id": "person:cartwright",
+      "predicate": "represents",
+      "object_canonical_id": "loc:pa-08",
+      "valid_from": "2013-01-03",
+      "valid_to": "2025-01-03",
+      "note": "Lost re-election to Bresnahan in 2024",
+      "create_if_missing": true
+    },
+    {
+      "subject_canonical_id": "person:bresnahan",
+      "predicate": "represents",
+      "object_canonical_id": "loc:pa-08",
+      "valid_from": "2025-01-03",
+      "valid_to": null,
+      "note": "Current incumbent (R, PA-08)",
+      "create_if_missing": true
+    },
+    {
+      "subject_canonical_id": "person:cognetti",
+      "predicate": "represents",
+      "object_canonical_id": "loc:scranton",
+      "valid_from": "2020-01-06",
+      "valid_to": null,
+      "note": "Mayor of Scranton, current",
+      "create_if_missing": true
+    },
+    {
+      "subject_canonical_id": "person:bresnahan",
+      "predicate": "predecessor_of",
+      "object_canonical_id": "person:cartwright",
+      "valid_from": "2025-01-03",
+      "valid_to": null,
+      "note": "Bresnahan succeeded Cartwright in PA-08 in 2025. By the predicate's direction ('predecessor_of'), this means Bresnahan came AFTER Cartwright in the role — semantics depend on how the seed prompt defined it. Mark for review.",
+      "create_if_missing": false
+    }
+  ]
+}

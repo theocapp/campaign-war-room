@@ -59,17 +59,31 @@ def _norm(value: str | None) -> str:
 
 
 def _name_tokens(name: str | None) -> list[str]:
-    """Extract searchable tokens from a name, handling FEC 'LAST, FIRST' format.
+    """Extract the surname token, handling FEC 'LAST, FIRST' format.
 
-    'COGNETTI, PAIGE' → ['cognetti', 'paige']
-    'Rob Bresnahan'   → ['rob', 'bresnahan']
+    Returns only the surname to avoid false positives where a candidate's
+    first name collides with unrelated people (e.g. 'Rob Bresnahan' matching
+    LA-Times stories about 'Rob Bonta' or 'Rob Base'). Distinctive surnames
+    carry the signal; first names burn LLM calls for no gain.
+
+    'COGNETTI, PAIGE'      → ['cognetti']
+    'Rob Bresnahan'        → ['bresnahan']
+    'Robert F. Kennedy Jr.' → ['kennedy']
     """
     if not name:
         return []
-    # Strip punctuation, lowercase, split
-    tokens = [re.sub(r'[^a-z]', '', t) for t in name.lower().split()]
     skip = {'jr', 'sr', 'mr', 'ms', 'dr', 'rep', 'sen', 'hon', 'ii', 'iii'}
-    return [t for t in tokens if len(t) > 2 and t not in skip]
+
+    # FEC format: "LAST, FIRST [MIDDLE]" — surname is the part before the comma
+    if ',' in name:
+        surname_part = name.split(',', 1)[0]
+        candidates = [re.sub(r'[^a-z]', '', t) for t in surname_part.lower().split()]
+    else:
+        # Natural format — surname is the last meaningful token
+        candidates = [re.sub(r'[^a-z]', '', t) for t in name.lower().split()]
+
+    surname_tokens = [t for t in candidates if len(t) > 2 and t not in skip]
+    return surname_tokens[-1:] if surname_tokens else []
 
 
 def _contains_name(text: str, name: str | None) -> bool:

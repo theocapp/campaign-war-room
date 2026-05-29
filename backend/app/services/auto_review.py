@@ -9,16 +9,19 @@ high-confidence cases.
 
 Thresholds
 ----------
+(Match the AUTO_APPROVE_SCORE / STRONG_ACTION_SCORE / AUTO_DISMISS_SCORE
+constants below — keep this docstring in sync if you change them.)
+
 Auto-approve  (reviewed=True):
-  - race_relevance_score >= 70   (AI very confident it's relevant)
-  - OR actionability_label in {"respond", "review"} with score >= 60
+  - race_relevance_score >= 55   (AI confident it's relevant)
+  - OR actionability_label in {"respond", "review"} with score >= 40
     (AI explicitly flagged these as worth acting on)
 
 Auto-dismiss  (dismissed=True, archived_as_irrelevant=True):
-  - race_relevance_score < 40 AND actionability_label = "ignore"
+  - race_relevance_score < 30 AND actionability_label = "ignore"
     (AI confident it's not relevant to the race)
 
-Manual queue  (everything else: score 40–69 without strong label)
+Manual queue  (everything else: score 30–54 without strong label)
 """
 
 import logging

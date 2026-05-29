@@ -22,7 +22,11 @@ from app.models import (
 )
 from app.services import campaign_analysis, llm_provider
 from app.services.campaign_analysis import _validate_opponent_attacks, analyze, analyze_with_frames
-from app.services.ingestion import _persist_opponent_attacks, _persist_frame_matches
+
+# Note: tests for `_persist_opponent_attacks` and `_persist_frame_matches`
+# were removed when those functions were consolidated into the
+# cluster-native `_persist_cluster_native` helper. Cluster-native persistence
+# is exercised end-to-end by the merge backfill regression tests.
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -123,9 +127,15 @@ def test_validate_attacks_handles_non_list_input():
 
 
 def test_analyze_returns_validated_attacks(cognetti_db, monkeypatch):
+    """v2 shape: stub returns an extracted_claims list with a personal_attack
+    claim whose `quote` substring is present in the article body. The legacy
+    `opponent_attacks` field is derived from extracted_claims by claim_type."""
     item = SourceItem(
         title="Bresnahan slams Cognetti on healthcare",
-        raw_text="Rob Bresnahan today attacked his opponent over recent votes.",
+        raw_text=(
+            "Rob Bresnahan today attacked his opponent over recent votes. "
+            "He called her healthcare record reckless during a Scranton event."
+        ),
         source_name="Times-Tribune",
         source_type="news",
     )
@@ -133,123 +143,97 @@ def test_analyze_returns_validated_attacks(cognetti_db, monkeypatch):
     cognetti_db.commit()
 
     stub = _StubProvider(json.dumps({
-        "relevant": True,
-        "relevance_score": 85,
-        "one_sentence": "Bresnahan attacked Cognetti's healthcare record at a Scranton event.",
-        "framing": "opponent_news",
-        "needs_attention": False,
-        "reason": "Direct opponent activity in the district.",
-        "opponent_attacks": [
+        "verdict": "critical",
+        "summary": "Bresnahan attacked Cognetti's healthcare record at a Scranton event.",
+        "campaign_action": "respond",
+        "sentiment": "favors_opponent",
+        "source_credibility": "high",
+        "needs_attention": True,
+        "needs_attention_reason": "Direct opponent activity in the district.",
+        "extracted_claims": [
             {
-                "opponent_name": "Rob Bresnahan",
-                "type": "attack",
-                "text": "Bresnahan called Cognetti's healthcare record reckless.",
+                "actor_name": "Rob Bresnahan",
+                "actor_role": "opponent",
+                "claim_type": "personal_attack",
+                "quote": "called her healthcare record reckless during a Scranton event",
+                "confidence": "high",
             }
         ],
     }))
-    monkeypatch.setattr(campaign_analysis, "get_provider", lambda: stub, raising=False)
-    # The function imports get_provider locally inside analyze(), so patch the
-    # actual module-level symbol.
-    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+    # `analyze` imports `get_ingestion_provider` locally from llm_provider —
+    # patch the symbol on the llm_provider module so the local import
+    # resolves to our stub.
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: stub)
 
     result = analyze(cognetti_db, item)
 
     assert result["_used_fallback"] is False
-    assert result["relevance_score"] == 85
+    assert result["verdict"] == "critical"
+    # critical base (75) + both candidate+opponent in title (+20 capped) +
+    # both names in body (+8 capped) + high-conf claim (+3) + high source
+    # credibility (+3) = 109 → capped to 100. See _compute_relevance_score.
+    assert result["relevance_score"] == 100
     assert result["relevant"] is True
-    assert result["reason"] == "Direct opponent activity in the district."
+    assert result["needs_attention_reason"] == "Direct opponent activity in the district."
+    # opponent_attacks is derived from extracted_claims (personal_attack → attack)
     assert len(result["opponent_attacks"]) == 1
     assert result["opponent_attacks"][0]["type"] == "attack"
+    assert result["opponent_attacks"][0]["opponent_name"] == "Rob Bresnahan"
 
 
 def test_analyze_falls_back_on_invalid_json(cognetti_db, monkeypatch):
-    item = SourceItem(title="x", raw_text="x", source_name="x", source_type="news")
+    # Article must mention candidate/opponent to bypass the pre-LLM race-mention
+    # gate; otherwise we never get to the JSON parse path being tested here.
+    item = SourceItem(
+        title="Cognetti event",
+        raw_text="Paige Cognetti held a campaign event.",
+        source_name="x", source_type="news",
+    )
     cognetti_db.add(item)
     cognetti_db.commit()
 
-    monkeypatch.setattr(llm_provider, "get_provider", lambda: _StubProvider("not json"))
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: _StubProvider("not json"))
 
     result = analyze(cognetti_db, item)
     assert result["_used_fallback"] is True
     assert result["opponent_attacks"] == []
 
 
-# ── _persist_opponent_attacks ─────────────────────────────────────────────────
-
-
-def test_persist_attacks_inserts_rows(cognetti_db):
-    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
+def test_analyze_gate_skips_llm_when_no_race_mention(cognetti_db, monkeypatch):
+    """Pre-LLM gate: articles without any candidate/opponent/district mention
+    return irrelevant immediately, without invoking the LLM provider."""
+    item = SourceItem(
+        title="Mets drop series to Diamondbacks",
+        raw_text="The Mets lost their third straight game to Arizona last night.",
+        source_name="ESPN", source_type="news",
+    )
     cognetti_db.add(item)
     cognetti_db.commit()
 
-    inserted = _persist_opponent_attacks(cognetti_db, item, [
-        {"opponent_name": "Rob Bresnahan", "type": "attack", "text": "He attacked the bill."},
-        {"opponent_name": "Rob Bresnahan", "type": "promise", "text": "He promised lower taxes."},
-    ])
-    cognetti_db.commit()
+    # If the gate works, the provider is never called. Raise loudly if it is.
+    def _boom():
+        raise AssertionError("LLM provider should not be invoked by the gate")
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: _boom() or None)
 
-    assert inserted == 2
-    activities = cognetti_db.query(OpponentActivity).filter_by(source_item_id=item.id).all()
-    assert len(activities) == 2
-    types_seen = {("attack" if a.attack else "promise" if a.promise else "claim") for a in activities}
-    assert types_seen == {"attack", "promise"}
+    # We need the provider getter to actually be called to be sure — but the
+    # gate runs AFTER get_ingestion_provider() resolves. So instead, install
+    # a stub that records whether complete() was called.
+    calls: list[str] = []
+    class _RecordingStub(_StubProvider):
+        def complete(self, prompt: str) -> str:
+            calls.append(prompt)
+            return "{}"
+    monkeypatch.setattr(
+        llm_provider, "get_ingestion_provider", lambda: _RecordingStub("{}"),
+    )
 
-
-def test_persist_attacks_skips_unknown_opponent(cognetti_db):
-    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
-    cognetti_db.add(item)
-    cognetti_db.commit()
-
-    inserted = _persist_opponent_attacks(cognetti_db, item, [
-        {"opponent_name": "Unknown Person", "type": "attack", "text": "X"},
-    ])
-    assert inserted == 0
-    assert cognetti_db.query(OpponentActivity).count() == 0
-
-
-def test_persist_attacks_dedups_against_existing_rows(cognetti_db):
-    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
-    cognetti_db.add(item)
-    cognetti_db.commit()
-
-    opponent = cognetti_db.query(Opponent).first()
-    # Pre-existing identical activity on the same source.
-    cognetti_db.add(OpponentActivity(
-        opponent_id=opponent.id,
-        source_item_id=item.id,
-        attack="He attacked the bill.",
-    ))
-    cognetti_db.commit()
-
-    inserted = _persist_opponent_attacks(cognetti_db, item, [
-        {"opponent_name": "Rob Bresnahan", "type": "attack", "text": "He attacked the bill."},
-        {"opponent_name": "Rob Bresnahan", "type": "claim", "text": "He claimed the data was wrong."},
-    ])
-    cognetti_db.commit()
-
-    # First duplicate skipped, second (different fingerprint) inserted.
-    assert inserted == 1
-    assert cognetti_db.query(OpponentActivity).count() == 2
-
-
-def test_persist_attacks_strips_html(cognetti_db):
-    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
-    cognetti_db.add(item)
-    cognetti_db.commit()
-
-    _persist_opponent_attacks(cognetti_db, item, [
-        {
-            "opponent_name": "Rob Bresnahan",
-            "type": "attack",
-            "text": "Bresnahan&#x2019;s <a href=\"https://x.com\">attack</a> on the union deal",
-        }
-    ])
-    cognetti_db.commit()
-    activity = cognetti_db.query(OpponentActivity).filter_by(source_item_id=item.id).first()
-    assert activity is not None
-    assert "&#x2019;" not in activity.attack
-    assert "<a" not in activity.attack
-    assert "’" in activity.attack
+    result = analyze(cognetti_db, item)
+    assert calls == [], "gate should prevent LLM call for off-topic articles"
+    assert result["verdict"] == "irrelevant"
+    assert result["relevance_score"] == 0
+    assert result["relevant"] is False
+    assert result["_gated_no_race_mention"] is True
+    assert result["_used_fallback"] is False
 
 
 # ── Phase 1: combined call (sentiment + frame_matches) ────────────────────────
@@ -277,9 +261,13 @@ def frames_db(cognetti_db):
 
 
 def test_analyze_with_frames_returns_sentiment(frames_db, monkeypatch):
+    """v2 shape: sentiment is in `extracted_claims[].claim_type`-derived
+    fields PLUS a top-level `sentiment` enum that maps to legacy values.
+    frame_matches is derived from union of `matched_frames` (by name) on
+    cleaned claims."""
     item = SourceItem(
         title="Bresnahan attacks Cognetti on healthcare",
-        raw_text="Rob Bresnahan said Cognetti’s record is reckless.",
+        raw_text="Rob Bresnahan said Cognetti's record is reckless this morning.",
         source_name="Times-Tribune",
         source_type="news",
     )
@@ -287,28 +275,42 @@ def test_analyze_with_frames_returns_sentiment(frames_db, monkeypatch):
     frames_db.commit()
 
     frames = frames_db.query(NarrativeFrame).all()
+    frame_names = [f.name for f in frames]
     stub = _StubProvider(json.dumps({
-        "relevant": True,
-        "relevance_score": 80,
-        "one_sentence": "Bresnahan attacked Cognetti on healthcare.",
-        "framing": "hurts_candidate",
+        "verdict": "relevant",
+        "summary": "Bresnahan attacked Cognetti on healthcare.",
+        "campaign_action": "respond",
+        "sentiment": "favors_opponent",  # maps to legacy "negative"
+        "source_credibility": "high",
         "needs_attention": True,
-        "reason": "Direct opponent attack.",
-        "sentiment": "negative",
-        "opponent_attacks": [],
-        "frame_matches": [1, 2],
+        "needs_attention_reason": "Direct opponent attack.",
+        "extracted_claims": [
+            {
+                "actor_name": "Rob Bresnahan",
+                "actor_role": "opponent",
+                "claim_type": "personal_attack",
+                "quote": "Cognetti's record is reckless this morning",
+                "confidence": "high",
+                "matched_frames": frame_names,  # match both fixture frames
+            }
+        ],
     }))
-    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: stub)
 
     result = analyze_with_frames(frames_db, item, frames=frames)
 
     assert result["_used_fallback"] is False
-    assert result["sentiment"] == "negative"
-    assert result["frame_matches"] == [1, 2]
+    assert result["sentiment"] == "negative"  # derived from favors_opponent
+    assert set(result["frame_matches"]) == {f.id for f in frames}
 
 
 def test_analyze_with_frames_coerces_bad_sentiment(frames_db, monkeypatch):
-    item = SourceItem(title="x", raw_text="x", source_name="x", source_type="news")
+    # Mentions candidate so the pre-LLM race-mention gate doesn't fire.
+    item = SourceItem(
+        title="Cognetti speech",
+        raw_text="Paige Cognetti gave a speech.",
+        source_name="x", source_type="news",
+    )
     frames_db.add(item)
     frames_db.commit()
 
@@ -323,63 +325,55 @@ def test_analyze_with_frames_coerces_bad_sentiment(frames_db, monkeypatch):
         "opponent_attacks": [],
         "frame_matches": [],
     }))
-    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: stub)
 
     result = analyze_with_frames(frames_db, item, frames=[])
     assert result["sentiment"] == "neutral"
 
 
-def test_analyze_with_frames_ignores_out_of_range_indices(frames_db, monkeypatch):
-    item = SourceItem(title="x", raw_text="x", source_name="x", source_type="news")
+def test_analyze_with_frames_ignores_unknown_frame_names(frames_db, monkeypatch):
+    """v2 matches frames by NAME (not index). Unknown names returned by the
+    LLM in `matched_frames` are dropped via _fuzzy_match_frame (returns None
+    on no match). Replaces the v1 'out-of-range index' test — the v2 path
+    can't have out-of-range indices because there are no indices."""
+    item = SourceItem(
+        title="Cognetti campaign event",
+        raw_text="Paige Cognetti held a campaign event today in Scranton.",
+        source_name="x",
+        source_type="news",
+    )
     frames_db.add(item)
     frames_db.commit()
 
     frames = frames_db.query(NarrativeFrame).all()  # 2 frames
+    valid_frame_name = frames[0].name
     stub = _StubProvider(json.dumps({
-        "relevant": True,
-        "relevance_score": 60,
-        "one_sentence": "Something happened.",
-        "framing": "background",
-        "needs_attention": False,
-        "reason": "Relevant.",
+        "verdict": "relevant",
+        "summary": "Something happened.",
+        "campaign_action": "monitor",
         "sentiment": "neutral",
-        "opponent_attacks": [],
-        "frame_matches": [0, 1, 99],  # 0 and 99 are out of range; only 1 is valid
+        "source_credibility": "medium",
+        "needs_attention": False,
+        "needs_attention_reason": "",
+        "extracted_claims": [
+            {
+                "actor_name": "Campaign",
+                "actor_role": "candidate",
+                "claim_type": "policy_position",
+                "quote": "Paige Cognetti held a campaign event today in Scranton",
+                "confidence": "medium",
+                "matched_frames": [
+                    valid_frame_name,
+                    "Totally Made Up Frame Name That Does Not Exist",
+                ],
+            }
+        ],
     }))
-    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: stub)
 
     result = analyze_with_frames(frames_db, item, frames=frames)
-    assert result["frame_matches"] == [1]
-
-
-def test_persist_frame_matches_creates_mentions(frames_db):
-    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
-    frames_db.add(item)
-    frames_db.commit()
-
-    frames = frames_db.query(NarrativeFrame).all()
-    _persist_frame_matches(frames_db, item, frames, [1, 2])
-    frames_db.commit()
-
-    mentions = frames_db.query(NarrativeFrameMention).filter_by(source_item_id=item.id).all()
-    assert len(mentions) == 2
-    assert all(m.matched_by == "llm" for m in mentions)
-    assert all(m.confidence == 75 for m in mentions)
-
-
-def test_persist_frame_matches_deduplicates(frames_db):
-    item = SourceItem(title="t", raw_text="t", source_name="x", source_type="news")
-    frames_db.add(item)
-    frames_db.commit()
-
-    frames = frames_db.query(NarrativeFrame).all()
-    _persist_frame_matches(frames_db, item, frames, [1])
-    frames_db.commit()
-    # Call again — should not create a duplicate
-    _persist_frame_matches(frames_db, item, frames, [1])
-    frames_db.commit()
-
-    assert frames_db.query(NarrativeFrameMention).filter_by(source_item_id=item.id).count() == 1
+    # Only the real frame survives — bogus name is dropped silently.
+    assert result["frame_matches"] == [frames[0].id]
 
 
 def test_analyze_no_frames_returns_empty_frame_matches(cognetti_db, monkeypatch):
@@ -398,7 +392,7 @@ def test_analyze_no_frames_returns_empty_frame_matches(cognetti_db, monkeypatch)
         "opponent_attacks": [],
         "frame_matches": [],
     }))
-    monkeypatch.setattr(llm_provider, "get_provider", lambda: stub)
+    monkeypatch.setattr(llm_provider, "get_ingestion_provider", lambda: stub)
 
     result = analyze_with_frames(cognetti_db, item, frames=None)
     assert result["frame_matches"] == []
