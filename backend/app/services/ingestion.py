@@ -55,14 +55,26 @@ def _decode_entities(text: str) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    """Decode HTML entities and collapse whitespace. Safe on already-clean Unicode text."""
+    """Decode HTML entities, strip embedded NULs, and collapse whitespace.
+
+    NUL stripping is mandatory now that the live DB is Postgres — Postgres TEXT
+    rejects U+0000 with `UntranslatableCharacter`, which would silently fail
+    the article insert. The 2026-05-29 preflight audit found 47 historical
+    rows with embedded NULs from web-scrape contamination; this guards the
+    forward path.
+    """
     if not text:
         return text
+    text = text.replace("\x00", "")
     return _WHITESPACE.sub(' ', _html.unescape(text)).strip()
 
 
 def _strip_tags(fragment: str) -> str:
-    return _WHITESPACE.sub(' ', _TAG_STRIP.sub(' ', _decode_entities(fragment))).strip()
+    # _decode_entities → _TAG_STRIP → whitespace collapse → NUL strip.
+    # Same Postgres-TEXT NUL hazard as _normalize_text.
+    return _WHITESPACE.sub(
+        ' ', _TAG_STRIP.sub(' ', _decode_entities(fragment))
+    ).strip().replace("\x00", "")
 
 
 def _paragraph_score(paragraph: str) -> int:
@@ -834,6 +846,11 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
             slug = url.rstrip("/").split("/")[-1]
             title = slug.replace("-", " ").replace("_", " ").title() or url
 
+        # Defense in depth: title comes from readability/wayback/extractor and
+        # bypasses _normalize_text, so strip NULs here. body_text already
+        # passed through _strip_tags via _clean_html_with_quality, which
+        # strips NULs after the 2026-05-29 hot-fix.
+        title = title.replace("\x00", "") if title else title
         item = SourceItem(
             title=title[:200],
             raw_text=body_text,

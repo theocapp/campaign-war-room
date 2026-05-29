@@ -86,6 +86,9 @@ TABLE_ORDER: list[str] = [
     "entity_review_decisions",
     "topic_region_labels",
     "proposed_cluster_triage",
+    "proposed_cluster_snapshots",   # ← added 2026-05-29 hot-fix (was missing)
+    "tracked_third_party_accounts", # ← added 2026-05-29 hot-fix (was missing)
+    "search_result_cache",          # ← added 2026-05-29 hot-fix (was missing)
     # Level 1
     "race_candidates",         # → race_directory
     "source_pack_items",       # → source_packs
@@ -108,6 +111,15 @@ TABLE_ORDER: list[str] = [
     "cluster_opponent_activities", # → opponents, story_clusters
     "claim_record_entities",       # → claim_records, entities
 ]
+
+# Tables that exist in the schema but are intentionally NOT migrated:
+#   alembic_version — managed by Alembic, never copied
+#   (no others currently)
+# The set guard in _verify_schema_coverage() asserts TABLE_ORDER ∪ this set
+# equals the live schema, so a new table that's added later can't silently
+# slip through at cutover the way proposed_cluster_snapshots,
+# tracked_third_party_accounts, and search_result_cache did on 2026-05-29.
+_INTENTIONALLY_SKIPPED: set[str] = {"alembic_version"}
 
 BATCH_SIZE = 5000
 SAMPLE_DEEP_DIFF_ROWS = 100
@@ -313,6 +325,22 @@ def _alembic_revision(eng: Engine) -> str | None:
             return conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
     except Exception:
         return None
+
+
+def _verify_schema_coverage(dst_eng: Engine) -> list[str]:
+    """Return list of tables in the live schema that TABLE_ORDER doesn't cover.
+
+    Without this guard, a new table added via Alembic after TABLE_ORDER was
+    last updated would silently be skipped at cutover — exactly what
+    happened on 2026-05-29 when proposed_cluster_snapshots,
+    tracked_third_party_accounts, and search_result_cache were missed.
+    """
+    meta = MetaData()
+    meta.reflect(bind=dst_eng)
+    live_tables = set(meta.tables.keys())
+    covered = set(TABLE_ORDER) | _INTENTIONALLY_SKIPPED
+    missing = sorted(live_tables - covered)
+    return missing
 
 
 def _orphans_against_dst(
@@ -794,6 +822,21 @@ def main() -> int:
         return 1
     if not args.force and not _is_dst_empty(dst_eng):
         log.error("DST is non-empty. Use --force to append (DANGEROUS).")
+        return 1
+
+    missing_tables = _verify_schema_coverage(dst_eng)
+    if missing_tables:
+        log.error(
+            "Schema coverage gap — %d tables exist in the live schema but "
+            "TABLE_ORDER does not include them. They would be silently skipped:",
+            len(missing_tables),
+        )
+        for t in missing_tables:
+            log.error("  - %s", t)
+        log.error(
+            "Add these to TABLE_ORDER (or to _INTENTIONALLY_SKIPPED if "
+            "deliberately not migrated) before re-running."
+        )
         return 1
 
     log.info("Starting copy — %d tables, batch=%d", len(TABLE_ORDER), BATCH_SIZE)

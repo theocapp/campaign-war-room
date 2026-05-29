@@ -78,9 +78,21 @@ def upsert_frame_match(
               (:frame_id, :cluster_id, :confidence, :matched_by, :source_type,
                :snapshot, :match_date, :match_date, :frame_content_hash)
             ON CONFLICT(frame_id, story_cluster_id) DO UPDATE SET
-              confidence = MAX(excluded.confidence, frame_cluster_matches.confidence),
-              first_seen_at = MIN(excluded.first_seen_at, frame_cluster_matches.first_seen_at),
-              last_seen_at = MAX(excluded.last_seen_at, frame_cluster_matches.last_seen_at),
+              confidence = CASE
+                WHEN excluded.confidence > frame_cluster_matches.confidence
+                THEN excluded.confidence
+                ELSE frame_cluster_matches.confidence
+              END,
+              first_seen_at = CASE
+                WHEN excluded.first_seen_at < frame_cluster_matches.first_seen_at
+                THEN excluded.first_seen_at
+                ELSE frame_cluster_matches.first_seen_at
+              END,
+              last_seen_at = CASE
+                WHEN excluded.last_seen_at > frame_cluster_matches.last_seen_at
+                THEN excluded.last_seen_at
+                ELSE frame_cluster_matches.last_seen_at
+              END,
               source_type = excluded.source_type,
               representative_snapshot_ts = excluded.representative_snapshot_ts,
               frame_content_hash = COALESCE(excluded.frame_content_hash,

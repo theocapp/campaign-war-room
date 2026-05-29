@@ -301,7 +301,12 @@ def _short_summary(item: SourceItem, max_chars: int = 400) -> str | None:
     text = item.summary or item.raw_text or ""
     if not text:
         return None
-    return text[:max_chars]
+    # Strip embedded NULs — Postgres TEXT rejects U+0000. Even though the
+    # source item's text was sanitized by ingestion._normalize_text on
+    # arrival, defensive stripping here covers any legacy rows (47 historical
+    # raw_text rows had NULs per the 2026-05-29 preflight audit) and any
+    # future source path that bypasses _normalize_text.
+    return text.replace("\x00", "")[:max_chars]
 
 
 def _ensure_id_format(item: SourceItem) -> str:
