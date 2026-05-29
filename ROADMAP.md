@@ -212,6 +212,409 @@ Commit your changes to git: git add -A && git commit -m "what you did"
 
 ---
 
+## Planned — Engineering follow-ups (from 2026-05-24 bug-hunt session)
+
+Small, scoped items deferred because they aren't bug-fixes or blockers,
+just incremental improvements. Pick off when bandwidth allows.
+
+### ~~Wire `last_error` / `embeddings_available` into the Narratives banner~~ — DONE (Session A, 2026-05-24)
+Implemented in `frontend-v2/src/pages/Narratives.tsx` + `api/client.ts`. The
+`PendingSuggestionsSection` now renders a red diagnostic banner ("AI narrative
+discovery is paused — quota recovered on next scheduled run") when
+`last_error` is set, instead of silently hiding the section.
+
+Done as part of the larger embeddings rework that added OpenAI fallback +
+in-process embedding cache + `EmbedStats` observability — see
+`services/embeddings.py` for the full architecture.
+
+### Expand the owner_type inversion heuristic word-list
+**Effort:** ~30 min + tests
+**Context:** `services/owner_type_correction.py` catches the LLM's common
+candidate↔opponent mistake by matching attack VERBS / NOUNS / PHRASES
+against the frame name. The current word-list is good but not exhaustive
+— observed misses in live data:
+- "Bresnahan's Submission to Republicans" (tagged opponent, should be candidate)
+- "Bresnahan supports ACA subsidies" (tagged opponent, should be candidate)
+- "Bresnahan supports Democratic healthcare policies" (tagged opponent, should be candidate)
+
+Patterns the heuristic doesn't yet cover:
+- Possessive-noun + ideologically-loaded word: "X's submission/capitulation/surrender to Y"
+- Bare-verb + "supports/backs/endorses [thing voters dislike]" — currently
+  only catches "supported controversial" as a phrase; should generalize
+  to detect ideological mismatch (Republican congressman + "Democratic policies"
+  → attack from the right)
+
+Two options:
+1. **Expand word-list + add ideological-mismatch heuristic** (cheap, fragile)
+2. **LLM 2nd-opinion on every owner_type assignment** (~$0.001 per check,
+   accurate, slow). Could batch: 1 LLM call per ~20 candidate_frames.
+
+For productization (other races), the ideological-mismatch detection
+needs the candidate's party (which is in CampaignConfig already) so the
+heuristic stays race-agnostic. "Republican supports Democratic policies"
+generalizes correctly for any candidate.
+
+### Audit other `SIMILARITY_THRESHOLD`-style constants
+**Effort:** ~30 min
+**Context:** Switched `candidate_frame_promoter.SIMILARITY_THRESHOLD` to
+HDBSCAN (race-agnostic) on 2026-05-24. Other places that still use
+hardcoded similarity numbers:
+- `services/frame_variants.py:255` — `MERGE_RETRIEVAL = 0.85` (LLM prefilter,
+  not a clustering decision, but worth verifying it works for any race)
+- `services/narrative_frames.py` — check matcher uses any similarity thresholds
+- Anywhere else `cosine_similarity` is compared to a constant
+
+Each should be either: (a) replaced with HDBSCAN/LLM-based decision, or
+(b) documented as a race-specific prefilter (not a final decision) with
+a re-calibration plan if needed.
+
+### Persist Tavily `_exhausted` set across process restarts
+**Effort:** ~30 LOC backend
+Currently `TavilySearchProvider._exhausted` is a process-level `set[str]`
+that resets on every uvicorn reload. If a Tavily key 429'd late yesterday,
+the next morning's first query re-tries that key and immediately fails
+before rotating. Cheap fix: persist `{key_suffix: exhausted_until_ts}` to a
+tiny JSON file in the same dir as `war_room.db`, load on `__init__`, write
+on `mark_rate_limited()`. After a 24h cooldown the key auto-clears.
+
+### Lower candidate-frame promoter thresholds (or surface borderline clusters separately)
+**Effort:** ~10 LOC backend, OR ~150 LOC for the full "Raw Inbox" UI
+**Context:** Session A fixed the silent failure that was zeroing out clustering.
+With Gemini+OpenAI both working, the current thresholds (`MIN_CLUSTER_ROWS=3`,
+`MIN_DISTINCT_ARTICLES=3`, `MIN_DISTINCT_OUTLETS=2` in
+`services/candidate_frame_promoter.py`) produce 6 high-quality cluster
+suggestions. Diagnostic run shows that lowering to `MIN_ROWS=2 + MIN_ARTICLES=2`
+(keep `MIN_OUTLETS=2`) would surface ~16 clusters total — including some real
+narratives we're missing today:
+- "Bresnahan cuts public broadcasting funding" (2 outlets — Citizens' Voice, Times-Tribune)
+- "Cognetti's stance on ICE" / "Immigration Position Clarity" (2 outlets)
+- "Cognetti's Ethics Concerns" / "Ethical Concerns" (2 outlets)
+
+Two paths, decide after a week of using the current 6:
+1. **Quick** — lower thresholds. Risk: more low-confidence noise.
+2. **Right** — build a "Raw Inbox" panel below the cards: collapsed-by-default,
+   paginated table of the 175 single-source candidate_frames with
+   per-row Promote/Dismiss + bulk-dismiss. Lets the user see + triage everything
+   the LLM noticed, not just convergent clusters. Requires a new GET endpoint
+   for the raw list + a POST dismiss endpoint (mark `resolved_at = now`).
+
+The "Raw Inbox" was the original ask in Session A but deferred once the
+clustering bug was found.
+
+### Handle generic-surname candidates in `_name_tokens`
+**Effort:** ~40 LOC backend + tests
+**Context:** Session C (2026-05-25) tightened `race_relevance._name_tokens`
+to return surname-only, eliminating false positives like "Rob Bonta" matching
+"Rob Bresnahan". Works well for distinctive surnames (Bresnahan, Cognetti).
+
+But for races with a common surname (Smith, Johnson, Brown, Garcia — anything
+in the US top-100), surname-only matching over-fires: every article mentioning
+any "Smith" trips `opponent_mentioned=True`, bypassing the prefilter and
+burning LLM calls. The system still works correctly downstream (LLM rejects
+most), but the LLM-waste savings disappear.
+
+Two-part fix:
+1. **At campaign setup** — check candidate/opponent surnames against a
+   bundled top-500 US surnames list. If hit, mark the campaign as
+   `common_surname=True` in CampaignConfig (new column).
+2. **In `_contains_name`** — when `common_surname=True`, require BOTH
+   surname AND (first name OR a title like "Rep."/"Sen."/"Mayor"/"Councilman"
+   OR another known candidate's surname) to appear in the text. This catches
+   "Rep. Smith announces..." while dropping "John Smith, plumber, said..."
+
+Race-agnostic: the top-500 list is generic, the title regex is generic,
+and the campaign flag is set once at setup. PA-08 (Bresnahan/Cognetti)
+won't be affected.
+
+### Fetch full article bodies for race-relevant items
+**Effort:** ~2–3 days backend
+**Status:** known, surfaced by v15.0 stage-1 audit on 2026-05-27
+**Context:** On the v15.0 50-article stage-1 backfill, **30 of 50 highest-relevance
+articles had `raw_text` < 500 chars** — essentially just the title repeated
+as the body. The v15.0 verbatim-claim validator correctly refused to
+extract quotes from these stubs (you can't quote text we don't have).
+Under v14.x this problem was hidden because the triple extractor happily
+fabricated relations from title-only text; under v15.0 the noise floor
+shifts upstream and becomes visible.
+
+**Why this matters for any campaign:** a "race-relevant" article that
+yields zero claim_records is wasted ingestion. We're paying scoring +
+storage cost on it but getting no entity-anchored evidence. At scale
+(SaaS, thousands of races) this multiplies.
+
+**What it looks like in the DB:**
+```
+SELECT count(*) FROM source_items
+WHERE archived_as_irrelevant = 0
+  AND race_relevance_score >= 50
+  AND LENGTH(raw_text) < 500;
+```
+PA-08 shows roughly half of high-relevance items in this bucket today.
+
+**Fix paths** (rough order):
+1. Diagnose by ingestion source — which RSS feeds, which crawl paths,
+   which Google-News-redirect failures are producing stubs? The
+   redirect-URL resolver below (separate roadmap item) is part of this.
+2. Where the source URL is fetchable, run a fallback full-page crawl
+   (Readability + paywall fallbacks already exist in `services/ingestion.py`)
+   to populate `raw_text` properly.
+3. For RSS items where only `<description>` came through, augment with
+   a follow-up GET on the article URL.
+
+Holding off on a full corpus v15.0 backfill until at least the easy
+wins are landed — otherwise we burn LLM budget on stub articles that
+the validator will reject anyway.
+
+### Resolve Google News redirect URLs to true publisher URLs
+**Effort:** ~80 LOC backend + ~5s extra per RSS item
+**Context:** Session B identified 948 articles unlinked from outlets because
+they come from Google News with encoded redirect URLs like
+`news.google.com/rss/articles/CBMIxxxx?oc=5` (~7% of remaining 4,409
+unlinked). The outlet matcher can't extract a publisher domain from these.
+Two ways to resolve:
+1. **HTTP follow** — issue a HEAD request, capture the Location header,
+   extract real publisher domain. ~1-2s per request. Add to ingestion
+   pipeline after RSS parse but before outlet linking. Cheap & always
+   works.
+2. **Google News URL decode** — the `CBMIxxxx` portion is base64 protobuf
+   that decodes to the original URL. No HTTP call needed. There's
+   open-source decoders (e.g. `googlenews-tools` on pypi) but the format
+   has changed twice in 2024-2025. Faster but fragile.
+
+Path 1 is more reliable; tolerate the latency since RSS ingestion is
+already async + scheduled. Also stash the resolved URL back in the
+`source_items.source_url` so downstream features (article display, dedup)
+benefit, not just the outlet matcher.
+
+### Decide canonical RSS-tracking table: `rss_feeds` vs `source_monitors`
+**Effort:** ~1hr discussion + ~100 LOC migration once decided
+**Context:** Session B fixed the immediate symptom (51 source_monitors RSS
+rows had stale NULL `last_checked_at`) by adding `mark_rss_feed_fetched()`
+in `services/rss_ingestion.py` that writes to BOTH tables. But the deeper
+issue is that the two tables overlap (51 of 111 rss_feeds also exist as
+source_monitors). The "right" fix is to pick one canonical table and
+deprecate the other. Two options:
+- **Keep `rss_feeds`** as canonical, delete the 51 duplicate source_monitor
+  rows, and rework the UI to show all 111 rss_feeds (not just the 51 that
+  happen to be in source_monitors). Simpler.
+- **Migrate everything to `source_monitors`**, copy the missing 60
+  rss_feeds rows into source_monitors as monitor_type='rss', then drop
+  rss_feeds table. More invasive but unifies feed/monitor concepts.
+
+Deferred because the dual-write helper makes the symptom invisible.
+
+### Move embedding cache to disk (survive uvicorn restarts)
+**Effort:** ~50 LOC backend
+Session A added an in-process LRU cache in `services/embeddings.py` that holds
+text→3072-dim vector pairs to avoid re-embedding the same candidate_frame on
+every refresh. The cache is `dict`-based and lost on uvicorn restart, which
+means the first refresh after every `--reload` triggers a full re-embed run
+(207 OpenAI calls today). Trivial to persist as JSON sidecar
+(`backend/.cache/embeddings.json`) or as a tiny separate SQLite file. Even
+simpler: pickle/shelve. Either way, keeps quota use minimal across deploys.
+
+### Backend-side caching for Tavily Reddit results
+**Effort:** ~50 LOC backend
+The Reddit-via-Tavily ingest path runs every 30 min and queries the same
+2 terms ("Paige Cognetti", "Rob Bresnahan") site-restricted to reddit.com.
+Each query returns mostly the SAME 5-20 results as the previous one (Reddit
+content doesn't churn that fast on small races). With 4×1000=4000 Tavily
+calls/month and 96 calls/day going to Reddit alone, we're burning ~70% of
+the budget on duplicate queries. Cache responses for 6h keyed on
+`(query, days_back)`; serve from cache between scheduled runs. Net effect:
+4-5 actual Tavily Reddit calls/day instead of 96.
+
+---
+
+## Planned — Product / "AI Campaign Staffer" expansion
+
+### Morning Briefing — risk_warnings + suggested_actions sections
+**Status:** placeholder fields existed on the frontend type, never implemented
+backend-side. Removed from UI on 2026-05-24 (silent dead sections). Worth
+re-adding when implemented as a real feature.
+
+**Why this matters:** Per the brainstorm on 2026-05-23, the product reframing
+target is "an AI campaign staffer that reads everything, briefs the team
+daily, alerts on important events, and helps draft response language."
+The Briefing page is the killer surface for this. Risk Warnings + Suggested
+Actions are the two sections that turn the Briefing from "information
+delivery" into "action engine" — the difference between "here's what
+happened" and "here's what to do about it today."
+
+**What the implementation looks like:**
+- Add to `routes/dashboard.py:get_morning_briefing` a step that calls
+  the judge LLM (gpt-4o-mini) ONCE with the assembled briefing context
+  (today's articles + frame pulse + opponent activity) and prompts:
+  > "Based on the last 24h, identify (a) 2-3 risks on the horizon worth
+  > flagging to the campaign manager — these are *things to watch* not yet
+  > breaking news, AND (b) 3-5 concrete actions for the next 24 hours
+  > — what should the candidate post, what should the comms team draft,
+  > what should staff call."
+- Response fields: `risk_warnings: list[str]`, `suggested_actions: list[str]`
+- Cache the result alongside the existing `race_memo` (briefing memo is
+  already cached in `services/briefing_summary.py`).
+- Re-enable the frontend sections in `pages/MorningBriefing.tsx` (delete
+  the comment block where they were removed; restore the prior render
+  code from git history).
+
+**Scope estimate:** ~150 LOC + one new prompt + one additional gpt-4o-mini
+call per briefing refresh (~$0.01/day per active campaign).
+
+**Why NOT to ship this without thinking:** garbage suggestions will train
+the campaign team to ignore the briefing entirely. The prompt needs
+careful eval against real PA-08 history — would the model have suggested
+useful actions on the days when something actually happened? Worth dry-
+running on the last 30 days of data before deploying.
+
+---
+
+## Planned — Knowledge Graph evolution
+
+These items came out of a 2026-05-26 external architecture review of the KG
+layer. The pre-flight v14.6 backfill is fine to run today — but these are
+medium-term redesigns that should land before a second campaign onboards on
+the same system. Items are roughly ordered by "pain caused if deferred."
+
+### Claims as assertion-level objects (not triple-based)
+**Status:** known limitation, deliberate medium-term redesign
+**Effort:** ~2–3 weeks focused work
+
+**The problem:** Today a "claim" has natural key `(subject_id, predicate, object_id)`.
+So `Bresnahan criticized ACA subsidies`, `Bresnahan criticized ACA expansion`,
+and `Bresnahan criticized ACA implementation` all collapse into ONE claim row.
+That destroys nuance, and it means contradiction/retract logic operates at
+too coarse a granularity — one contesting article on the wrong sub-claim
+poisons the whole thing.
+
+**What changes:**
+- `claims` natural key becomes a **semantic proposition** — quote-cluster or
+  extracted-statement-unit — not a triple.
+- `entity_relations` stays as the denormalized aggregation layer (don't
+  collapse, ChatGPT was clear about this).
+- New table `claim_signature` or analogous, computed from the LLM's
+  `sample_quote` clustered by embedding similarity.
+- `claim_supports.claim_id` re-points at the assertion-level claims.
+
+**Why not now:** the current single-race volume (1,786 claims) isn't large
+enough to feel this pain. Becomes acute around 3–5x that scale, or when
+sub-claim nuance becomes a sales asset.
+
+### Source-cluster-aware evidence weighting
+**Status:** infrastructure present, not yet wired into counts
+**Effort:** ~1 day
+
+**The problem:** today `claim.supporting_count` and `entity_relations.weight`
+count raw articles. 50 AP-syndicated republications = 50 supports. In the
+PA-08 corpus this currently inflates by ~1.1x (small). For a national-noise
+race it could 5–10x.
+
+**What changes:**
+- Replace article-count with `count(DISTINCT story_cluster_id)` in
+  `/api/entity-network`, `/api/claims/{id}`, and the contradiction queue.
+- `story_clusters` already exists (16,752 rows, 99.9% coverage); just JOIN
+  through it.
+- Add a "syndication inflation" badge in the UI when article-count ≫ cluster
+  count for a claim (signals "this is one wire story").
+
+**Why not now:** PA-08 doesn't currently suffer from this. Will become urgent
+the moment the system processes a national race or a major-network event.
+
+### Continuous consensus score (replace binary "contested" status)
+**Status:** binary auto-flip works today, but is over-sensitive
+**Effort:** ~1 day
+
+**The problem:** one fringe article emitting `stance=contesting` flips a
+50-supporter claim's status to "contested". The UI shows that as a yellow
+warning pill, which trains users to ignore it.
+
+**What changes:**
+- Compute `consensus_score ∈ [0, 1]` per claim:
+  `Σ(supporting confidence × outlet reliability × uniqueness)
+   / Σ(all evidence × confidence × reliability × uniqueness)`
+- Status bins: `active (≥0.85)` → `weakly_contested (0.5–0.85)` →
+  `strongly_contested (<0.5)`.
+- UI shows the score as a slider/meter, not a pill.
+- Auto-flip becomes "drop a status band when the score crosses a threshold."
+
+**Why not now:** binary works for the current low-volume corpus; the bug
+manifests when contesting articles enter at meaningful volume (post-v14.6
+backfill we'll have actual data to calibrate from).
+
+### Entity dossier page UI
+**Status:** force-directed graph is the only entity surface today
+**Effort:** ~2–3 days
+
+**The problem:** force-directed graphs are impressive but operationally weak
+for analyst workflows. Real analysts want ranked evidence lists, timelines,
+and "everything about X" pages — not a hairball.
+
+**What changes:**
+- New page at `/entity/:canonical_id`: header (name, role, affiliation,
+  mention timeline), all relations with this entity as subject or object
+  grouped by predicate, all narrative frames this entity appears in,
+  contradiction history, retract trail.
+- The current side panel becomes a peek; "View dossier" opens the full page.
+- The Path finder stays — ChatGPT explicitly flagged it as genuinely useful.
+
+**Why not now:** the graph + side panel covers ~80% of current analyst
+intent. Dossier becomes essential when we hit ~10K+ relations or when a
+power user spends more than 30 min/day in the tool.
+
+### Observation vs inference separation
+**Status:** known data-model collapse, low immediate impact
+**Effort:** ~1 week
+
+**The problem:** today "Bresnahan attended rally" (a direct observation) and
+"Bresnahan supports policy" (an inference from his statements) are stored
+identically as relations. Over time, inferences will contaminate observation
+data — e.g. multi-hop traversal will mix observed facts with synthesized
+opinion, and confidence won't decay correctly.
+
+**What changes:**
+- Add `evidence_type ∈ {observed, attributed, inferred}` to `claim_supports`.
+- Update the extractor prompt to emit one of those three for each relation.
+- Multi-hop / contradiction logic weights observation evidence higher.
+
+**Why not now:** the current corpus is dominated by direct news reporting,
+where the observation/inference distinction is mostly synonymous with the
+predicate type (`attended` = observed, `endorses` = observed, `criticizes`
+= attributed). Pain shows up when we add transcript ingestion or commentary.
+
+### Probabilistic event reconciliation
+**Status:** strict-gate version shipped at v14.5
+**Effort:** ~3 days
+
+**The problem:** today an event extraction needs `name + (date OR location)`
+or it gets dropped. That's conservative — we lose mentions of unnamed events
+("the Scranton event", "Tuesday's rally") that articles do refer to.
+
+**What changes:**
+- Replace hard gate with a scored merge: `event_type + normalized_title +
+  time_window + location + participants` → similarity score → merge above
+  threshold, store `possible_duplicate_of` for ambiguity.
+- Vague events can land as low-confidence entities that get reconciled later
+  when richer mentions appear.
+
+**Why not now:** we genuinely don't know yet whether the strict gate causes
+real loss — wait until the v14.6 backfill puts events into the corpus and
+we can measure rejection rate.
+
+### Declarative constraint engine (replace Python commonsense rules)
+**Status:** 10 rules in Python; works fine at this scale
+**Effort:** ~2 days
+
+**The problem:** at 30+ commonsense rules (multi-race deployment) the
+hand-written Python becomes unmaintainable.
+
+**What changes:**
+- YAML-driven rules engine. Each rule = `{predicate, subject_constraints,
+  object_constraints, action}`. Compile to validators at startup.
+- Per-race rule files override the base set.
+
+**Why not now:** YAGNI at 10 rules in one file. Revisit when adding 20+ more.
+
+---
+
 ## Planned — Infrastructure / Post-Campaign
 
 ### Migrate SQLite → Postgres
@@ -273,6 +676,22 @@ Prerequisites before starting Phase 2:
   (separate `.db` files per friend, no real backup story).
 - **A `./deploy-new-campaign.sh` helper** that automates pushing code to a
   fresh server + clicking through Setup. Target: 1 hour per friend.
+- **Lock down admin endpoints.** Today every `/api/admin/*` route is
+  unauthed — safe locally because uvicorn binds to 127.0.0.1 by default,
+  but the moment you deploy to Railway / Fly / Render the same routes
+  become public. Specific risks before deploy:
+    * `POST /api/admin/reset-workspace` — wipes all data (gated only by a
+      confirm-string guard)
+    * `POST /api/admin/reanalyze-sources` — burns LLM tokens (confirm-string only)
+    * `POST /api/admin/rescore-articles` — burns LLM tokens (no guard at all)
+    * `POST /api/admin/discover-outlets` — burns LLM tokens (no guard at all)
+    * `POST /api/admin/auto-review` — DB writes (no guard)
+    * `POST /api/admin/rescore-stop` — can interrupt a long job (no guard)
+
+  Minimum-viable lockdown for Phase 2: require a header that matches an
+  `ADMIN_TOKEN` env var on every `/admin/*` route. ~20 lines of FastAPI
+  middleware. Add confirm-string guards to the 4 endpoints that lack them
+  at the same time. Frontend never calls these — no UI work needed.
 
 Phase 2 work to actually deliver per friend:
 1. Provision their server

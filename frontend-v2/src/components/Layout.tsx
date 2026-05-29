@@ -1,8 +1,13 @@
-import { Eye } from 'lucide-react'
+import { Menu } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { NavLink } from 'react-router-dom'
 import { api } from '@/api/client'
 import { prefetchDashboard } from '@/api/dashboardCache'
+import { NotificationsBell } from './NotificationsBell'
+import { SearchBar } from './SearchBar'
+import { Sidebar } from './Sidebar'
+import { ThemeToggle } from './ThemeToggle'
+
+const SIDEBAR_COLLAPSED_KEY = 'cwr-sidebar-collapsed'
 
 type StepState = 'pending' | 'running' | 'done'
 
@@ -117,16 +122,6 @@ function usePipelineStatus(): PipelineStatus {
   return status
 }
 
-const NAV = [
-  { to: '/', label: 'Home', exact: true },
-  { to: '/briefing', label: 'Briefing' },
-  { to: '/analytics', label: 'Analytics' },
-  { to: '/narratives', label: 'Narratives' },
-  { to: '/opponents', label: 'Opponents' },
-  { to: '/monitors', label: 'Monitors' },
-  { to: '/setup', label: 'Setup' },
-]
-
 function formatAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime()
   const m = Math.floor(diff / 60000)
@@ -142,10 +137,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [lastSync, setLastSync] = useState<string | null>(null)
   const [district, setDistrict] = useState('PA-08')
   const [mockActive, setMockActive] = useState(false)
+  // Sidebar collapse — lifted out of Sidebar so the header hamburger can
+  // toggle it. Persists in localStorage across sessions.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1' }
+    catch { return false }
+  })
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0') } catch { /* ignore */ }
+  }, [sidebarCollapsed])
   const pipeline = usePipelineStatus()
 
   useEffect(() => {
-    api.reviewQueueCount().then(d => setQueueCount(d.count)).catch(() => {})
+    // One-time fetches (these don't change frequently).
     api.ingestStatus().then(d => {
       if (d.crawler_last_run) setLastSync(d.crawler_last_run)
     }).catch(() => {})
@@ -153,145 +157,179 @@ export function Layout({ children }: { children: React.ReactNode }) {
       if (d.district) setDistrict(d.district)
     }).catch(() => {})
     api.getLLMStatus().then(s => setMockActive(s.is_mock)).catch(() => {})
-    // Warm the Dashboard cache so opening Home from any page is instant.
+    // Warm the Dashboard cache once on mount so opening Home from any page
+    // is instant.
     prefetchDashboard()
-    // Re-warm every 60s so cached data is fresh when the user navigates.
-    const id = setInterval(() => { prefetchDashboard() }, 60_000)
-    return () => clearInterval(id)
+
+    // Review-queue count needs to refresh — the user reviews/dismisses
+    // items in /review and the sidebar badge must reflect that.
+    const fetchQueueCount = () => {
+      api.reviewQueueCount().then(d => setQueueCount(d.count)).catch(() => {})
+    }
+    fetchQueueCount()
+    const queueTimer = setInterval(fetchQueueCount, 15_000)
+    return () => clearInterval(queueTimer)
   }, [])
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#121212' }}>
-      {/* Top nav bar */}
-      <nav style={{
-        height: 76,
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-1)' }}>
+      {/* Top header. Hamburger is sized + positioned so its center aligns
+          with the collapsed sidebar's icon centers (~30px from viewport
+          left). The logo sits ~72px from the left so it visually clears
+          the collapsed sidebar (60px wide) and reads as part of the
+          content area, not the sidebar. */}
+      <header style={{
+        height: 48,
         flexShrink: 0,
-        background: '#000',
-        borderBottom: '1px solid #262626',
+        background: 'var(--bg-nav)',
+        borderBottom: '1px solid var(--border)',
         display: 'flex',
         alignItems: 'center',
-        padding: '0 28px',
+        padding: '0 16px 0 0',
         gap: 0,
         zIndex: 100,
         position: 'relative',
       }}>
-        {/* Logo */}
+        {/* Hamburger zone — width matches the sidebar (60px collapsed,
+            220px expanded) so the logo to its right ALWAYS aligns with the
+            start of the main content area. The button itself stays a
+            stable 36×36 square; the "Menu" text appears next to it when
+            expanded. To keep the animation perfectly smooth, only the
+            zone's width transitions — the button never resizes, and the
+            label fades in via opacity (no layout reflow). */}
         <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          marginRight: 28,
-          textDecoration: 'none',
+          width: sidebarCollapsed ? 60 : 220,
+          height: '100%',
+          display: 'flex', alignItems: 'center',
+          paddingLeft: 12,
           flexShrink: 0,
+          transition: 'width 0.18s ease',
         }}>
-          <Eye size={26} strokeWidth={2.25} style={{ color: '#a78bfa' }} />
-          <span style={{ fontSize: 22, fontWeight: 800, color: '#fff', letterSpacing: '-0.01em' }}>
-            campaign
-          </span>
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed(c => !c)}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-start',
+              gap: 10,
+              height: 36,
+              width: sidebarCollapsed ? 36 : 88,
+              paddingLeft: 8,
+              paddingRight: sidebarCollapsed ? 8 : 12,
+              borderRadius: 8,
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-2)',
+              cursor: 'pointer', flexShrink: 0,
+              fontSize: 14, fontWeight: 500, fontFamily: 'inherit',
+              overflow: 'hidden',
+              transition: 'background 0.1s ease, color 0.1s ease, width 0.18s ease, padding-right 0.18s ease',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--bg-3)'
+              e.currentTarget.style.color = 'var(--text-1)'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'transparent'
+              e.currentTarget.style.color = 'var(--text-2)'
+            }}
+          >
+            <Menu size={20} strokeWidth={2} style={{ flexShrink: 0 }} />
+            {/* Label fades in/out via opacity; the button's overflow:hidden
+                + width transition clips it cleanly when collapsed. */}
+            <span style={{
+              opacity: sidebarCollapsed ? 0 : 1,
+              transition: 'opacity 0.18s ease',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+            }}>
+              Menu
+            </span>
+          </button>
+        </div>
+
+        {/* Logo + district — sits flush against the right edge of the
+            hamburger zone, so it visually aligns with the left edge of
+            the main content (and shifts right when the sidebar expands). */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+          paddingLeft: 12,
+        }}>
+          <img
+            src="/noctua-logo.png"
+            alt="NOCTUA"
+            className="noctua-logo"
+            style={{ height: 28, width: 'auto', display: 'block' }}
+          />
           <span style={{
-            fontSize: 12,
-            color: '#fff',
-            background: '#ffbf00',
+            fontSize: 10,
+            color: 'var(--accent-text)',
+            background: 'var(--accent)',
             borderRadius: 4,
-            padding: '2px 7px',
+            padding: '2px 6px',
             fontWeight: 700,
-            marginLeft: 4,
+            marginLeft: 2,
           }}>
             {district}
           </span>
         </div>
 
-        {/* Nav links — absolutely centered to the viewport, independent of
-            the logo / right-side widths. */}
+        {/* Universal search bar — centered within the MAIN content area
+            (viewport minus sidebar), so the logo on the left always has
+            room regardless of whether the sidebar is expanded. The `left`
+            value is `sidebarWidth + (viewportWidth - sidebarWidth) / 2`
+            expressed as `calc((100% + sidebarWidth) / 2)`. */}
         <div style={{
           position: 'absolute',
-          left: '50%',
+          left: `calc((100% + ${sidebarCollapsed ? 60 : 220}px) / 2)`,
           top: '50%',
           transform: 'translate(-50%, -50%)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 2,
+          width: 600,
+          maxWidth: '60vw',
+          pointerEvents: 'none',
+          transition: 'left 0.18s ease',
         }}>
-          {NAV.map(item => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.exact}
-              style={({ isActive }) => ({
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '8px 16px',
-                borderRadius: 8,
-                textDecoration: 'none',
-                fontSize: 15,
-                fontWeight: isActive ? 600 : 400,
-                color: isActive ? '#fff' : '#a1a1a1',
-                background: isActive ? '#1a1a1a' : 'transparent',
-                transition: 'all 0.1s ease',
-                whiteSpace: 'nowrap',
-                position: 'relative',
-              })}
-            >
-              {({ isActive }) => (
-                <>
-                  {item.label}
-                  {isActive && (
-                    <span style={{
-                      position: 'absolute',
-                      bottom: -1,
-                      left: '50%',
-                      transform: 'translateX(-50%)',
-                      width: '60%',
-                      height: 2,
-                      background: '#ffbf00',
-                      borderRadius: 1,
-                    }} />
-                  )}
-                </>
-              )}
-            </NavLink>
-          ))}
+          <div style={{ pointerEvents: 'auto', display: 'flex' }}>
+            <SearchBar />
+          </div>
         </div>
 
-        {/* Right cluster — sync time + user avatar. marginLeft auto pushes
-            it to the far right; nav links sit absolute-centered behind it. */}
+        {/* Right cluster */}
         <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 14,
-          marginLeft: 'auto',
-          flexShrink: 0,
+          display: 'flex', alignItems: 'center', gap: 12,
+          marginLeft: 'auto', flexShrink: 0,
         }}>
           {lastSync && (
-            <div style={{ fontSize: 12, color: '#555' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
               synced {formatAgo(lastSync)}
             </div>
           )}
+          <NotificationsBell />
+          <ThemeToggle />
           <button
             type="button"
             title="theocapeilleres@gmail.com"
             style={{
-              width: 40,
-              height: 40,
+              width: 32,
+              height: 32,
               borderRadius: '50%',
               background: '#7c3aed',
               color: '#fff',
               border: 'none',
               cursor: 'pointer',
               fontWeight: 700,
-              fontSize: 14,
+              fontSize: 12,
               letterSpacing: '0.02em',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontFamily: "'Inter', sans-serif",
             }}
           >
             TC
           </button>
         </div>
-      </nav>
+      </header>
 
       {/* LLM mock warning */}
       {mockActive && (
@@ -307,8 +345,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      {/* Pipeline status banner */}
-      {false && pipeline.active && (
+      {/* Pipeline status banner — only during active backfill / rescore / rematch jobs */}
+      {pipeline.active && (
         <div style={{
           background: '#0f2744', color: '#bfdbfe',
           borderBottom: '1px solid #1d4ed8',
@@ -369,10 +407,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      {/* Main content — scrollable */}
-      <main style={{ flex: 1, overflowY: 'auto', background: '#121212' }}>
-        {children}
-      </main>
+      {/* Body — sidebar on the left, main content on the right */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        <Sidebar reviewBadge={queueCount} collapsed={sidebarCollapsed} />
+        <main style={{ flex: 1, overflowY: 'auto', background: 'var(--bg-1)' }}>
+          {children}
+        </main>
+      </div>
     </div>
   )
 }
