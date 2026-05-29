@@ -335,9 +335,36 @@ select.input {
   align-items: center;
   justify-content: center;
 }
-/* NOCTUA logo — black on white PNG, inverted in dark mode */
-.noctua-logo { filter: invert(1); }
-[data-theme="light"] .noctua-logo { filter: none; }
+/* Brand wordmark — black on transparent PNG, inverted in dark mode */
+.brand-logo { filter: invert(1); }
+[data-theme="light"] .brand-logo { filter: none; }
+
+/* Collapsed-sidebar tooltips — show the nav label on hover. Uses the
+   data-tooltip attribute set in Sidebar.tsx, scoped to aside[data-collapsed="true"]
+   so tooltips only appear when the sidebar is in icon-only mode. */
+aside[data-collapsed="true"] .sidebar-nav-link::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 6px 10px;
+  background: var(--bg-3);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+aside[data-collapsed="true"] .sidebar-nav-link:hover::after {
+  opacity: 1;
+}
 
 [data-theme="light"] .modal-overlay {
   background: rgba(0, 0, 0, 0.4);

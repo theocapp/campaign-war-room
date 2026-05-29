@@ -2,12 +2,16 @@ import { ChevronDown, X, Zap } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
-import { Area, AreaChart, ResponsiveContainer } from 'recharts'
 import { api } from '@/api/client'
-import { getDashboardCache, prefetchDashboard } from '@/api/dashboardCache'
-import type { NarrativeFrame, OwnerType, SourceItem, Spike, TimeseriesPoint } from '@/api/types'
+import { awaitBriefing, getDashboardCache, prefetchDashboard } from '@/api/dashboardCache'
+import type { MorningBriefing, NarrativeFrame, OwnerType, SourceItem, Spike } from '@/api/types'
+import { useAuth } from '@/auth/AuthContext'
 import { InfoTooltip } from '@/components/InfoTooltip'
 import { RaceSentimentCard } from '@/components/RaceSentimentCard'
+import { ActivityThisWeek } from '@/components/briefing/ActivityThisWeek'
+import { NeedsResponse } from '@/components/briefing/NeedsResponse'
+import { OvernightChanges } from '@/components/briefing/OvernightChanges'
+import { RaceSituation } from '@/components/briefing/RaceSituation'
 import { formatArticleDate } from '@/lib/formatDate'
 
 // Plain-English explanations of jargon shown in the UI.
@@ -36,6 +40,17 @@ const C = {
   candidate: 'var(--candidate)', opponent: 'var(--opponent)', media: 'var(--media)',
   accent: 'var(--accent)',
   green: 'var(--green)', red: 'var(--red)',
+}
+
+// Relevance is shown as a coarse bucket badge (critical/high/medium/low),
+// not a 0–100 number — the precise number invited "why 73 and not 81?"
+// scrutiny that eroded trust in a ranking that's actually correct.
+const REL_BADGE_STYLE: Record<string, { color: string; bg: string; border: string }> = {
+  critical: { color: '#f87171', bg: 'rgba(215,25,19,0.08)', border: 'rgba(215,25,19,0.25)' },
+  high: { color: '#fb923c', bg: 'rgba(234,88,12,0.08)', border: 'rgba(234,88,12,0.25)' },
+  medium: { color: '#fbbf24', bg: 'rgba(202,138,4,0.08)', border: 'rgba(202,138,4,0.25)' },
+  low: { color: '#a1a1a1', bg: 'rgba(161,161,161,0.08)', border: 'rgba(161,161,161,0.2)' },
+  irrelevant: { color: '#555', bg: 'rgba(85,85,85,0.08)', border: 'rgba(85,85,85,0.2)' },
 }
 
 // Order must include every stage the backend can emit; see
@@ -112,88 +127,6 @@ function stageLabel(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-// Visual treatment for the momentum signal + strategic lens, fused into
-// one chip. The LABEL comes from the momentum signal (what's happening).
-// The COLOR comes from the strategic posture (what to do). The TOOLTIP
-// combines momentum data with the strategic action recommendation.
-//
-// Why fused not split: a separate strategic chip would add a 4th element
-// to an already-dense card row. The signal alone is read-only diagnosis;
-// the posture is the decision. Combining them puts the same information
-// in less space.
-//
-// We render only when posture is "actionable" (amplify, offensive,
-// defensive, monitor with action). "ignore" + signals without owner type
-// produce no chip.
-type StrategicLens = { posture: 'amplify' | 'offensive' | 'defensive' | 'monitor' | 'ignore'; action: string | null; urgency: 'high' | 'medium' | 'low' }
-type MomentumBadge = { label: string; color: string; bg: string; tooltip: string; urgencyBorder?: string }
-
-// Posture color palette. Chosen to match standard semantic conventions:
-// red for opposition response needed, blue for our-side offense, green
-// for amplification, yellow for monitoring, neutral for ignore.
-const POSTURE_COLORS: Record<string, { color: string; bg: string }> = {
-  amplify:   { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.14)' },   // green — our message + receptive audience
-  offensive: { color: '#0ea5e9', bg: 'rgba(14, 165, 233, 0.14)' },   // cyan — content opportunity
-  defensive: { color: '#ef4444', bg: 'rgba(239, 68, 68, 0.14)' },    // red — opposition attack territory
-  monitor:   { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.14)' },  // purple — watch but don't engage
-  ignore:    { color: '#666',    bg: 'rgba(102, 102, 102, 0.10)' },  // gray — not worth attention
-}
-
-function signalLabel(signal: string): string {
-  switch (signal) {
-    case 'viral': return 'Viral'
-    case 'amplified': return 'Amplified'
-    case 'missing_coverage': return 'Missing'
-    case 'elite_only': return 'Elite only'
-    case 'stable': return 'Stable'
-    case 'no_trend_signal': return 'No signal'
-    default: return signal
-  }
-}
-
-function momentumBadge(
-  signal: string | null | undefined,
-  data: Record<string, unknown> | null | undefined,
-  lens: StrategicLens | null | undefined,
-): MomentumBadge | null {
-  if (!signal) return null
-  // Hide pure-monitoring with no action (nothing to show the user).
-  if (lens && lens.posture === 'ignore') return null
-  if (!lens && (signal === 'stable' || signal === 'no_trend_signal')) return null
-
-  const palette = lens ? POSTURE_COLORS[lens.posture] : POSTURE_COLORS.monitor
-  const ov = data?.outlet_velocity as number | undefined
-  const cv = data?.cluster_velocity as number | undefined
-  const tv = data?.trend_velocity as number | undefined
-
-  // Tooltip combines the underlying momentum data with the strategic action.
-  // Reads "Signal: <what's happening>. Action: <what to do>. Urgency: X."
-  const signalDesc =
-    signal === 'viral' ? `Outlets ${ov ? `${ov.toFixed(1)}×` : 'spiking'} AND voter search ${tv ? `${tv.toFixed(1)}×` : 'spiking'} vs baseline` :
-    signal === 'amplified' ? `Outlets ${ov ? `${ov.toFixed(1)}×` : 'spiking'} (broad press pickup) but voter search flat` :
-    signal === 'missing_coverage' ? `Voter search ${tv ? `${tv.toFixed(1)}×` : 'spiking'} but press flat` :
-    signal === 'elite_only' ? `Angles ${cv ? `${cv.toFixed(1)}×` : 'spiking'} but few outlets — narrow press` :
-    signal
-
-  const parts = [signalDesc]
-  if (lens?.action) parts.push(`→ ${lens.action}`)
-  if (lens?.urgency) parts.push(`Urgency: ${lens.urgency}`)
-
-  return {
-    label: signalLabel(signal),
-    color: palette.color,
-    bg: palette.bg,
-    tooltip: parts.join('\n'),
-    urgencyBorder: lens?.urgency === 'high' ? palette.color : undefined,
-  }
-}
-
-function TrendArrow({ delta }: { delta: number }) {
-  if (delta > 0) return <span style={{ color: C.green, fontSize: 13 }}>↑</span>
-  if (delta < 0) return <span style={{ color: C.red, fontSize: 13 }}>↓</span>
-  return <span style={{ color: C.text3, fontSize: 13 }}>—</span>
-}
-
 function FeaturedCard({ frame }: { frame: NarrativeFrame }) {
   const oc = frameColor(frame)
   const delta = frame.mentions_this_week - frame.mentions_last_week
@@ -241,165 +174,14 @@ function FeaturedCard({ frame }: { frame: NarrativeFrame }) {
   )
 }
 
-function DetailPanel({ frame }: { frame: NarrativeFrame }) {
-  const [timeseries, setTimeseries] = useState<TimeseriesPoint[]>([])
-  const [hovered, setHovered] = useState(false)
-  const oc = frameColor(frame)
-
-  useEffect(() => {
-    api.frameTimeseries(frame.id).then(setTimeseries).catch(() => {})
-  }, [frame.id])
-
-  const articleDelta = frame.mentions_this_week - frame.mentions_last_week
-  const outletDelta = frame.unique_outlets_this_week - frame.unique_outlets_last_week
-  const reachDelta = frame.reach_this_week - frame.reach_last_week
-  const reachFmt = (v: number) => v > 0 ? `${(v / 1000).toFixed(1)}K` : '—'
-
-  // Total outlets covering this frame across all time, derived from the
-  // outlet_tiers breakdown the API returns. The API doesn't ship a
-  // `unique_outlets_total` field directly, so we sum the tier counts.
-  const outletsTotal = frame.outlet_tiers
-    ? Object.values(frame.outlet_tiers).reduce((a, b) => a + (b || 0), 0)
-    : frame.unique_outlets_this_week
-
-  const rows = [
-    { label: 'Articles', total: frame.mentions_total, wk: frame.mentions_this_week, delta: articleDelta },
-    { label: 'Outlets', total: outletsTotal, wk: frame.unique_outlets_this_week, delta: outletDelta },
-    { label: 'Reach', total: reachFmt(frame.reach_total), wk: reachFmt(frame.reach_this_week), delta: reachDelta },
-  ]
-
-  return (
-    <Link
-      to={`/narratives/${frame.id}`}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        background: C.bg2,
-        border: `1px solid ${hovered ? C.borderBright : C.border}`,
-        borderRadius: '0.625rem', padding: 16, overflow: 'hidden',
-        textDecoration: 'none', color: 'inherit', display: 'block',
-        cursor: 'pointer',
-        transition: 'border-color 0.12s ease',
-      } as CSSProperties}
-    >
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: C.text1, lineHeight: 1.25, marginBottom: 4 }}>
-          {frame.name}
-        </div>
-        {frame.description && (
-          <div style={{
-            fontSize: 12, color: C.text2, lineHeight: 1.45,
-            overflow: 'hidden', display: '-webkit-box',
-            WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
-          } as CSSProperties}>
-            {frame.description}
-          </div>
-        )}
-      </div>
-
-      <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-        <span
-          title={STAGE_HELP[frame.stage] ?? ''}
-          style={{
-            background: C.bg3, border: `1px solid ${C.border}`,
-            borderRadius: 4, padding: '3px 8px', fontSize: 11, color: C.text2,
-            cursor: 'help',
-          }}
-        >
-          {stageLabel(frame.stage)}
-        </span>
-        <span
-          title={OWNER_HELP[frame.owner_type] ?? ''}
-          style={{
-            background: C.bg3, border: `1px solid ${C.border}`,
-            borderRadius: 4, padding: '3px 8px', fontSize: 11, color: oc, fontWeight: 600,
-            cursor: 'help',
-          }}
-        >
-          {frame.owner_type.charAt(0).toUpperCase() + frame.owner_type.slice(1)}
-        </span>
-        {(() => {
-          const m = momentumBadge(frame.momentum_signal, frame.momentum_data, frame.strategic_lens)
-          if (!m) return null
-          // High urgency gets a slightly bolder border (2px) — subtle visual
-          // weight to draw the eye toward truly time-sensitive items.
-          const borderWidth = m.urgencyBorder ? 2 : 1
-          return (
-            <span
-              title={m.tooltip}
-              style={{
-                background: m.bg, border: `${borderWidth}px solid ${m.color}`,
-                borderRadius: 4, padding: '3px 8px', fontSize: 11,
-                color: m.color, fontWeight: 600, cursor: 'help',
-              }}
-            >
-              {m.label}
-            </span>
-          )
-        })()}
-      </div>
-
-      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 14 }}>
-        <thead>
-          <tr>
-            {['METRIC', 'TOTAL', '1W', ''].map((h, i) => (
-              <th key={i} style={{
-                textAlign: i === 0 ? 'left' : 'right',
-                fontSize: 10, color: C.text3, padding: '4px 0 6px',
-                letterSpacing: '0.1em', fontWeight: 600,
-                borderBottom: `1px solid ${C.border}`,
-              }}>
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(row => (
-            <tr key={row.label} style={{ borderBottom: `1px solid ${C.bg3}` }}>
-              <td style={{ fontSize: 13, color: C.text2, padding: '7px 0' }}>{row.label}</td>
-              <td style={{ textAlign: 'right', fontSize: 14, fontWeight: 600, color: C.text1, padding: '7px 0' }}>
-                {row.total}
-              </td>
-              <td style={{ textAlign: 'right', fontSize: 13, color: C.text2, padding: '7px 0' }}>
-                {row.wk}
-              </td>
-              <td style={{ textAlign: 'right', padding: '7px 0' }}>
-                <TrendArrow delta={row.delta} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      {timeseries.length > 0 && (
-        <div style={{ marginTop: 4 }}>
-          <ResponsiveContainer width="100%" height={70}>
-            <AreaChart data={timeseries} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
-              <defs>
-                <linearGradient id={`grad-${frame.id}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={oc} stopOpacity={0.2} />
-                  <stop offset="95%" stopColor={oc} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <Area
-                type="monotone" dataKey="count"
-                stroke={oc} strokeWidth={2}
-                fill={`url(#grad-${frame.id})`}
-                dot={false} activeDot={false}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-    </Link>
-  )
-}
-
 function ArticleRow({ item }: { item: SourceItem }) {
-  const score = item.race_relevance_score ?? 0
-  const scoreColor = score >= 80 ? C.accent : score >= 50 ? C.text2 : C.text3
   const [hovered, setHovered] = useState(false)
+  const { user } = useAuth()
+  // Per-article relevance bucket is admin-only — non-admins still see
+  // the article ordering, just not the raw confidence label.
+  const relStyle = user?.isAdmin
+    ? (REL_BADGE_STYLE[item.race_relevance_label ?? ''] ?? null)
+    : null
 
   return (
     <Link
@@ -430,10 +212,17 @@ function ArticleRow({ item }: { item: SourceItem }) {
           </div>
         )}
       </div>
-      <div style={{ textAlign: 'right', flexShrink: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: scoreColor }}>
-          {score > 0 ? score : '—'}
-        </div>
+      <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+        {relStyle && item.race_relevance_label && (
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: '0.07em',
+            color: relStyle.color, background: relStyle.bg,
+            border: `1px solid ${relStyle.border}`,
+            padding: '1px 6px', borderRadius: 4,
+          }}>
+            {item.race_relevance_label.toUpperCase()}
+          </span>
+        )}
         <div style={{ fontSize: 11, color: C.text3 }}>
           {formatArticleDate(item.published_at ?? item.created_at)}
         </div>
@@ -658,19 +447,26 @@ export function Dashboard() {
   // page renders instantly. Skeletons only show on the first-ever visit
   // (before Layout's initial prefetch resolves).
   const cached = getDashboardCache()
+  const { user } = useAuth()
   const [frames, setFrames] = useState<NarrativeFrame[]>(cached.frames ?? [])
   const [spikes, setSpikes] = useState<Spike[]>(cached.spikes ?? [])
   const [recent, setRecent] = useState<SourceItem[]>(cached.recent ?? [])
+  const [briefing, setBriefing] = useState<MorningBriefing | null>(cached.briefing)
   const [loading, setLoading] = useState(!cached.frames)
+  const [briefingLoading, setBriefingLoading] = useState(!cached.briefing)
   const [activeFilter, setActiveFilter] = useState<FilterKey>('all')
 
   const refresh = async () => {
-    const [fr, sp, ra] = await Promise.allSettled([
+    // Includes briefing — refresh is on a 60s timer, so a slow briefing
+    // call here doesn't gate first paint (it ran independently on mount).
+    const [fr, sp, ra, br] = await Promise.allSettled([
       api.narrativeFrames(), api.spikes(), api.recentArticles(10),
+      api.morningBriefing(2),
     ])
     if (fr.status === 'fulfilled') setFrames(fr.value)
     if (sp.status === 'fulfilled') setSpikes(sp.value)
     if (ra.status === 'fulfilled') setRecent(ra.value)
+    if (br.status === 'fulfilled') setBriefing(br.value)
   }
 
   useEffect(() => {
@@ -687,6 +483,13 @@ export function Dashboard() {
       // Background refresh on mount so stale cache catches up immediately.
       refresh()
     }
+    // Briefing arrives on its own clock — the LLM synthesis can take several
+    // seconds, so we don't let it gate first paint. The briefing section
+    // skeleton shows while we wait; the rest of the dashboard renders ASAP.
+    awaitBriefing().then(b => {
+      if (b) setBriefing(b)
+      setBriefingLoading(false)
+    })
     const id = setInterval(refresh, 60_000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -713,12 +516,6 @@ export function Dashboard() {
     })
 
   const featuredFrames = filteredFrames.slice(0, 8)
-  // Detail-panel candidates: any frame in an "actively moving" stage.
-  // Previously only mainstream+spreading — meant a campaign with all its
-  // frames in resurfacing/active showed an empty detail-panel grid.
-  const topFrames = filteredFrames
-    .filter(f => ['mainstream', 'spreading', 'resurfacing', 'active'].includes(f.stage))
-    .slice(0, 2)
 
   const counts = {
     all: frames.length,
@@ -740,12 +537,35 @@ export function Dashboard() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', minHeight: '100%' }}>
 
         {/* ── Center: Featured cards + detail panels ── */}
-        <div style={{ padding: '16px 24px', borderRight: `1px solid ${C.border}` }}>
+        {/* Top padding is 0 so the RaceSentiment banner sits flush against
+            the app header. Left/right padding (24px) and bottom padding
+            (16px) match the prior look for the rest of the column.
+            minWidth: 0 prevents intrinsic-content-sized children (e.g.
+            the briefing headline's white-space: nowrap auto-fit text)
+            from blowing the grid 1fr column past the right rail. */}
+        <div style={{ padding: '0 24px 16px', borderRight: `1px solid ${C.border}`, minWidth: 0 }}>
           {/* Race Sentiment — prominent peer card above the narrative cards.
               Markets + forecaster ratings shown separately (no blended number).
               Phase 1: manual values entered via the edit modal. Phase 2 will
               swap in scraped/API values without touching this component. */}
           <RaceSentimentCard />
+
+          {/* Briefing sections — Race Situation memo, Needs Response,
+              What Changed in the Race. Pulled out of the frames-loading
+              conditional so they render independently of narrative-frames
+              data. Briefing has its own loading state (LLM-slow). */}
+          {briefingLoading && !briefing ? (
+            <section style={{ marginBottom: 32 }}>
+              <div className="skeleton" style={{ height: 16, width: 140, marginBottom: 12 }} />
+              <div className="skeleton" style={{ height: 140, borderRadius: 12 }} />
+            </section>
+          ) : briefing ? (
+            <>
+              <RaceSituation memo={briefing.race_memo} />
+              <NeedsResponse items={briefing.needs_response} />
+              <OvernightChanges claims={briefing.overnight_changes} />
+            </>
+          ) : null}
 
           {loading ? (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 24 }}>
@@ -784,7 +604,7 @@ export function Dashboard() {
                     }}>
                       Featured Narratives
                       <InfoTooltip
-                        text={'The eight most important narratives right now. Ranked by a combined score: how urgent the AI thinks it is, what action it calls for (defend / attack / amplify), whether it\'s viral or growing, where it sits in its lifecycle, and how many outlets are covering it this week. Filtering by Owner or Stage re-ranks within that subset.'}
+                        text={'The narratives that matter most this week, ranked by urgency and coverage. Filter by Owner or Stage to re-rank within a subset.'}
                       />
                     </div>
                     <div style={{
@@ -825,14 +645,8 @@ export function Dashboard() {
                 </div>
               )}
 
-              {/* Detail panels for top 2 active frames */}
-              {topFrames.length > 0 && (
-                <div style={{ marginBottom: 28 }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
-                    {topFrames.map(f => <DetailPanel key={f.id} frame={f} />)}
-                  </div>
-                </div>
-              )}
+              {/* Activity This Week — top race-allowlist entities (briefing). */}
+              {briefing && <ActivityThisWeek entities={briefing.top_entities} />}
 
               {/* Spikes — moved here from the right rail */}
               <div>
@@ -895,10 +709,6 @@ export function Dashboard() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: C.text1, letterSpacing: '0.08em', display: 'inline-flex', alignItems: 'center' }}>
               RECENT ARTICLES
-              <InfoTooltip
-                text={'The latest articles the system has pulled in that look race-relevant. The yellow number on the right is an AI-assigned relevance score from 0–100 — higher means more directly about your race.'}
-                placement="left"
-              />
             </span>
             <span style={{ fontSize: 11, color: C.text3 }}>
               {loading ? '' : `${recent.length} new`}

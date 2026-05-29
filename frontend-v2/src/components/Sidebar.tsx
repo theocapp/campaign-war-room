@@ -1,14 +1,18 @@
 import {
   BarChart3, Calendar, FileText, Home, Inbox, Layers,
-  LineChart, Map, MapPin, Newspaper, Radio, Settings, Users,
+  Map, MapPin, Radio, Settings, Users,
 } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
+import { useAuth } from '@/auth/AuthContext'
 
-const NAV: { to: string; label: string; icon: LucideIcon; exact?: boolean }[] = [
+type NavItem = { to: string; label: string; icon: LucideIcon; exact?: boolean; adminOnly?: boolean }
+
+const NAV: NavItem[] = [
   { to: '/',           label: 'Home',       icon: Home,       exact: true },
-  { to: '/forecast',   label: 'Forecast',   icon: LineChart },
-  { to: '/briefing',   label: 'Briefing',   icon: Newspaper },
+  // Briefing consolidated into Home on 2026-05-29. /briefing redirects to /.
+  // Forecast retired 2026-05-29 — race-sentiment chart moved to Analytics.
+  // /forecast redirects to /analytics.
   { to: '/articles',   label: 'Articles',   icon: FileText },
   { to: '/analytics',  label: 'Analytics',  icon: BarChart3 },
   { to: '/narratives', label: 'Narratives', icon: Layers },
@@ -22,7 +26,9 @@ const NAV: { to: string; label: string; icon: LucideIcon; exact?: boolean }[] = 
   { to: '/opponents',  label: 'Opponents',  icon: Users },
   { to: '/review',     label: 'Review',     icon: Inbox },
   { to: '/monitors',   label: 'Monitors',   icon: Radio },
-  { to: '/setup',      label: 'Settings',   icon: Settings },
+  // Settings is the campaign-setup wizard — every action inside it spends
+  // money (LLM discovery, GDELT backfill, rescore). Admin only.
+  { to: '/setup',      label: 'Settings',   icon: Settings, adminOnly: true },
 ]
 
 interface SidebarProps {
@@ -33,10 +39,14 @@ interface SidebarProps {
 }
 
 export function Sidebar({ reviewBadge, collapsed }: SidebarProps) {
-  const width = collapsed ? 60 : 220
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
+  const visibleNav = NAV.filter(item => !item.adminOnly || isAdmin)
+  const width = collapsed ? 60 : 180
 
   return (
     <aside
+      data-collapsed={collapsed}
       style={{
         width,
         flexShrink: 0,
@@ -44,19 +54,21 @@ export function Sidebar({ reviewBadge, collapsed }: SidebarProps) {
         borderRight: '1px solid var(--border)',
         display: 'flex',
         flexDirection: 'column',
-        overflow: 'hidden',
+        overflow: collapsed ? 'visible' : 'hidden',
         transition: 'width 0.18s ease',
       }}
     >
       <nav style={{ flex: 1, padding: '12px 8px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {NAV.map(item => {
+        {visibleNav.map(item => {
           const Icon = item.icon
           return (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.exact}
-              title={collapsed ? item.label : undefined}
+              aria-label={item.label}
+              data-tooltip={item.label}
+              className="sidebar-nav-link"
               style={({ isActive }) => ({
                 display: 'flex',
                 alignItems: 'center',
@@ -69,8 +81,7 @@ export function Sidebar({ reviewBadge, collapsed }: SidebarProps) {
                 fontWeight: isActive ? 600 : 400,
                 color: isActive ? 'var(--text-1)' : 'var(--text-2)',
                 background: isActive ? 'var(--bg-3)' : 'transparent',
-                borderLeft: `3px solid ${isActive ? 'var(--accent)' : 'transparent'}`,
-                paddingLeft: collapsed ? 0 : 9,
+                paddingLeft: collapsed ? 0 : 12,
                 whiteSpace: 'nowrap',
                 transition: 'background 0.1s ease, color 0.1s ease',
                 position: 'relative',

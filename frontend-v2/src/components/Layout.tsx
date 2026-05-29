@@ -1,7 +1,8 @@
 import { Menu } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '@/api/client'
 import { prefetchDashboard } from '@/api/dashboardCache'
+import { useAuth } from '@/auth/AuthContext'
 import { NotificationsBell } from './NotificationsBell'
 import { SearchBar } from './SearchBar'
 import { Sidebar } from './Sidebar'
@@ -132,6 +133,92 @@ function formatAgo(iso: string) {
   return `${Math.floor(h / 24)}d ago`
 }
 
+function ProfileMenu() {
+  const { user, logout } = useAuth()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Close on outside click. We listen on document so any click outside
+  // the menu container collapses it.
+  useEffect(() => {
+    if (!open) return
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+
+  if (!user) return null
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        title={user.name}
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: '50%',
+          background: '#7c3aed',
+          color: '#fff',
+          border: 'none',
+          cursor: 'pointer',
+          fontWeight: 700,
+          fontSize: 12,
+          letterSpacing: '0.02em',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {user.initials}
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute',
+          top: 'calc(100% + 8px)',
+          right: 0,
+          minWidth: 200,
+          background: 'var(--bg-2)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          padding: 8,
+          zIndex: 200,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+        }}>
+          <div style={{ padding: '8px 10px 10px', borderBottom: '1px solid var(--border)', marginBottom: 6 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>{user.name}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>Preview access</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setOpen(false); logout() }}
+            style={{
+              width: '100%',
+              textAlign: 'left',
+              padding: '8px 10px',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: 6,
+              color: 'var(--text-2)',
+              fontSize: 13,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-3)' }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+          >
+            Log out
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export function Layout({ children }: { children: React.ReactNode }) {
   const [queueCount, setQueueCount] = useState(0)
   const [lastSync, setLastSync] = useState<string | null>(null)
@@ -140,8 +227,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
   // Sidebar collapse — lifted out of Sidebar so the header hamburger can
   // toggle it. Persists in localStorage across sessions.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1' }
-    catch { return false }
+    try {
+      const v = localStorage.getItem(SIDEBAR_COLLAPSED_KEY)
+      return v === null ? true : v === '1'
+    }
+    catch { return true }
   })
   useEffect(() => {
     try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0') } catch { /* ignore */ }
@@ -191,14 +281,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
         position: 'relative',
       }}>
         {/* Hamburger zone — width matches the sidebar (60px collapsed,
-            220px expanded) so the logo to its right ALWAYS aligns with the
+            180px expanded) so the logo to its right ALWAYS aligns with the
             start of the main content area. The button itself stays a
             stable 36×36 square; the "Menu" text appears next to it when
             expanded. To keep the animation perfectly smooth, only the
             zone's width transitions — the button never resizes, and the
             label fades in via opacity (no layout reflow). */}
         <div style={{
-          width: sidebarCollapsed ? 60 : 220,
+          width: sidebarCollapsed ? 60 : 180,
           height: '100%',
           display: 'flex', alignItems: 'center',
           paddingLeft: 12,
@@ -253,13 +343,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
             hamburger zone, so it visually aligns with the left edge of
             the main content (and shifts right when the sidebar expands). */}
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
-          paddingLeft: 12,
+          display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0,
+          paddingLeft: 24,
         }}>
           <img
-            src="/noctua-logo.png"
-            alt="NOCTUA"
-            className="noctua-logo"
+            src="/theo-wordmark.png"
+            alt="Theo"
+            className="brand-logo"
             style={{ height: 28, width: 'auto', display: 'block' }}
           />
           <span style={{
@@ -270,25 +360,24 @@ export function Layout({ children }: { children: React.ReactNode }) {
             padding: '2px 6px',
             fontWeight: 700,
             marginLeft: 2,
+            transform: 'translateY(3px)',
           }}>
             {district}
           </span>
         </div>
 
-        {/* Universal search bar — centered within the MAIN content area
-            (viewport minus sidebar), so the logo on the left always has
-            room regardless of whether the sidebar is expanded. The `left`
-            value is `sidebarWidth + (viewportWidth - sidebarWidth) / 2`
-            expressed as `calc((100% + sidebarWidth) / 2)`. */}
+        {/* Universal search bar — centered on the full viewport (B2B SaaS
+            convention: Stripe, Linear, Notion). Sidebar-aware centering was
+            tried previously but felt off-balance on dashboards with a right
+            panel; viewport-centering reads as more stable across views. */}
         <div style={{
           position: 'absolute',
-          left: `calc((100% + ${sidebarCollapsed ? 60 : 220}px) / 2)`,
+          left: '50%',
           top: '50%',
           transform: 'translate(-50%, -50%)',
           width: 600,
           maxWidth: '60vw',
           pointerEvents: 'none',
-          transition: 'left 0.18s ease',
         }}>
           <div style={{ pointerEvents: 'auto', display: 'flex' }}>
             <SearchBar />
@@ -307,27 +396,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           )}
           <NotificationsBell />
           <ThemeToggle />
-          <button
-            type="button"
-            title="theocapeilleres@gmail.com"
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: '50%',
-              background: '#7c3aed',
-              color: '#fff',
-              border: 'none',
-              cursor: 'pointer',
-              fontWeight: 700,
-              fontSize: 12,
-              letterSpacing: '0.02em',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            TC
-          </button>
+          <ProfileMenu />
         </div>
       </header>
 

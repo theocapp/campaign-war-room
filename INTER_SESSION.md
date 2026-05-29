@@ -5,6 +5,241 @@ See CLAUDE.md for the full protocol.
 
 ---
 
+## 2026-05-29 Session: Kalshi backfill + Polymarket token-ID bugfix
+
+### Probe
+Asked whether more Kalshi/Polymarket history was available than the DB held.
+Ran `_clob_prices_history(token, days_back=730)` and
+`_kalshi_candlesticks(series, market, days_back=730)` against both
+candidate and opponent markets:
+
+- **Kalshi (HOUSEPA8-26)**: 298 daily candles available, back to
+  **2025-07-02**. We had 53 snapshots from 2026-03-30 → today, so ~270
+  days of history were sitting unused on Kalshi's server.
+- **Polymarket (pa-08-house-election-winner)**: 719 points available,
+  earliest **2026-04-29** — essentially the same window we already had
+  (39 snapshots from 2026-04-26 → today). Market was created on
+  2025-12-16 but had near-zero liquidity until late April; the CLOB
+  simply has no earlier price data to fetch. **No further Polymarket
+  backfill is possible.**
+
+### Built
+- **Bugfix** [backend/app/services/prediction_market_monitor.py:207-218](backend/app/services/prediction_market_monitor.py:207).
+  Polymarket's Gamma API returns `clobTokenIds` as a JSON-encoded
+  STRING (`'["91...", "98..."]'`) — not a real array — for this market.
+  The old `_yes_token()` did `tokens[0]` without `json.loads()`, so it
+  returned the literal `"["` character. Now parses if it's a string.
+  Follow-up: also overwrote the corrupted `candidate_yes_token_id` /
+  `opponent_yes_token_id` strings in
+  `race_sentiment.external_metadata` for source=polymarket with the
+  correct token IDs fetched from Gamma.
+- **Kalshi backfill** executed via `kalshi_backfill_history('kalshi',
+  metadata, days_back=330)`. Result: `{written: 266, skipped_dedup:
+  45}`. Snapshot count 53 → 320. Earliest 2026-03-30 → **2025-07-04**.
+
+### Verified
+- DB: 320 Kalshi snapshots, range 2025-07-04 → 2026-05-29.
+- Polymarket metadata: token IDs are now the real 76-digit values, not
+  `"["`. (No new history to backfill, but the metadata is no longer
+  corrupt — future `polymarket_backfill_history` calls will succeed.)
+- `/timeline` preview, 90d view: chart x-axis now extends back to **Feb 28**
+  (was Mar 30 — the previous earliest snapshot). Kalshi line renders 68
+  points across the window (was ~50). No console errors.
+
+### Open questions / concerns for review
+- **UI only goes to 90d but we now have ~330 days of data.** User
+  previously asked to remove the `6 mo` and `1 y` range buttons before
+  the backfill ran. Now that there's real data to fill them, adding
+  back longer ranges would let them see the full window — but the user
+  explicitly removed those, so left untouched. Worth mentioning if
+  they want to revisit.
+- **`source_owner_type='unclear'` for social posts.** (Carried over
+  from previous entry — still a known ingestion-side gap, not addressed.)
+
+---
+
+## 2026-05-29 Session: Timeline top-articles wrongly tagged "Neutral"
+
+### Problem the user reported
+On `/timeline`, the impact-ranked list ("Top moments by market impact") was
+labelling every top-article event "Neutral" — including a Cognetti tweet
+attacking Bresnahan ("Proud to have the support of @PennaNurses … Rob Bresnahan
+voted to gut Medicaid …", article id 4662, May 1).
+
+### Root cause (two layers)
+1. **Backend** `/api/race-sentiment/events` emitted `top_article` events with
+   no owner/subject fields at all — the per-article perspective the V13.21
+   classifier had already computed (`SourceItem.perspective = "pro_candidate"`
+   for 4662) never left the DB.
+2. **Frontend** [pages/Timeline.tsx:264-275](frontend-v2/src/pages/Timeline.tsx:264)
+   hardcoded `quadrant: 'media'` for every top-article pin under the
+   assumption "top articles aren't owned by either side." That fails the
+   moment a candidate's own social post is the top article of the day.
+   `media` → label "Neutral" via [quadrantColor.ts:80](frontend-v2/src/lib/quadrantColor.ts:80).
+
+### Built
+- New [backend/app/services/article_quadrant.py](backend/app/services/article_quadrant.py) —
+  `quadrants_for_articles(items, db)` returns `{article_id: (owner_type,
+  subject_type)}` for a batch of `SourceItem`s. Single SQL query joining
+  `NarrativeFrameMention` + `NarrativeFrame`, then in-Python cascade per
+  article. Also exposes a single-item convenience wrapper.
+- Wired into [backend/app/routes/race_sentiment.py:list_timeline_events](backend/app/routes/race_sentiment.py:285) —
+  one batched call before the article loop, then each `top_article` event
+  gets `owner_type` + `subject_type` in its payload.
+- [frontend-v2/src/pages/Timeline.tsx](frontend-v2/src/pages/Timeline.tsx)
+  replaces the hardcoded `'media'` with `quadrantKey(e.owner_type,
+  e.subject_type)` — same call pattern lifecycle events already use.
+- 13 unit tests in [backend/tests/test_article_quadrant.py](backend/tests/test_article_quadrant.py) covering every rung of the cascade.
+
+### The cascade
+For each article, derive `(owner_type, subject_type)`:
+1. **Highest-confidence narrative-frame match** wins. NULL `subject_type`
+   filled by the existing `get_subject_classifier(db)` heuristic. When the
+   classifier returns "media" (frame name has no actor token) but the
+   frame's owner is partisan, default subject to owner (handles frames
+   like "NEPA Support" — clearly campaign-owned but no name in the title).
+2. **`SourceItem.source_owner_type`** if it's `candidate_statement` /
+   `opponent_statement` / `media`. Subject defaults to owner.
+3. **`SourceItem.perspective`** (`pro_candidate` → `candidate`/`candidate`,
+   `pro_opponent` → `opponent`/`opponent`, `neutral` → `media`/`media`).
+4. **Default**: `("media", "media")`.
+
+### Key decisions
+- **Subject axis from frame match, not from a new classifier.** The
+  existing `subject_classifier` already covers frames; articles inherit
+  their subject from the most-confident frame they match. Article 4662
+  matches "Bresnahan's Stock Trades" (conf=90) and "NEPA Support" (conf=75)
+  — the stock-trades match wins, supplying `subject=opponent` and putting
+  the pin in `our_offense` (cyan) instead of `media` (gray). For mixed
+  posts like this one, the highest-confidence claim is the most defensible
+  single-bucket assignment.
+- **Articles with no frame match still get a real owner.** Falling back to
+  `source_owner_type` then `perspective` means a pro-Cognetti article with
+  no frame match lands in `our_defense` (blue, "Pro-us"), not gray. Subject
+  defaults to owner since there's no signal — better wrong-axis-correct-
+  side than correct-everything-gray.
+- **`source_owner_type='unclear'` (the default) skips Phase 2.** Most
+  campaign-ingested social posts have `unclear` even when the author is
+  clearly the candidate. Documented as a separate ingestion-side bug — the
+  cascade routes around it via Phase 3 (`perspective='pro_candidate'`).
+
+### Verified
+- Unit tests: 13/13 pass.
+- Helper on real DB: article 4662 → `('candidate', 'opponent')`. Spot
+  check on 3 other articles (3614 Cognetti self-promo, 4604/4609 Trump-DoJ
+  neutral) returns the expected pairs.
+- Live API (`GET /api/race-sentiment/events?days=60`): article 4662
+  payload now carries `owner_type='candidate', subject_type='opponent'`.
+  Distribution across 46 top-article events: 17 media / 12 our_defense /
+  9 our_offense / 7 their_defense / 1 their_offense — down from 46/46
+  forced to media.
+- `/timeline` preview: the Pennanurses row icon background is
+  `rgba(6,182,212,0.12)` (= `#06b6d4` = `our_offense` cyan), label
+  reads "Anti-them · Top Articles · May 1". Zero console errors.
+
+### Open questions / concerns for review
+- **`source_owner_type='unclear'` for social posts.** A real ingestion-side
+  bug: the Cognetti tweet has `source_author='@PaigeGCognetti'` but
+  `source_owner_type='unclear'`. The cascade works around it, but if the
+  perspective classifier ever drops to `neutral` on a clearly-candidate-
+  authored post, we'd misroute it. Worth a separate look at the social
+  ingestion path that sets `source_owner_type`.
+
+### Follow-up (same session): self-axis-wins + named labels
+**User pushback:** the Pennanurses tweet was now landing in `our_offense`
+("Anti-Bresnahan") — the user said it should be `our_defense`
+("Pro-Cognetti") because the tweet LEADS with self-promotion ("proud to
+have @PennaNurses support") and the Bresnahan jab is the second beat, not
+the headline.
+
+**Fix:** revised the subject-axis tiebreaker in `quadrants_for_articles`.
+Old rule was "highest-confidence frame wins"; new rule is "self-axis wins
+for partisan-owned articles": if ANY frame match treats the article as
+self-referential (subject == owner), subject defaults to owner. Only flip
+to other-axis when EVERY match is other-axis (a pure attack post). Article
+4662 now matches both "NEPA Support" (subject=candidate after the
+classifier-media→owner bump) and "Bresnahan's Stock Trades"
+(subject=opponent) → self-axis exists → subject=candidate → our_defense.
+
+Pure-attack posts (only an opponent-subject frame matches, nothing else)
+still route correctly to our_offense — added test `test_pure_attack_post_routes_to_other_axis`.
+
+**Also addressed user's second ask:** generic "Pro-us / Anti-them" labels
+swapped for named "Pro-Cognetti / Anti-Bresnahan" everywhere on Timeline.
+`Timeline.tsx` now loads `candidateName` + `opponentName` via `api.campaign()`
+and `api.opponents()` (same pattern Landscape, Narratives, ReviewQueue
+already use) and threads them through `ImpactList` → `ImpactRow` and
+`SidePanel` to call `quadrantNamedLabel()` instead of `quadrantLabel()`.
+
+**Verified:**
+- 15/15 unit tests pass (added 2 new tests, replaced 1 outdated test).
+- Live API: article 4662 now returns `owner_type=candidate,
+  subject_type=candidate`. Distribution shifted: 12 → 13 our_defense, 9 →
+  8 our_offense (the Pennanurses tweet moved across the boundary).
+- `/timeline` preview: Pennanurses row reads "Proud to have the support of
+  @PennaNurses … **Pro-Cognetti** · Top Articles · May 1", icon background
+  `rgba(0,89,194,0.12)` = `#0059c2` = `our_defense` blue. Whole-page
+  label scan: 18 "Pro-Cognetti", 9 "Anti-Cognetti", 3 "Anti-Bresnahan",
+  3 "Neutral", **0 generic "Pro-us / Anti-them / Pro-them / Anti-us"** —
+  named labels everywhere, no orphan generic strings. Zero console errors.
+
+---
+
+## 2026-05-29 Session: Retire /forecast, fold race-sentiment chart into /analytics
+
+### Built
+- New component [components/RaceSentimentChart.tsx](frontend-v2/src/components/RaceSentimentChart.tsx) — lifted the Polymarket+Kalshi line chart out of the (now-deleted) Forecast page. Self-contained card with title, latest readings inline, legend, the chart itself (with per-day event reference lines + day-grouped tooltip), and the thin-market caveat footer. Accepts `days` prop (defaults to 30).
+- Embedded the chart as a full-width card at the top of [pages/Analytics.tsx](frontend-v2/src/pages/Analytics.tsx), above the existing 2-col grid (Media Tone, Search Interest, Tone stats, Spike Activity). Title style (uppercase, letter-spaced, border-bottom) matches Analytics's existing `SectionTitle`.
+- Deleted `frontend-v2/src/pages/Forecast.tsx`. Removed the import + route from [App.tsx](frontend-v2/src/App.tsx); replaced with `<Route path="/forecast" element={<Navigate to="/analytics" replace />} />` so old bookmarks resolve (same pattern used for `/briefing` and `/entity-network`).
+- Removed the Forecast nav item (and its unused `LineChart` icon import) from [Sidebar.tsx](frontend-v2/src/components/Sidebar.tsx).
+
+### Key decisions
+- **Chart, not just the lines: kept the vertical event-marker reference lines and the day-grouped tooltip.** Without the markers, the chart loses its main "why did it move" signal. The legend's event categories (Narrative promoted / Stage change / Top article) carry over too.
+- **Event-window cards (the +24h/+72h/+7d Polymarket deltas around narrative events) dropped entirely, not migrated.** Timeline already covers event→market impact in a richer way (pins on the line + impact-ranked list with sparklines + per-event 48h delta). Keeping the cards would be a third view of the same data.
+- **Backend endpoints kept.** `/api/race-sentiment/{source}/history` and `/api/race-sentiment/events` are still consumed by both `RaceSentimentChart` and the Timeline page. The `# Phase 3 — timeline events for the /forecast chart` comment in `backend/app/routes/race_sentiment.py:210` is now slightly out of date but harmless; not worth a churn-only edit.
+- **Card sits ABOVE the 2-col grid, not as a span-2 grid child.** Cleaner — the chart needs the room and a `gridColumn: span 2` child would force the grid's auto-row sizing to deal with a much taller cell. A plain wrapper `marginBottom: 24` matches the grid's gap.
+
+### Open questions / concerns for review
+- The chart no longer offers a 7/30/90 day toggle — it was hard-coded to 30 on Forecast too, and adding one now would mean wiring it into the new component without an obvious place for the control. If a future session wants this, add a `PillToggle` like the other Analytics cards, lift `days` to local state, and pass it down.
+- `client.ts:673` still has a `// Phase 3: unified timeline events for the /forecast chart` comment. Left untouched but worth a one-line edit ("for the race-sentiment chart and Timeline") if anyone else is in that file.
+
+### Verified
+- `/analytics` renders the new chart at the top: title, Polymarket 65.7% / 43.0%, Kalshi 60.5% / 42.5%, legend, chart SvgRoot, caveat — followed by Media Tone, Search Interest, Tone stats, Spike Activity below. No fresh runtime errors after reload (only stale HMR buffer messages from the mid-edit window).
+- `/forecast` → 302-style client redirect to `/analytics`. Old bookmarks resolve.
+- Sidebar nav list: Home, Articles, Analytics, Narratives, Landscape, Geographic, Timeline, Opponents, Review, Monitors, Settings — no Forecast.
+
+---
+
+## 2026-05-29 Session: Friend-share access-code auth
+
+### Built
+- Backend access-code gate so the user can tunnel the app to 2-3 friends without exposing the API. Code lives in:
+  - `backend/app/services/access_codes.py` — parses `ACCESS_CODES` env var (semicolon-separated `code:Display Name` pairs), derives initials + a deterministic profile color per code.
+  - `backend/app/routes/auth.py` — `POST /api/auth/verify` (login) and `GET /api/auth/me` (session restore).
+  - `backend/app/main.py` — HTTP middleware that rejects any `/api/*` request without a valid `X-Access-Code` header, except an allowlist (`/health`, `/api/auth/verify`, `/api/auth/me`, FastAPI docs).
+- Frontend login flow:
+  - `frontend-v2/src/auth/AuthContext.tsx` — context that hits `/api/auth/me` on mount, exposes `{ user, login, logout, loading }`.
+  - `frontend-v2/src/pages/Login.tsx` — branded one-input login page.
+  - `frontend-v2/src/api/client.ts` — auto-attaches `X-Access-Code` to every request, dispatches `cwr:unauthorized` on 401 so AuthContext can drop state.
+  - `frontend-v2/src/App.tsx` — `/login` route outside Layout; `RequireAuth` guard around the rest.
+  - `frontend-v2/src/components/Layout.tsx` — replaced the hardcoded "TC" purple bubble with `<ProfileMenu />` (initials + color from the user's code, click to log out).
+- `.env.example` updated with the `ACCESS_CODES` format and usage notes.
+
+### Key decisions
+- **Fails open when `ACCESS_CODES` is empty.** Backend `is_auth_configured()` returns False → middleware skips the check, `/api/auth/me` returns a synthetic "Guest" user. Means the app stays usable in dev with no setup, and the gate snaps shut the moment any code is added. Verified via preview: with no codes, dashboard renders, profile bubble shows "G".
+- **Codes live in `.env`, not the DB.** Static shared secrets — no rotation, no rate-limit, no per-IP throttle. Sized for "show 3 friends this weekend", explicitly not "open beta".
+- **Initials + color derived, not configured.** `_initials()` takes first letter of first and last word; `_color_for()` hashes the code to pick one of 8 palette colors. Each friend gets a stable distinct bubble without the user having to pick.
+- **`@lru_cache` on `_load_codes()`.** Env is read once at first lookup. Restart the backend after editing `ACCESS_CODES` — documented in `.env.example`.
+- **Login page redirects to `from` after success.** `RequireAuth` passes the attempted pathname via router state so a friend hitting `/forecast` without a code lands on `/forecast` after logging in, not `/`.
+- **No cookie, no JWT.** Code in localStorage, sent as `X-Access-Code` header. Lower complexity, fine for trusted-friend threat model.
+
+### Open questions / concerns for review
+- The header allowlist also accepts `access_code` as a query param (for tunnel-friendly first hits) — that puts the code in browser history. Worth removing if you want stricter discipline; kept for now because it makes a "click this link" share flow possible later.
+- No audit log of who logged in when. If you want to see "Alice last logged in 3h ago", add a `last_seen` write in `/api/auth/me` and a tiny `/api/auth/users` admin endpoint.
+- Existing pages still call `api.*` everywhere; on 401 they'll throw and the toast/error UI will show the raw error string before `RequireAuth` redirects. Fine for now; if 401s start happening mid-session because a friend's code is revoked, consider a global toast for "Session expired".
+
+---
+
 ## 2026-05-26 Session A: KG scaffold review + search/logo work
 
 ### Built
@@ -4097,4 +4332,196 @@ The 5-agent code review on `d90d62c` surfaced more than the three hot-fixes alre
 - Backend scheduler config: `race_sentiment_markets` every 2h, `race_sentiment_forecasters` every 12h. Code is committed to disk; the running uvicorn process needs a restart for it to take effect.
 - 15 new tests in `tests/test_market_blend.py`; all pass. Existing `tests/test_270towin_parser.py` (9) and `tests/test_inside_elections_parser.py` (6) still pass — no regressions.
 - Branch `main` still uncommitted across all of today's work.
+
+---
+
+## 2026-05-29 Session: homepage / briefing consolidation
+
+### Built
+
+**Homepage now is the briefing.** The standalone `/briefing` page is gone; its core sections moved up to `/`. New left-column section order:
+
+1. Race Sentiment (kept)
+2. Race Situation memo (grounded v=2, with `[C]` citations)
+3. Needs Response (red-bordered urgent items, with "all clear" empty state)
+4. What Changed in the Race (last-48h labeled candidate quotes — `OvernightChanges`)
+5. Featured Narratives (kept)
+6. Activity This Week (race-allowlist entities)
+7. 24h Spikes (kept)
+
+Right rail (Recent Articles) unchanged.
+
+**Briefing components extracted** into [components/briefing/](frontend-v2/src/components/briefing/) so the Dashboard can compose them and so a future "print this briefing" view stays cheap:
+- `RaceSituation.tsx` — section wrapper + `GroundedMemoView` + `SourcesUsedDisclosure`
+- `NeedsResponse.tsx` — red border list + "all clear" empty state
+- `OvernightChanges.tsx` — labeled-quote list, returns null when empty
+- `ActivityThisWeek.tsx` — 3-col entity grid, returns null when empty
+
+**[dashboardCache.ts](frontend-v2/src/api/dashboardCache.ts) gained briefing support without blocking first paint.** The briefing call is LLM-backed and can take several seconds — we run it in parallel via a separate `briefingInFlight` promise. `prefetchDashboard()` resolves on the three fast endpoints alone (frames/spikes/recent); the new `awaitBriefing()` is what the Dashboard subscribes to for the briefing slot. The skeleton you see in the Race Situation spot only persists until briefing lands; the rest of the dashboard never waits on it.
+
+**Deleted from Dashboard:**
+- The two big `DetailPanel` cards under Featured Narratives (top-2 active frames with sparkline + metrics table). The Narratives page already has full detail on every frame; the homepage duplication wasn't earning its space.
+- Helpers that only `DetailPanel` used: `momentumBadge`, `POSTURE_COLORS`, `signalLabel`, `TrendArrow`, `StrategicLens` / `MomentumBadge` types. Net ~150 lines of dead code gone.
+- The recharts `Area`/`AreaChart`/`ResponsiveContainer` imports + `TimeseriesPoint` type (no longer referenced from Dashboard).
+
+**Route + sidebar:**
+- `/briefing` → `<Navigate to="/" replace />` in [App.tsx](frontend-v2/src/App.tsx). Old bookmarks still resolve.
+- Removed `{ to: '/briefing', label: 'Briefing', icon: Newspaper }` from [Sidebar.tsx](frontend-v2/src/components/Sidebar.tsx) and the now-unused `Newspaper` import.
+- Deleted `frontend-v2/src/pages/MorningBriefing.tsx` outright (after its components were ported).
+
+### Key decisions
+
+- **Race Situation goes _below_ Race Sentiment, not above.** Default proposal was the memo first (it's the synthesis); user picked sentiment first — fastest-scan glance leads, deeper read follows. Implemented per their pick.
+- **Featured Narratives over Narrative Pulse.** Both render "top frames this week." Featured Narratives keeps the importance scoring + Owner/Stage filters + momentum-posture chip; Narrative Pulse was a simpler ↑/↓ delta. Killed Pulse to avoid two similar sections on the same page; Featured Narratives stayed put.
+- **DetailPanel cards removed entirely, not moved.** User's framing was "if we really want to show them they can go into the narratives page" — the Narratives page already shows detail per frame, so moving them would duplicate. Cleaner to delete.
+- **Print button dropped.** The MorningBriefing header had a `window.print()` button. The homepage isn't a memo so the button is out of context. Browser print still works on `/` if anyone needs it; easy to re-add as a small action button later.
+- **Hardcoded `?v=2`.** The legacy v=1 paraphrase memo path is still alive in the backend, but the homepage only requests grounded v=2. No `?v=` URL knob on `/`.
+- **Briefing fetched in parallel, not awaited by the dashboard skeleton.** `Promise.allSettled` for all four would have made the dashboard wait on the LLM call before un-skeletoning. Split into `prefetchDashboard()` (fast) + `awaitBriefing()` (slow) so the page never feels gated by synthesis latency.
+
+### Open questions / concerns for review
+
+- **First paint flashes a skeleton in the Race Situation slot** even when the briefing call is in flight from Layout's earlier prefetch. The flash is short (briefing usually lands within ~1–2s on warm cache, ~5–8s cold), but a future session could pre-render a stub or use the cached previous-day memo as a placeholder. Not done today because the cache is in-memory and resets per page reload.
+- **`MorningBriefingNarrativeCard` type is now dead** in `frontend-v2/src/api/types.ts`. It was only used by the deleted Narrative Pulse render path. Left in place because the backend's `/api/briefing/morning` response still includes `narrative_pulse` — pruning the type would force a coordinated backend response change. Worth a follow-up to either (a) remove `narrative_pulse` from the API and the type, or (b) repurpose it for a homepage section we haven't built.
+- **No error boundary around the briefing block.** If `awaitBriefing()` throws, the catch in dashboardCache swallows and the section just doesn't render. That's the desired fallback, but a real error boundary would also stop a malformed `GroundedMemo` from blowing up the whole Dashboard component. Earlier in this session the console showed a transient React render error after one of the intermediate edits — by the time the final state landed it was gone, but the absence of an error boundary on Dashboard means a future regression in the briefing components would knock the whole page out. Worth adding.
+- **`OvernightChanges` tooltip text is PA-08-specific** ("…mention Cognetti or Bresnahan directly. National Trump/Shapiro coverage stays out…"). That copy lived in MorningBriefing.tsx before the port and isn't worse than it was, but for the SaaS pivot it should template against `CampaignConfig.candidate_name` / `opponent_name`.
+
+### Live state at end of session
+
+- `/` renders 7 left-column sections + Recent Articles right rail. Verified in preview: Race Situation memo shows "Sources used (1 cited / 15 considered)" expandable, Activity This Week shows 6 entities (Bresnahan 48 ↓84, Cognetti 27 ↓144, Trump 25, Shapiro 10, NRCC 6, DCCC), Needs Response shows the "all clear" dashed-border state (briefing currently has `needs_response: []`).
+- `/briefing` → 302 client redirect to `/`. Verified.
+- Sidebar entries (top to bottom): Home, Forecast, Articles, Analytics, Narratives, Landscape, Geographic, Timeline, Opponents, Review, Monitors, Settings. No Briefing.
+- `npx tsc --noEmit` clean for all changed files (the pre-existing Landscape.tsx:1482 `candidateName`/`opponentName` errors remain, unrelated to this session).
+- Zero console errors on full Dashboard render after a forced navigate-away-and-back.
+- Branch `main` still uncommitted alongside the day's earlier sentiment-card work.
+
+### Follow-on declutter pass (later in same session)
+
+After the initial consolidation, the user asked for further visual trimming. Three changes landed:
+
+1. **`NeedsResponse` now hides entirely when the list is empty.** Was rendering a dashed-border "all clear" empty state on every load; the user wanted the section to only exist when there's actually something flagged. The "all clear" empty-state branch was deleted from [components/briefing/NeedsResponse.tsx](frontend-v2/src/components/briefing/NeedsResponse.tsx) — `null` return now wins when `items` is empty.
+
+2. **"Race Sentiment" and "Race Situation" section titles removed**, plus their InfoTooltip bubbles. The scoreboard and the memo are visually distinctive enough that titles weren't earning their space. After a first pass that kept the bubbles in the top-right of each section, the user asked for the bubbles to go too — so both `<InfoTooltip>` elements are now removed entirely. The `HEADER_HELP` constant in [RaceSentimentCard.tsx](frontend-v2/src/components/RaceSentimentCard.tsx) was deleted along with it.
+
+3. **Race Sentiment ··· menu removed**, dropping Sync now / Edit values from the UI. The user opted for "auto-sync is enough" — markets sync every 2h, forecasters every 12h, no manual override surface. This was a substantial deletion:
+   - The entire `EditModal` component (~330 lines) + its helpers (`SectionLabel`, `FieldLabel`, `MarketEditForm`, `RatingEditForm`, `inputStyle`/`saveBtnStyle` const styles, the `RATING_OPTIONS` enum) — all gone.
+   - State (`editing`, `syncing`, `menuOpen`), the `menuRef`, the click-outside `useEffect`, and the `runSync` function — all gone.
+   - The per-source-type staleness calculation (`freshestSyncAge`, `staleWarning`) was removed since it was only ever displayed inside the menu row.
+   - The `formatRelativeTime` helper was only referenced from inside `EditModal`'s footer timestamp render — removed.
+   - Unused imports trimmed: `X`, `RefreshCw`, `MoreHorizontal` from lucide; `InfoTooltip`; `useRef`; `CSSProperties`; `RaceSentimentUpdate` from the api types.
+
+### New open question / future-cleanup item
+
+- **Orphaned API methods in [api/client.ts](frontend-v2/src/api/client.ts).** With `runSync` and `EditModal` gone, `api.syncAllRaceSentiment()` and `api.updateRaceSentiment(...)` have no callers from the frontend anymore. The backend endpoints (`POST /api/race-sentiment/sync-all`, `PUT /api/race-sentiment/{id}`) still exist and the scheduler still triggers internal syncs server-side, so this is a frontend-only orphaning — the routes themselves should NOT be deleted. Worth a follow-up pass to either (a) remove the unused client methods, or (b) leave them with a comment noting they're available for a future admin / settings page if manual sync controls come back. User flagged this for a later cleanup pass — not blocking today.
+
+- **Briefing top-claims pool selection is a flat top-N.** Today the briefing pulls `top_claims_for_briefing(db, days=7, limit=15)` from [routes/dashboard.py:314](backend/app/routes/dashboard.py:314), ranked by a flat `label_priority × reliability_weight × recency_weight` composite. After the prompt/model upgrades the citation density looks healthy (4 citations from a 15-claim pool in current testing), so the user explicitly decided **not** to change this today. But two failure modes are worth designing for if the issue ever surfaces:
+  1. **Quiet news weeks** — when fewer than ~8 strong claims exist, the bottom of the top-15 is padding. A `min_score` quality floor + a soft cap (e.g., `min_score=0.05, limit=25`) would let the pool shrink honestly so the model triggers the "no high-leverage development today" fallback rather than confabulating a lead.
+  2. **One-topic-dominated weeks** — if all top-15 are attack quotes, the model can't find endorsement / vote / commitment counterpoints. **Label-stratified selection** (e.g., guarantee top 4 attacks + top 3 endorsements + top 3 votes + top 3 commitments + top 2 policy_position + top 2 defense) would always give the model a balanced palette. Slightly more code but the most robust fix. Recommended option if the failure mode shows up.
+
+### Live state after declutter pass
+
+- `/` left column now renders, top to bottom: Race Sentiment scoreboard (no header row at all), Race Situation memo (no title, no tooltip), What Changed in the Race (only if `overnight_changes` non-empty), Featured Narratives (kept its title + tooltip), Activity This Week (kept its title + tooltip), 24h Spikes (kept its title + tooltip). Needs Response not visible because `needs_response: []`; would slot in below Race Situation when populated.
+- Total `lucide-info` icons on the page: 6 (Featured Narratives + What Changed + Activity This Week + 24h Spikes header + Recent Articles header + one inside SourceCell badges).
+- No `lucide-more-horizontal` icons anywhere; no "Sync now" / "Edit values" / "Syncing…" text in the DOM.
+- `npx tsc --noEmit` still clean for changed files.
+- Zero console errors after navigate-away-and-back.
+
+
+
+## 2026-05-29 Session: Brand refresh (NOCTUA → THEOSINTEL/Theo) + tooltip declutter pass
+
+### Built
+- **Brand architecture shift.** Company brand: **THEOSINTEL** (lowercase wordmark `theosintel`). Product / AI agent persona inside the product: **Theo** (sentence case). Pattern matches Salesforce/Einstein, Microsoft/Copilot, Anthropic/Claude. Decision was made after ~9 verification cycles of alternative names (CTX, NMI, MIP, CXN, NRTV, VEILLE, BRUIT, PRSM, MUON, HUGO, CYRUS, OTIS, KAI, CASS, THEO, THEOS) all hitting category collisions, the AI-naming saturation wave (every personal-name slot in B2B AI is claimed since 2024), or trademark blockers. `theosintel.com` is registered ($0.01/yr promo via GoDaddy, 3yr commit). `theo.com` is `Make Offer` only and held by someone patient — likely $75K-$300K to acquire.
+- **Sidebar + login wordmarks swapped.** `theo-wordmark.png` (sentence case) in header sidebar, `theosintel-wordmark.png` (lowercase) on login page. Both at `frontend-v2/public/`. Black on transparent with dark-mode invert handled via `.brand-logo` CSS class (replaced the old `.noctua-logo` class, same invert(1) trick).
+- **Favicon** points to `/theo-mark.svg` — minimal eye-O glyph (outer circle r=42 stroke=16, inner dot r=13, all on a 100×100 viewBox), uses `currentColor` so it inherits dark/light mode.
+- **Header polish.** `Theo` wordmark left-aligns with content column at 204px (was 192px, 12px off-grid). `PA-08` chip nudged down 3px via `translateY(3px)` so it sits near the wordmark baseline rather than floating mid-line. Search bar re-centered on viewport (was content-area-centered) — matches Stripe/Linear/Notion convention.
+- **Sidebar tooltips.** Custom CSS tooltips on `aside[data-collapsed="true"] .sidebar-nav-link::after` showing nav labels immediately on hover when collapsed. Native `title=` removed in favor of `aria-label=` (accessibility) + `data-tooltip=` (the styled tooltip source).
+- **Active nav indicator simplified.** Gold accent stripe (`borderLeft: 3px solid var(--accent)`) removed from active sidebar items — `bg-3` tint + 600 font-weight + brighter text color already communicate active state. Frees the gold for more deliberate brand moments (PA-08 chip, Review badge, etc.).
+- **AI → Theo swap across user-facing tooltips and copy.** ~17 tooltip texts updated. Files: `NeedsResponse.tsx`, `ReviewQueue.tsx` (VERDICT_HELP + 3 tooltips), `Dashboard.tsx` (2 tooltips), `Articles.tsx`, `Narratives.tsx` (3 tooltips + the "AI noticed N emerging narratives" banner text), `NarrativeDetail.tsx`, `NotificationSettings.tsx`.
+- **Tooltip declutter pass.** Per a thorough rewrite analysis of each info bubble:
+  - **Removed entirely**: `RECENT ARTICLES` (Dashboard right rail), `Articles` page h1, `Notable quotes` (NarrativeDetail), `Proposed narratives pending` description (NotificationSettings — was a `description` prop on `TriggerToggle`, not an InfoTooltip).
+  - **Rewritten shorter**: `Featured Narratives` (dropped "virality" and the long ranking-mechanism breakdown), `Needs Response`, `Review Queue` header (dropped "One queue, two lenses" framing), the 4 `VERDICT_HELP` entries.
+  - **Renamed for self-explanatory label + tooltip removed**: `Proposed Narratives` → `Potentially emerging narratives`. Updated in 3 places: the section header in ReviewQueue.tsx (line ~844), the tab label `NAV_ITEMS` (line ~643), and inside the Review Queue header tooltip text.
+- **"BRIEFING · TODAY" → "The read"** eyebrow label above the briefing memo (RaceSituation.tsx). Reasoning: drop the redundant date qualifier; "the read" is political-insider parlance for "your interpretation / assessment of the current situation."
+- **"Sources" → "Citations"** in the SourcesUsedDisclosure component (RaceSituation.tsx). Memo uses `[C1]`, `[C2]` markers — "Citations" matches the marker vocabulary; "Sources" created a name-mismatch. Container `marginTop` tightened 12→4px so the disclosure sits flush against the memo above it (was reading as a separate section).
+- **Inline citations rendered flush against preceding word.** GroundedMemoView now strips trailing whitespace from text segments before `[CN]` markers. Reads as `Act[1]` rather than `Act [1]` — matches academic-citation convention.
+- **Suggest Frames button removed entirely** from Narratives.tsx. The "AI noticed N emerging narratives" banner already provides the same automated suggestion output — the button was a redundant manual trigger.
+
+### Key decisions
+- **First-name brand + agent-persona pattern is now the project's brand architecture.** Future sessions should not introduce "the AI" / "the model" / "the system" language in user-facing copy — use "Theo" if attributing the action, or rephrase to be subject-less.
+- **`Theo` always sentence case in copy.** Matches AI-persona convention (Claude/Watson/Alexa/Siri/Cortana/Einstein/Copilot — all sentence case). `theosintel` lowercase only in the wordmark/visual brand mark; sentence case in running text and legal contexts.
+- **Self-explanatory labels > labels + tooltips.** When a section heading already says what it is (`RECENT ARTICLES`, `Articles`, `Notable quotes`, `Potentially emerging narratives`), the InfoTooltip is removed. Tooltips are reserved for places where the label needs extra context (verdict types, the Featured Narratives ranking, the Review Queue dual-tab structure).
+- **Brand-mark file (`brand-logo` CSS class) replaces the old `noctua-logo` class.** Any future image-based brand mark should use `.brand-logo` for the dark-mode invert behavior.
+
+### Open questions / concerns for review
+
+- **Ready-to-promote manual confirmation vs auto-promote — undecided.** Current flow requires a click + modal interaction to promote a Ready cluster to a tracked narrative frame. User asked whether this should be auto-promoted given the system's stated confidence. Options under discussion: (A) keep current modal-heavy manual confirm, (B) full auto-promote with 30-second undo, (C) one-tap lightweight confirm with sensible defaults pre-filled and 30s undo (recommended), (D) confidence-threshold auto-promote (high-confidence auto, lower-confidence manual), (E) opt-in setting per user. The political-stakes asymmetry (a wrongly-tracked frame pollutes briefings + strategy until caught) argues against full auto-promote. Not blocking — discuss next session.
+
+- **Unused code left behind from Suggest Frames button removal.** In `frontend-v2/src/pages/Narratives.tsx`, the `suggestFrames` function, `suggesting` state, the `Sparkles` import from lucide-react, and probably an `api.suggestFrames(...)` call site are now unreferenced after the button was deleted. Vite will warn but doesn't block. Same situation in `frontend-v2/src/pages/Articles.tsx` — the `InfoTooltip` import is now likely unused after the h1 tooltip removal. Worth a follow-up cleanup pass; flagged for future session.
+
+- **Code comments still reference "the AI" / "AI's" in multiple files** — RaceSituation.tsx:117, NeedsResponse.tsx:11, Layout.tsx (several), Dashboard.tsx:55, PromoteModal.tsx, ReviewQueue.tsx (several), ArticleDetail.tsx, Narratives.tsx:884. These are non-user-facing JSDoc / inline comments and were intentionally left alone in this pass. Worth a sweep later for codebase brand consistency.
+
+- **Non-tooltip user-facing "AI" mentions still exist** that this session did NOT change: `Layout.tsx` admin menu (`Score articles with AI`, banner `AI scoring is OFF...`), `PromoteModal.tsx:179` (`AI-proposed: {name}`), `ReviewQueue.tsx` verdict labels (`AI uncertain`, `AI: likely noise`), `ReviewQueue.tsx:577` `<span>AI:</span> {verdict.reasoning}`, `ReviewQueue.tsx:903` `Run AI triage` button, `ReviewQueue.tsx:942` `AI flagged {n} cluster…`, `ReviewQueue.tsx:983` `The AI hasn't surfaced…`, `ReviewQueue.tsx:1264` `AI: ${VERDICT_META.label}`, `Narratives.tsx:562` `AI narrative discovery is paused`, `ArticleDetail.tsx` (3 places: `AI one-sentence summary`, `AI rationale`, `Full AI analysis`). User explicitly scoped this pass to information bubbles only and left these for a separate decision pass.
+
+- **`theo.com` is held by a domain investor at `Make Offer` only.** Realistic acquisition cost likely $75K–$300K. Currently shipping the brand at `theosintel.com`. If the project ever scales to a level where `theo.com` becomes worth the spend, the brand architecture (`theo` as agent inside `theosintel` company) is already set up to absorb the move cleanly.
+
+
+## 2026-05-29 (continued) — Open architectural question: Narratives banner vs Review Queue count mismatch
+
+User spotted: Narratives page banner says "3 emerging narratives" but Review Queue says "1 ready to promote." This is not a labeling bug — it's a data model coherence issue worth a dedicated session to fix properly.
+
+### Root cause
+
+Two endpoints feed two views with overlapping-but-not-identical data:
+
+- **`api.pendingCandidateClusters(21)`** → live HDBSCAN compute output (refreshes when scheduler runs). Used by `Narratives.tsx` PendingSuggestionsSection (line ~487).
+- **`api.narrativeProposalsSnapshot()`** → persistent snapshot table (rows survive HDBSCAN turnover). Used by `ReviewQueue.tsx` (line ~227).
+
+The Review Queue's "Ready / Watch" split in [ReviewQueue.tsx:316-336](frontend-v2/src/pages/ReviewQueue.tsx:316) is a **derived** classification: a snapshot proposal is "Ready" if any of its `candidate_frame_ids` appears in the union of `candidate_frame_ids` from the live HDBSCAN output. "Watch" = snapshot proposals that no longer overlap with live.
+
+This means:
+- Narratives banner count = `pendingCandidateClusters().suggestions.length` (live HDBSCAN — currently emerging)
+- Review Queue total = `narrativeProposalsSnapshot().clusters.length` (persistent, includes faded)
+- Review Queue Ready count = snapshot ∩ live HDBSCAN
+- They will only coincidentally equal each other.
+
+### Four architectural directions evaluated
+
+| Option | Approach | Trade-off |
+|---|---|---|
+| A. Snapshot canonical | Both pages query the snapshot. Backend annotates each row with `is_currently_emerging` + `meets_promotion_bar` booleans derived at read time. | Cleanest source-of-truth fix. Backend work + migration concerns. |
+| B. Live canonical, snapshot = user state only | Snapshot stores only dismissed/promoted state. No Watch list concept — if a pattern falls out of live HDBSCAN, it's gone unless promoted. | Maximum simplicity but loses the "saw this fade, was it real?" signal. |
+| C. Two sources, label honestly | Don't change data. Make UI labels explicit: "Currently emerging (live)" vs. "Triage queue (snapshot)". | Zero backend work but leaks implementation distinction at every user — every new user re-encounters confusion. |
+| D. Eliminate Watch list | Same effect as B but explicit decision to drop the concept rather than a side effect. | Cleanest end state but explicit loss of fade-tracking. |
+
+### Recommendation: A + soft D
+
+Single source of truth (snapshot) with backend-computed annotations. Both pages query one endpoint. Render per purpose:
+
+- **Narratives page**: filter to `is_currently_emerging=true`, show as cards. Banner: `N emerging narratives · M ready to promote`.
+- **Review Queue**: show all open snapshot proposals, three buckets:
+  - **Ready to promote**: `is_currently_emerging=true AND meets_promotion_bar=true`
+  - **Watch**: `is_currently_emerging=true AND NOT meets_promotion_bar`
+  - **Stale (faded)**: `is_currently_emerging=false` — collapsed by default with "see N faded" expand
+- Narratives banner counts will then *naturally* match Review Queue's "currently emerging" subtotal because they come from the same query.
+
+### Work scope estimate
+
+- **Backend** (most of the work):
+  - New or enhanced endpoint returning snapshot rows + `is_currently_emerging` + `meets_promotion_bar` annotations. The `is_currently_emerging` join requires checking each snapshot row's `candidate_frame_ids` against the latest HDBSCAN compute. Likely lives in `routes/narrative_frames.py` near the existing snapshot/landscape handlers; the `meets_promotion_bar` field encodes the existing ≥3-articles ≥2-outlets bar that lives in [services/narrative_frames.py](backend/app/services/narrative_frames.py) (verify exact location).
+  - Migration / transition: existing snapshot rows likely don't have annotations until the next compute runs. Handle missing fields as `is_currently_emerging=false` by default so legacy rows surface in "Stale" rather than vanishing.
+- **Frontend** (smaller):
+  - `Narratives.tsx` PendingSuggestionsSection switches from `pendingCandidateClusters` to the new endpoint; filters to `is_currently_emerging` for cards + banner count.
+  - `ReviewQueue.tsx` removes the local Ready/Watch derivation logic (lines ~316-336) and uses server-side fields instead. Adds the new "Stale" collapsed section.
+  - Per-card tags on both pages drop in as a simple read of `meets_promotion_bar`.
+- **Estimated effort**: ~half a day of careful backend coding + testing, ~2-3 hours frontend refactor. Should be one focused session, not interleaved with other UI polish work.
+
+### Why parked (not done today)
+
+This needs a clean head and proper attention. Today's session was already deep in brand/UI polish (10+ small changes), and this one is structurally different — it touches data model, not just copy. Doing it in the same context would mean cutting corners. Picked up the user's "(ii)" — separate dedicated session.
+
+### Pointers for the future session
+
+- The current discrepancy mechanism is documented above — start by reading [ReviewQueue.tsx:316-336](frontend-v2/src/pages/ReviewQueue.tsx:316) and [Narratives.tsx:485-499](frontend-v2/src/pages/Narratives.tsx:485) side by side.
+- The Review Queue's "Ready" definition (any member candidate_frame_id appearing in live HDBSCAN) is incidentally a *good* approximation of `meets_promotion_bar AND is_currently_emerging`, because the live HDBSCAN already filters by bar. Worth verifying this against the backend's actual emit rule before assuming.
+- User has expressed receptiveness to dropping the Watch list entirely (option B/D) if maintaining it adds significant complexity. Worth considering during the rethink — eliminating Watch is the cheapest path and the only one that loses a feature; if the feature isn't used, it's free.
 

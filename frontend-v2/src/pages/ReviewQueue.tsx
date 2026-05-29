@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '@/api/client'
+import { useAuth } from '@/auth/AuthContext'
 import { PromoteModal } from '@/components/PromoteModal'
 import { InfoTooltip } from '@/components/InfoTooltip'
 import { describeError, useToast } from '@/components/Toast'
@@ -22,10 +23,10 @@ import { QuadrantPalette, quadrantKey, quadrantNamedLabel } from '@/lib/quadrant
 import { formatArticleDate } from '@/lib/formatDate'
 
 const VERDICT_HELP: Record<NarrativeTriageVerdictKind, string> = {
-  auto_promote_suggested: 'Suggest promote — the AI thinks this cluster is a real, new narrative worth tracking. Click "Confirm promote" to add it as a tracked narrative frame.',
-  auto_merge: 'Suggest merge — the AI thinks this cluster is just a new angle on a narrative you\'re already tracking. Clicking "Merge" will fold these articles into the existing frame.',
-  human_review: 'AI uncertain — the AI doesn\'t have a strong opinion. Take a look and decide whether to promote, merge, or dismiss.',
-  auto_reject: 'AI: likely noise — small cluster, single outlet, looks more like random co-mention than a real narrative. Safe to ignore in most cases.',
+  auto_promote_suggested: 'Suggest promote — Theo thinks this cluster is a real, new narrative worth tracking. Click "Confirm promote" to add it as a tracked narrative frame.',
+  auto_merge: 'Suggest merge — Theo thinks this cluster is just a new angle on a narrative you\'re already tracking. Clicking "Merge" will fold these articles into the existing frame.',
+  human_review: 'Theo uncertain — Theo doesn\'t have a strong opinion. Take a look and decide whether to promote, merge, or dismiss.',
+  auto_reject: 'Theo: likely noise — small cluster, single outlet, looks more like random co-mention than a real narrative. Safe to ignore in most cases.',
 }
 
 const RELEVANCE_HELP: Record<string, string> = {
@@ -73,6 +74,20 @@ const REL_COLORS: Record<string, { color: string; bg: string; border: string }> 
   irrelevant: { color: '#555', bg: 'rgba(85,85,85,0.08)', border: 'rgba(85,85,85,0.2)' },
 }
 
+/** Strip Google-News bookkeeping from a source name so the operator sees
+ *  the actual outlet (or the search query, when the alias chain runs out).
+ *  Patterns seen in the wild:
+ *    "WNEP-TV — Google News Feed"            → "WNEP-TV"
+ *    "Google News — NEPA … Government"       → "NEPA … Government"
+ *  Matches em-dash, en-dash, and plain hyphen separators. */
+function cleanSourceName(raw?: string): string {
+  if (!raw) return ''
+  let s = raw.trim()
+  s = s.replace(/\s*[—–-]\s*Google News(?: Feed)?\s*$/i, '')
+  s = s.replace(/^\s*Google News\s*[—–-]\s*/i, '')
+  return s.trim() || raw.trim()
+}
+
 /** Title-cased surname from "First Last" or FEC "LAST, FIRST" format.
  *  Mirrors the Narratives page helper so the same surnames feed the
  *  5-quadrant label substitution on both pages. */
@@ -113,6 +128,11 @@ function SentimentDot({ s }: { s?: string }) {
 }
 
 export function ReviewQueue() {
+  // Admin gate — non-admins see the queue (titles, sources, actions) but
+  // not the per-article CRITICAL/HIGH/MEDIUM/LOW bucket, including the
+  // red-border emphasis that highlights critical items.
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
   // Tab state — driven by ?tab= so refreshes/bookmarks land back on the
   // same tab. Default to "articles" (the historical landing view).
   const [searchParams, setSearchParams] = useSearchParams()
@@ -400,7 +420,20 @@ export function ReviewQueue() {
     }
   }
 
-  const visibleItems = items.filter(i => !done.has(i.id))
+  // Newest first. Falls back to created_at when published_at is missing
+  // (e.g. social-feed rows where the platform never gave us a publish time).
+  // Items with no date at all sort to the bottom.
+  const visibleItems = items
+    .filter(i => !done.has(i.id))
+    .slice()
+    .sort((a, b) => {
+      const aDate = a.published_at ?? a.created_at ?? ''
+      const bDate = b.published_at ?? b.created_at ?? ''
+      if (!aDate && !bDate) return 0
+      if (!aDate) return 1
+      if (!bDate) return -1
+      return bDate.localeCompare(aDate)
+    })
 
   function toggleSelect(id: number) {
     setSelected(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n })
@@ -579,7 +612,11 @@ export function ReviewQueue() {
           )}
         </div>
         <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'flex-start' }}>
-          {verdict?.verdict === 'auto_merge' && mergeTarget ? (
+          {/* Promote/Merge actions trigger backend writes that cost LLM
+              money downstream (and the promote endpoint is admin-gated).
+              Non-admins keep the dismiss-only experience so they can still
+              clear noise off the queue. */}
+          {isAdmin && (verdict?.verdict === 'auto_merge' && mergeTarget ? (
             <button
               onClick={() => handleExecuteMerge(verdict.id)}
               disabled={isMerging}
@@ -603,7 +640,7 @@ export function ReviewQueue() {
             >
               {verdict?.verdict === 'auto_promote_suggested' ? 'Confirm promote' : 'Promote'}
             </button>
-          )}
+          ))}
           <button
             title="Dismiss"
             onClick={() => {
@@ -640,7 +677,7 @@ export function ReviewQueue() {
 
   const TABS: Array<{ key: TabKey; label: string; icon: typeof Newspaper; count: number | null }> = [
     { key: 'articles',   label: 'Articles',            icon: Newspaper, count: loading ? null : visibleItems.length },
-    { key: 'narratives', label: 'Proposed Narratives', icon: Sparkles,  count: proposed === null ? null : proposalsTotal },
+    { key: 'narratives', label: 'Potentially emerging narratives', icon: Sparkles,  count: proposed === null ? null : proposalsTotal },
   ]
 
   return (
@@ -656,7 +693,7 @@ export function ReviewQueue() {
             <div style={{ fontSize: 22, fontWeight: 800, color: C.text1, letterSpacing: '-0.01em', display: 'inline-flex', alignItems: 'center' }}>
               Review Queue
               <InfoTooltip
-                text={'One queue, two lenses. "Articles" — items the AI couldn\'t auto-categorize, awaiting human triage. "Proposed Narratives" — emerging clusters the AI thinks may be worth tracking.'}
+                text={'"Articles" need you to confirm they\'re race-relevant. "Potentially emerging narratives" are clusters that may be worth tracking — promote or dismiss.'}
                 size={14}
               />
             </div>
@@ -842,10 +879,7 @@ export function ReviewQueue() {
               >
                 {proposedExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: '-0.01em', display: 'inline-flex', alignItems: 'center' }}>
-                  Proposed narratives
-                  <InfoTooltip
-                    text={'Groups of articles the AI noticed forming a pattern, but that aren\'t one of your tracked narratives yet. Split into two tiers: "Ready to promote" matches the Narratives page banner (passed the article/outlet bar); "Watch list" is too early or too thin to suggest yet.'}
-                  />
+                  Potentially emerging narratives
                 </span>
                 <span style={{
                   fontSize: 10, color: C.accent, background: `${C.accent}22`,
@@ -859,49 +893,56 @@ export function ReviewQueue() {
                 </span>
               </button>
               <span style={{ flex: 1 }} />
-              {snapshotRefreshResult && (
-                <span style={{ fontSize: 10, color: C.text3, marginRight: 6 }}>
-                  {snapshotRefreshResult}
-                </span>
+              {/* LLM-cost controls — refresh proposals + run AI triage
+                  (~$0.40 per pass). Hidden for non-admin users; backend
+                  also returns 403 if they invoke these endpoints directly. */}
+              {isAdmin && (
+                <>
+                  {snapshotRefreshResult && (
+                    <span style={{ fontSize: 10, color: C.text3, marginRight: 6 }}>
+                      {snapshotRefreshResult}
+                    </span>
+                  )}
+                  <button
+                    onClick={handleRefreshSnapshot}
+                    disabled={refreshingSnapshot}
+                    title="Re-scan recent articles for new proposals. Existing clusters stay on the list until you act on them — this only adds new ones."
+                    style={{
+                      padding: '5px 10px', fontSize: 11, fontWeight: 600,
+                      background: refreshingSnapshot ? C.bg3 : 'transparent',
+                      color: refreshingSnapshot ? C.text3 : C.text2,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 5, cursor: refreshingSnapshot ? 'wait' : 'pointer',
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
+                      marginRight: 6,
+                    }}
+                  >
+                    <RefreshCw size={11} className={refreshingSnapshot ? 'animate-spin' : ''} />
+                    {refreshingSnapshot ? 'Refreshing…' : 'Refresh proposals'}
+                  </button>
+                  {triageLastResult && (
+                    <span style={{ fontSize: 10, color: C.text3, marginRight: 8 }}>
+                      {triageLastResult}
+                    </span>
+                  )}
+                  <button
+                    onClick={runTriagePass}
+                    disabled={triageRunning}
+                    title="Run gpt-4o triage to score every proposal (merge / promote / noise / uncertain). Costs ~$0.40 per pass."
+                    style={{
+                      padding: '5px 10px', fontSize: 11, fontWeight: 600,
+                      background: triageRunning ? C.bg3 : `${C.accent}22`,
+                      color: triageRunning ? C.text3 : C.accent,
+                      border: `1px solid ${triageRunning ? C.border : `${C.accent}66`}`,
+                      borderRadius: 5, cursor: triageRunning ? 'wait' : 'pointer',
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
+                    }}
+                  >
+                    {triageRunning ? <RefreshCw size={11} className="animate-spin" /> : <Sparkles size={11} />}
+                    {triageRunning ? 'Triaging…' : 'Run AI triage'}
+                  </button>
+                </>
               )}
-              <button
-                onClick={handleRefreshSnapshot}
-                disabled={refreshingSnapshot}
-                title="Re-scan recent articles for new proposals. Existing clusters stay on the list until you act on them — this only adds new ones."
-                style={{
-                  padding: '5px 10px', fontSize: 11, fontWeight: 600,
-                  background: refreshingSnapshot ? C.bg3 : 'transparent',
-                  color: refreshingSnapshot ? C.text3 : C.text2,
-                  border: `1px solid ${C.border}`,
-                  borderRadius: 5, cursor: refreshingSnapshot ? 'wait' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 5,
-                  marginRight: 6,
-                }}
-              >
-                <RefreshCw size={11} className={refreshingSnapshot ? 'animate-spin' : ''} />
-                {refreshingSnapshot ? 'Refreshing…' : 'Refresh proposals'}
-              </button>
-              {triageLastResult && (
-                <span style={{ fontSize: 10, color: C.text3, marginRight: 8 }}>
-                  {triageLastResult}
-                </span>
-              )}
-              <button
-                onClick={runTriagePass}
-                disabled={triageRunning}
-                title="Run gpt-4o triage to score every proposal (merge / promote / noise / uncertain). Costs ~$0.40 per pass."
-                style={{
-                  padding: '5px 10px', fontSize: 11, fontWeight: 600,
-                  background: triageRunning ? C.bg3 : `${C.accent}22`,
-                  color: triageRunning ? C.text3 : C.accent,
-                  border: `1px solid ${triageRunning ? C.border : `${C.accent}66`}`,
-                  borderRadius: 5, cursor: triageRunning ? 'wait' : 'pointer',
-                  display: 'inline-flex', alignItems: 'center', gap: 5,
-                }}
-              >
-                {triageRunning ? <RefreshCw size={11} className="animate-spin" /> : <Sparkles size={11} />}
-                {triageRunning ? 'Triaging…' : 'Run AI triage'}
-              </button>
             </div>
             {proposedExpanded && (
               <div>
@@ -910,7 +951,7 @@ export function ReviewQueue() {
                     label="Ready to promote"
                     count={readyProposals.length}
                     tone="ready"
-                    tooltip="These clusters meet the promotion bar (≥ 3 articles from ≥ 2 outlets, non-generic name, deduped by AI). They also appear in the AI-noticed banner on the Narratives page — promoting from either spot has the same effect."
+                    tooltip="These clusters meet the promotion bar (≥ 3 articles from ≥ 2 outlets, non-generic name, deduped by Theo). They also appear in the Theo-noticed banner on the Narratives page — promoting from either spot has the same effect."
                   />
                 )}
                 {readyProposals.map(renderClusterRow)}
@@ -919,7 +960,7 @@ export function ReviewQueue() {
                     label="Watch list"
                     count={watchProposals.length}
                     tone="watch"
-                    tooltip="The AI is seeing a pattern but it hasn't crossed the promotion bar yet — usually because it's only on one outlet, or the cluster is small. They stay visible so you can override and promote early if the signal looks real, but they don't show up in the Narratives banner."
+                    tooltip="Theo is seeing a pattern but it hasn't crossed the promotion bar yet — usually because it's only on one outlet, or the cluster is small. They stay visible so you can override and promote early if the signal looks real, but they don't show up in the Narratives banner."
                   />
                 )}
                 {watchProposals.map(renderClusterRow)}
@@ -953,17 +994,19 @@ export function ReviewQueue() {
                           {' · '}{c.size}f / {c.outlet_count}o
                           {verdict?.reasoning && <span> · {verdict.reasoning}</span>}
                         </span>
-                        <button
-                          onClick={() => setPromoteTarget({ cluster: c, verdict })}
-                          style={{
-                            padding: '3px 8px', fontSize: 10, fontWeight: 600,
-                            background: 'transparent', color: C.text2,
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 4, cursor: 'pointer',
-                          }}
-                        >
-                          Override + promote
-                        </button>
+                        {isAdmin && (
+                          <button
+                            onClick={() => setPromoteTarget({ cluster: c, verdict })}
+                            style={{
+                              padding: '3px 8px', fontSize: 10, fontWeight: 600,
+                              background: 'transparent', color: C.text2,
+                              border: `1px solid ${C.border}`,
+                              borderRadius: 4, cursor: 'pointer',
+                            }}
+                          >
+                            Override + promote
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1004,9 +1047,9 @@ export function ReviewQueue() {
         )}
 
         {visibleItems.map(item => {
-          const rel = item.race_relevance_label
-          const relStyle = REL_COLORS[rel ?? ''] ?? REL_COLORS.low
-          const isCritical = rel === 'critical'
+          // Non-admins don't see the bucket label, so they also don't get
+          // the red-border emphasis that derives from it.
+          const isCritical = isAdmin && item.race_relevance_label === 'critical'
           const isProcessing = processing.has(item.id)
           const isSelected = selected.has(item.id)
 
@@ -1039,7 +1082,7 @@ export function ReviewQueue() {
                   {/* Content */}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', gap: 7, marginBottom: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <RelBadge label={item.race_relevance_label} />
+                      {isAdmin && <RelBadge label={item.race_relevance_label} />}
                       {item.actionability_label && (
                         <span style={{
                           fontSize: 10, color: C.text2, border: `1px solid ${C.border}`,
@@ -1071,7 +1114,7 @@ export function ReviewQueue() {
                     )}
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 12, color: C.text3 }}>
-                      {item.source_name && <span>{item.source_name}</span>}
+                      {item.source_name && <span>{cleanSourceName(item.source_name)}</span>}
                       {(item.published_at ?? item.created_at) && (
                         <span>{formatArticleDate(item.published_at ?? item.created_at)}</span>
                       )}
@@ -1100,18 +1143,16 @@ export function ReviewQueue() {
                       title="Keep — mark this article as reviewed and remove it from the queue"
                       onClick={() => doAction(item.id, () => api.reviewItem(item.id))}
                       disabled={isProcessing}
-                      style={{ background: 'none', border: `1px solid rgba(34,197,94,0.3)`, borderRadius: 6, padding: '5px 8px', cursor: 'pointer', color: C.green, display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600 }}
+                      style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: 6, padding: '5px 10px', cursor: 'pointer', color: C.text2, fontSize: 11, fontWeight: 600 }}
                     >
-                      <CheckCircle size={13} />
                       Keep
                     </button>
                     <button
                       title="Dismiss — discard this article and remove it from the queue"
                       onClick={() => doAction(item.id, () => api.dismissItem(item.id))}
                       disabled={isProcessing}
-                      style={{ background: 'none', border: `1px solid rgba(215,25,19,0.3)`, borderRadius: 6, padding: '5px 8px', cursor: 'pointer', color: '#f87171', display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600 }}
+                      style={{ background: 'none', border: `1px solid rgba(215,25,19,0.35)`, borderRadius: 6, padding: '5px 10px', cursor: 'pointer', color: C.opponent, fontSize: 11, fontWeight: 600 }}
                     >
-                      <XCircle size={13} />
                       Dismiss
                     </button>
                   </div>
@@ -1184,7 +1225,6 @@ export function ReviewQueue() {
             )}
             {filteredOutExpanded && filteredOut && filteredOut.map(item => {
               const isProcessing = processing.has(item.id)
-              const relStyle = REL_COLORS[item.race_relevance_label ?? ''] ?? REL_COLORS.low
               return (
                 <div key={`filtered-${item.id}`} style={{
                   padding: '10px 16px',
@@ -1194,9 +1234,9 @@ export function ReviewQueue() {
                 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', gap: 7, marginBottom: 4, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <RelBadge label={item.race_relevance_label} />
+                      {isAdmin && <RelBadge label={item.race_relevance_label} />}
                       {item.source_name && (
-                        <span style={{ fontSize: 10, color: C.text3 }}>{item.source_name}</span>
+                        <span style={{ fontSize: 10, color: C.text3 }}>{cleanSourceName(item.source_name)}</span>
                       )}
                     </div>
                     <div style={{ fontSize: 12, color: C.text2, lineHeight: 1.4 }}>
@@ -1211,9 +1251,8 @@ export function ReviewQueue() {
                         setFilteredOut(fo => fo ? fo.filter(i => i.id !== item.id) : fo)
                       }}
                       disabled={isProcessing}
-                      style={{ background: 'none', border: `1px solid rgba(34,197,94,0.3)`, borderRadius: 6, padding: '4px 8px', cursor: 'pointer', color: C.green, display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600 }}
+                      style={{ background: 'none', border: `1px solid ${C.border}`, borderRadius: 6, padding: '4px 10px', cursor: 'pointer', color: C.text2, fontSize: 10, fontWeight: 600 }}
                     >
-                      <CheckCircle size={11} />
                       Keep
                     </button>
                     <button
@@ -1223,9 +1262,8 @@ export function ReviewQueue() {
                         setFilteredOut(fo => fo ? fo.filter(i => i.id !== item.id) : fo)
                       }}
                       disabled={isProcessing}
-                      style={{ background: 'none', border: `1px solid rgba(215,25,19,0.3)`, borderRadius: 6, padding: '4px 8px', cursor: 'pointer', color: '#f87171', display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600 }}
+                      style={{ background: 'none', border: `1px solid rgba(215,25,19,0.35)`, borderRadius: 6, padding: '4px 10px', cursor: 'pointer', color: C.opponent, fontSize: 10, fontWeight: 600 }}
                     >
-                      <XCircle size={11} />
                       Dismiss
                     </button>
                   </div>

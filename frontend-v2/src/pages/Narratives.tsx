@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '@/api/client'
 import { invalidateDashboard } from '@/api/dashboardCache'
+import { useAuth } from '@/auth/AuthContext'
 import type { CandidateFrameCluster, NarrativeFrame, OwnerType } from '@/api/types'
 import { InfoTooltip } from '@/components/InfoTooltip'
 import { QuadrantSelector, quadrantToTypes } from '@/components/QuadrantSelector'
@@ -471,6 +472,13 @@ function PendingSuggestionsSection({
   candidateName: string
   opponentName: string
 }) {
+  // Promoting a candidate cluster triggers an LLM-backed write on the
+  // backend (and the backend now rejects non-admin callers). Hide the
+  // whole banner for non-admins so they don't see an action they can't
+  // take. Admins keep the existing UX. NOTE: the early-return guard sits
+  // below all the useState/useEffect calls so React's rules-of-hooks
+  // ordering is preserved across admin → non-admin transitions.
+  const { user } = useAuth()
   const [clusters, setClusters] = useState<CandidateFrameCluster[] | null>(null)
   const [lastError, setLastError] = useState<string | null>(null)
   const [editingIdx, setEditingIdx] = useState<number | null>(null)
@@ -535,6 +543,11 @@ function PendingSuggestionsSection({
     }
   }
 
+  // Non-admin: never render the banner. This guard goes AFTER all hooks
+  // so the hooks call order stays stable when isAdmin flips. Backend also
+  // 403s the underlying promote endpoint — this is the cosmetic half.
+  if (!user?.isAdmin) return null
+
   // Three states:
   //   loading: clusters === null
   //   error  : lastError !== null  (show diagnostic banner so user knows
@@ -590,10 +603,7 @@ function PendingSuggestionsSection({
           color: C.accent, textTransform: 'uppercase',
           display: 'inline-flex', alignItems: 'center',
         }}>
-          AI noticed {clusters.length} emerging narrative{clusters.length === 1 ? '' : 's'}
-          <InfoTooltip
-            text={'As the system reads articles, it sometimes spots a pattern that isn\'t yet one of your tracked narratives. These are the AI\'s suggestions. Click "Promote" to start tracking it as a real narrative frame; ignore them to just keep watching.'}
-          />
+          {clusters.length} emerging narrative{clusters.length === 1 ? '' : 's'}
         </span>
         <span style={{ fontSize: 12, color: C.text3 }}>
           — promote into tracked frames, or leave to keep observing
@@ -943,16 +953,6 @@ export function Narratives() {
             </button>
           )}
           <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', alignItems: 'center' }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-              <button onClick={suggestFrames} disabled={suggesting} className="btn btn-ghost">
-                <Sparkles size={13} style={suggesting ? { animation: 'spin 1s linear infinite' } : {}} />
-                {suggesting ? 'Suggesting...' : 'Suggest Frames'}
-              </button>
-              <InfoTooltip
-                text={'Asks the AI to look at recent articles and propose new narrative frames you might want to track. Useful when a new attack or theme starts showing up and you haven\'t set it up yet. Suggestions appear in this list and can be edited or deleted.'}
-                placement="bottom"
-              />
-            </span>
             <button onClick={() => setShowAdd(true)} className="btn btn-primary">
               <Plus size={13} />
               Add Frame

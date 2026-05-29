@@ -1,6 +1,6 @@
 import { ArrowLeft, Copy, ExternalLink, MessageSquareQuote, Edit2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '@/api/client'
 import type { ActivityPoint, DetailArticle, NarrativeFrameDetail, NarrativeFrameTimeline, OwnerType } from '@/api/types'
@@ -124,6 +124,28 @@ type ArticleFilter =
 export function NarrativeDetail() {
   const { id } = useParams<{ id: string }>()
   const frameId = Number(id)
+  const navigate = useNavigate()
+  const location = useLocation()
+  // React Router's initial entry has key='default'. A different key means
+  // the user navigated here from another in-app page — go back to where
+  // they came from. Direct hits (bookmark, pasted URL) fall back to the
+  // narratives list.
+  const hasInAppHistory = location.key !== 'default'
+  const backLabel = hasInAppHistory ? 'Back' : 'Back to narratives'
+
+  function handleBack() {
+    if (hasInAppHistory) navigate(-1)
+    else navigate('/narratives')
+  }
+
+  const backButtonStyle: React.CSSProperties = {
+    background: 'transparent', border: 'none', padding: 0,
+    font: 'inherit',
+    color: C.text2, fontSize: 13, cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16,
+    textAlign: 'left',
+  }
+
   const [detail, setDetail] = useState<NarrativeFrameDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [timeframe, setTimeframe] = useState<Timeframe>('30')
@@ -330,9 +352,9 @@ export function NarrativeDetail() {
   if (error || !detail) {
     return (
       <div style={{ padding: '24px 28px', maxWidth: 1100, margin: '0 auto' }}>
-        <Link to="/narratives" style={{ color: C.text2, fontSize: 13, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16 }}>
-          <ArrowLeft size={14} /> Back to narratives
-        </Link>
+        <button onClick={handleBack} style={backButtonStyle}>
+          <ArrowLeft size={14} /> {backLabel}
+        </button>
         <div style={{ padding: 40, textAlign: 'center', color: C.text3, fontSize: 14 }}>
           {error ? `Failed to load: ${error}` : "Narrative not found."}
         </div>
@@ -349,15 +371,9 @@ export function NarrativeDetail() {
   return (
     <div style={{ padding: '20px 28px 40px', maxWidth: 1100, margin: '0 auto' }}>
       {/* Back link */}
-      <Link
-        to="/narratives"
-        style={{
-          color: C.text2, fontSize: 13, textDecoration: 'none',
-          display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16,
-        }}
-      >
-        <ArrowLeft size={14} /> Back to narratives
-      </Link>
+      <button onClick={handleBack} style={backButtonStyle}>
+        <ArrowLeft size={14} /> {backLabel}
+      </button>
 
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
@@ -639,7 +655,6 @@ export function NarrativeDetail() {
         <Section
           title="Notable quotes"
           icon={<MessageSquareQuote size={14} color={C.text3} />}
-          tooltip="Direct quotes the AI pulled from articles covering this narrative. Useful for finding evidence to cite, or quotes from your opponent that contradict their current message."
         >
           {detail.quotes.length === 0 ? (
             <EmptyBlock label="No quotes available — articles still being summarized." />
