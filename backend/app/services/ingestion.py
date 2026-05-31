@@ -557,6 +557,286 @@ def _classify_perspective(db: Session, item: SourceItem) -> None:
     item.perspective_reason = (r.reason or "")[:240]
 
 
+# ── Provenance safety net ─────────────────────────────────────────────────────
+# An item pulled by a monitor *named for the candidate or an opponent* (e.g. a
+# Google-News search for "Paige Cognetti") is provenance-strong: the aggregator
+# already filtered to the race. When such an item arrives with a body too thin
+# to judge — almost always an unresolved Google-News redirect whose article body
+# we never fetched — the pipeline's "irrelevant" verdict is really a FETCH
+# failure, not a relevance judgment. Silently archiving it drops genuinely
+# relevant local news (diagnosed 2026-05-31: a WVIA PA-08 primary piece and an
+# NYT PA-08 polling piece vanished this way). Instead we route it to the human
+# review queue so nothing provenance-strong is dropped on a fetch failure.
+#
+# Threshold grounding: unresolved Google-News redirect items sit < ~300 chars
+# (headline + RSS blurb, no article body). Env-configurable so other campaigns
+# can tune it without a code change.
+_PROVENANCE_RESCUE_MAX_BODY_CHARS = int(
+    os.environ.get("PROVENANCE_RESCUE_MAX_BODY_CHARS", "300")
+)
+
+
+def _campaign_people(db: Session) -> list[tuple[str, str, str]]:
+    """(first_token, last_token, display_name) for candidate + opponents, with
+    tokens lowercased. Generic: derived from CampaignConfig + Opponent rows, no
+    race hard-coding. "Paige Cognetti" → ("paige","cognetti","Paige Cognetti");
+    a single-token name yields first==last.
+    """
+    from app.models import CampaignConfig
+
+    names: list[str] = []
+    cfg = db.query(CampaignConfig).first()
+    if cfg and cfg.candidate_name:
+        names.append(cfg.candidate_name)
+    for opp in db.query(Opponent).all():
+        if opp.name:
+            names.append(opp.name)
+
+    out: list[tuple[str, str, str]] = []
+    for n in names:
+        toks = [t for t in re.split(r"\s+", n.strip().lower()) if t]
+        if toks:
+            out.append((toks[0], toks[-1], n.strip()))
+    return out
+
+
+def _district_label_variants(db: Session) -> set[str]:
+    """Generic district identifiers from CampaignConfig.district: the raw form,
+    the hyphen→space form, and the compact form. "PA-08" → {"pa-08","pa 08",
+    "pa08"}. Variants shorter than 3 chars are dropped (a bare state abbrev like
+    "pa" is too collision-prone for a label match).
+    """
+    from app.models import CampaignConfig
+
+    cfg = db.query(CampaignConfig).first()
+    d = ((cfg.district if cfg else None) or "").strip().lower()
+    if not d:
+        return set()
+    variants = {d, d.replace("-", " "), re.sub(r"[^a-z0-9]", "", d)}
+    return {v for v in variants if len(v) >= 3}
+
+
+def _provenance_rescue_label(db: Session, item: SourceItem) -> Optional[str]:
+    """Return a label for the race participant whose monitor pulled `item` if it
+    qualifies for rescue from a silent archive; else None.
+
+    Both conditions required:
+      1. thin body — raw_text shorter than the fetch-failure threshold, so the
+         archive verdict reflects missing article text, not a real judgment.
+      2. provenance-strong — the monitor label (source_name) names a *specific*
+         race participant: a candidate/opponent SURNAME (whole word) PLUS a
+         disambiguator that ties it to THIS race. Surname alone is too noisy —
+         it collides with homonyms (the novelist Paolo Cognetti, the ballplayer
+         Roger Bresnahan, the voice actress Alyssa Bresnahan all surfaced as
+         bare-surname monitor hits, 2026-05-31). The disambiguator is one of:
+           - the participant's first name (full name in the label), OR
+           - a district identifier (PA-08 / pa 08 / pa08), OR
+           - a second race participant's surname in the same label.
+         All three are config-derived (CampaignConfig + Opponents) — no race
+         hard-coding. Word-boundary (not bare substring) matching throughout.
+    """
+    if len(item.raw_text or "") >= _PROVENANCE_RESCUE_MAX_BODY_CHARS:
+        return None
+    name = (item.source_name or "").lower()
+    if not name:
+        return None
+
+    def _wb(tok: str) -> bool:
+        return re.search(rf"\b{re.escape(tok)}\b", name) is not None
+
+    present = [
+        (first, last, disp)
+        for (first, last, disp) in _campaign_people(db)
+        if len(last) >= 3 and _wb(last)
+    ]
+    if not present:
+        return None
+
+    # Disambiguator 1: full name (surname + first name) in the label.
+    for first, last, disp in present:
+        if len(first) >= 2 and _wb(first):
+            return disp
+    # Disambiguator 2: surname + a district identifier.
+    if any(_wb(v) for v in _district_label_variants(db)):
+        return present[0][2]
+    # Disambiguator 3: two distinct race surnames named together.
+    if len({last for (_first, last, _disp) in present}) >= 2:
+        return present[0][2]
+
+    return None
+
+
+def _apply_provenance_rescue(db: Session, item: SourceItem) -> bool:
+    """If `item` is currently archived but provenance-strong on a thin body,
+    flip it into the human review queue. Returns True if a rescue was applied.
+
+    Caller must have already set item.archived_as_irrelevant. The rescued state
+    is deliberately honest: content_category + actionability carry the
+    provenance override (so the review queue surfaces it), while the
+    text-derived race_relevance_score/label are left untouched — we are
+    overriding the ARCHIVE action, not claiming the visible text scored as
+    relevant. actionability_label='review' is the master key: it satisfies the
+    review queue's score floor AND bypasses its keyword gate.
+    """
+    if not item.archived_as_irrelevant:
+        return False
+    label = _provenance_rescue_label(db, item)
+    if not label:
+        return False
+
+    item.archived_as_irrelevant = False
+    item.reviewed = False
+    item.content_category = "campaign"
+    item.actionability_label = "review"
+    if not item.urgency or item.urgency == "low":
+        item.urgency = "medium"
+    item.relevance_reasons = json.dumps([
+        f"Provenance safety net: pulled by a monitor named for '{label}', but "
+        f"the fetched body was too thin ({len(item.raw_text or '')} chars) to "
+        f"confirm relevance — routed to review instead of archived."
+    ])
+    logger.info(
+        "ingestion: provenance rescue item=%s named_for=%r body=%dchars "
+        "source_name=%r title=%r — routed to review queue",
+        getattr(item, "id", "?"), label, len(item.raw_text or ""),
+        item.source_name, (item.title or "")[:60],
+    )
+    return True
+
+
+# ── Headline feed promotion ───────────────────────────────────────────────────
+# Companion to the provenance rescue. The rescue un-archives a thin-body,
+# provenance-strong item into the REVIEW queue without touching its score. But
+# when such an item NAMES a race participant in its HEADLINE, the headline is the
+# strongest evidence we have — and the LLM's body-derived verdict is unreliable
+# precisely because the body is a fetch-failure stub. The per-article scorer caps
+# the title signal (+20) below the feed cutoff (50), so a headline that plainly
+# names the candidate/opponent gets stranded in review at ~37. This lifts those —
+# and only those — to the feed floor so they surface in the feed.
+#
+# Scoped to THIN bodies on purpose: for a full-body item the LLM read the text and
+# its verdict is a real judgment (the headline name is already a scoring input),
+# so we never override it here.
+_HEADLINE_FEED_FLOOR = int(os.environ.get("HEADLINE_FEED_FLOOR", "50"))
+
+
+def _headline_names_race_disambiguated(db: Session, item: SourceItem) -> bool:
+    """True if a THIN-body item's HEADLINE names a race participant AND is
+    disambiguated to THIS race (homonym-safe). No archive check — the caller
+    decides what to flip. Two disambiguation paths:
+
+      a) in-title: the headline itself carries a disambiguator — a participant's
+         full name, a district identifier, or two distinct participant surnames.
+         Robust for ANY name, including generic ones.
+      b) provenance: a candidate/opponent-named monitor pulled it, which resolves
+         which homonym a bare surname in the title refers to.
+
+    Path (b) is the weak link for a VERY GENERIC candidate name (a
+    "Google News: John Smith" monitor is itself full of unrelated John Smiths, so
+    "came from our monitor" stops being strong evidence). GENERIC-NAME HARDENING
+    HOOK: gate the (b) branch on an in-text geographic anchor (district / city /
+    county) when the surname is common. Not enabled now — it would over-narrow a
+    distinctive-name race, where most thin items are bare-surname headlines that
+    only clear via provenance. All inputs are config-derived (CampaignConfig +
+    Opponents) — no race hard-coding.
+    """
+    if len(item.raw_text or "") >= _PROVENANCE_RESCUE_MAX_BODY_CHARS:
+        return False
+    title = (item.title or "").lower()
+    if not title:
+        return False
+
+    def _wb(tok: str) -> bool:
+        return re.search(rf"\b{re.escape(tok)}\b", title) is not None
+
+    present = [
+        (first, last, disp)
+        for (first, last, disp) in _campaign_people(db)
+        if len(last) >= 3 and _wb(last)
+    ]
+    if not present:  # the headline must name a participant surname at all
+        return False
+
+    # (a) in-title disambiguation — homonym-safe for any name.
+    for first, _last, _disp in present:
+        if len(first) >= 2 and _wb(first):
+            return True
+    if any(_wb(v) for v in _district_label_variants(db)):
+        return True
+    if len({last for (_first, last, _disp) in present}) >= 2:
+        return True
+
+    # (b) provenance disambiguation — resolves a bare surname to this race.
+    #     <-- generic-name hardening hook lives here (see docstring).
+    if _provenance_rescue_label(db, item) is not None:
+        return True
+
+    return False
+
+
+def _apply_headline_feed_promotion(db: Session, item: SourceItem) -> bool:
+    """Lift a thin, race-naming-headline item into the feed: un-archive if needed,
+    ensure a non-irrelevant category, floor race_relevance_score to the feed
+    cutoff, and mark it adjudicated (reviewed, not dismissed) so it surfaces in the
+    feed WITHOUT piling into the triage queue. Companion to _apply_provenance_rescue
+    — run AFTER it. Idempotent; returns True only if it actually changed the row.
+
+    Honest by construction: the headline IS part of the item's text and naming the
+    race in it is a real relevance signal the scorer already rewards (via
+    title_bonus — it just caps it below the cutoff). If the body is later recovered
+    and the article rescored, the real text-derived score replaces this floor.
+    """
+    if not _headline_names_race_disambiguated(db, item):
+        return False
+
+    changed = False
+    if item.archived_as_irrelevant:
+        item.archived_as_irrelevant = False
+        changed = True
+    if item.content_category in (None, "irrelevant"):
+        item.content_category = "campaign"
+        changed = True
+    if (item.race_relevance_score or 0) < _HEADLINE_FEED_FLOOR:
+        item.race_relevance_score = _HEADLINE_FEED_FLOOR
+        item.race_relevance_label = race_relevance._label(_HEADLINE_FEED_FLOOR)
+        changed = True
+    # A homonym-safe headline match is confident enough to FEED — so it does NOT
+    # need human triage. Mark it adjudicated (reviewed, not dismissed) so it lands
+    # in the feed and LEAVES the /review-queue instead of inflating it. This is
+    # the key difference from the provenance rescue: that routes weaker-evidence
+    # items TO review for a glance; this one is sure enough to skip review.
+    if not item.reviewed:
+        item.reviewed = True
+        changed = True
+    if item.dismissed:
+        item.dismissed = False
+        changed = True
+    if not changed:
+        return False
+
+    try:
+        reasons = json.loads(item.relevance_reasons) if item.relevance_reasons else []
+        if not isinstance(reasons, list):
+            reasons = [str(reasons)]
+    except Exception:
+        reasons = []
+    note = (
+        f"Headline names the race (homonym-safe) on a thin body "
+        f"({len(item.raw_text or '')} chars) — promoted to the feed floor "
+        f"({_HEADLINE_FEED_FLOOR})."
+    )
+    if note not in reasons:
+        reasons.append(note)
+    item.relevance_reasons = json.dumps(reasons)
+    logger.info(
+        "ingestion: headline feed promotion item=%s body=%dchars source_name=%r "
+        "title=%r — lifted to feed floor %d",
+        getattr(item, "id", "?"), len(item.raw_text or ""), item.source_name,
+        (item.title or "")[:60], _HEADLINE_FEED_FLOOR,
+    )
+    return True
+
+
 def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
     # Junk-title short-circuit: scraper artifacts (placeholder titles,
     # binary file URLs, bare hostnames, social-platform login walls) get
@@ -694,6 +974,8 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         # properly: real LLM score + frame match. Never a permanent keyword-only,
         # frame-unmatched entry.
         race_relevance.apply_relevance(db, item)
+        _apply_provenance_rescue(db, item)
+        _apply_headline_feed_promotion(db, item)
         db.commit()
         db.refresh(item)
     else:
@@ -731,6 +1013,14 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
             item.urgency = "high"
         elif not item.urgency or item.urgency == "low":
             item.urgency = "medium" if analysis["relevant"] else "low"
+
+        # Provenance safety net: a candidate/opponent-named monitor pulled this,
+        # but the body was too thin to judge — don't silently archive it on a
+        # fetch failure; route it to human review instead.
+        _apply_provenance_rescue(db, item)
+        # Headline feed promotion: if the (thin) item NAMES the race in its
+        # headline, the headline is decisive — lift it past the feed cutoff.
+        _apply_headline_feed_promotion(db, item)
 
         db.commit()
         db.refresh(item)
@@ -1261,6 +1551,23 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
                 from urllib.parse import urlparse as _urlparse
                 import re as _re
                 publisher_domain = _re.sub(r"^www\.", "", _urlparse(src_href).netloc).lower() or None
+
+        # Fallback: ~60% of Google News entries carry no `source.href`, so the
+        # block above leaves publisher_domain None. Derive it from the title's
+        # "- Publisher" suffix mapped against the outlet catalog. This unlocks
+        # recover_body's title-search path (which otherwise has no site to
+        # query) and improves outlet attribution. Catalog-driven — no per-
+        # campaign hardcoding, so it generalizes to any NOCTUA tenant.
+        if not publisher_domain and "news.google.com" in feed_url:
+            from app.services.outlet_linking import (
+                build_outlet_name_domain_index,
+                derive_publisher_domain_from_title,
+            )
+            _ndx = _build_outlet_index_cache.get("name_domain")
+            if _ndx is None:
+                _ndx = build_outlet_name_domain_index(db)
+                _build_outlet_index_cache["name_domain"] = _ndx
+            publisher_domain = derive_publisher_domain_from_title(title, _ndx)
 
         # Body recovery for short RSS payloads.
         #
