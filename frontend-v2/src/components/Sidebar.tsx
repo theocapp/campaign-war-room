@@ -1,6 +1,6 @@
 import {
   BarChart3, Calendar, FileText, Home, Inbox, Layers,
-  Map, MapPin, Radio, Settings, Users,
+  MapPin, Radio, Settings,
 } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
@@ -16,19 +16,25 @@ const NAV: NavItem[] = [
   { to: '/articles',   label: 'Articles',   icon: FileText },
   { to: '/analytics',  label: 'Analytics',  icon: BarChart3 },
   { to: '/narratives', label: 'Narratives', icon: Layers },
-  { to: '/landscape',  label: 'Landscape',  icon: Map },
+  // Landscape + Opponents temporarily hidden 2026-05-30 at user request.
+  // Routes redirect to / for now (see App.tsx). Page components preserved.
+  // { to: '/landscape',  label: 'Landscape',  icon: Map },
   // Entity Network hidden 2026-05-29: legacy v14.x triple-shape data; v15.0
   // claim_records will surface as evidence inside narrative frames + briefing
   // rather than as a standalone graph page. See INTER_SESSION.md Session F.
   // { to: '/entity-network', label: 'Entity Network', icon: Network },
   { to: '/map',        label: 'Geographic',  icon: MapPin },
   { to: '/timeline',   label: 'Timeline',    icon: Calendar },
-  { to: '/opponents',  label: 'Opponents',  icon: Users },
+  // { to: '/opponents',  label: 'Opponents',  icon: Users },
   { to: '/review',     label: 'Review',     icon: Inbox },
   { to: '/monitors',   label: 'Monitors',   icon: Radio },
-  // Settings is the campaign-setup wizard — every action inside it spends
-  // money (LLM discovery, GDELT backfill, rescore). Admin only.
-  { to: '/setup',      label: 'Settings',   icon: Settings, adminOnly: true },
+  // Settings is the campaign-setup wizard. Visible to everyone so non-admin
+  // viewers can see the linked race, the setup checklist, and adjust their
+  // own notification preferences. Cost-incurring actions inside (Pick race,
+  // Save, Discover) render disabled for non-admins with a top-of-page
+  // banner explaining why — backend require_admin gate is the real
+  // authority and would 403 anything they bypassed.
+  { to: '/setup',      label: 'Settings',   icon: Settings },
 ]
 
 interface SidebarProps {

@@ -19,8 +19,11 @@ Two ingestion modes:
      submission we ingest, also fetch its top comments. Local races
      often have more political signal in the comments than the OP.
 
-Configurable via REDDIT_SUBREDDITS env var (comma-separated). Comments
-can be disabled via REDDIT_COMMENTS_ENABLED=false.
+Configurable via env (comma-separated, no code change needed):
+  REDDIT_SUBREDDITS       — override the subreddit list
+  REDDIT_EXTRA_TERMS      — append extra search terms (a hashtag, a local
+                            issue, a third candidate)
+  REDDIT_COMMENTS_ENABLED — set false to skip the comment-polling pass
 """
 import logging
 import os
@@ -33,7 +36,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SUBREDDITS = ["pennsylvania", "Scranton", "nepa", "politics"]
+# Local-first defaults for PA-08 (Scranton/Wilkes-Barre/NEPA). Local subs
+# carry the House-race signal; r/politics is national backstop. Non-existent
+# subs 404 harmlessly. Override wholesale via REDDIT_SUBREDDITS.
+_DEFAULT_SUBREDDITS = ["pennsylvania", "Scranton", "WilkesBarre", "nepa", "politics"]
 _POST_LIMIT = 25
 _COMMENT_LIMIT = 10
 _REQUEST_DELAY = 1.0  # seconds between requests — Reddit rate limit is ~60/min unauthed
@@ -53,16 +59,45 @@ class RedditIngestResult:
     errors: int
 
 
+def _surname_token(full: str) -> str | None:
+    """Last word of a "First Last" name, if distinctive (>=4 chars). Mirrors
+    the bluesky firehose rule: people say "Cognetti" far more than "Paige
+    Cognetti", and phrase search misses that — but first names ("Paige",
+    "Rob") match enormous unrelated traffic, so we never add those."""
+    toks = re.sub(r"[^a-zA-Z\s]", " ", full).split()
+    return toks[-1] if toks and len(toks[-1]) >= 4 else None
+
+
 def _search_terms(db) -> list[str]:
+    """Search terms for the FREE direct-JSON path.
+
+    Full names AND distinctive surname tokens, plus a REDDIT_EXTRA_TERMS env
+    hatch. This is deliberately BROADER than tavily_reddit._search_terms: the
+    direct path is free so extra terms only cost time, whereas every Tavily
+    term spends paid credits — so that path stays at full names only.
+    """
     from app.models import CampaignConfig, Opponent
-    campaign = db.query(CampaignConfig).first()
     terms: list[str] = []
+    campaign = db.query(CampaignConfig).first()
     if campaign and campaign.candidate_name:
         terms.append(campaign.candidate_name)
+        surname = _surname_token(campaign.candidate_name)
+        if surname:
+            terms.append(surname)
     for opp in db.query(Opponent).all():
-        if opp.name and opp.name not in terms:
-            terms.append(opp.name)
-    return terms
+        if not opp.name:
+            continue
+        terms.append(opp.name)
+        surname = _surname_token(opp.name)
+        if surname:
+            terms.append(surname)
+
+    extra = os.getenv("REDDIT_EXTRA_TERMS", "").strip()
+    if extra:
+        terms.extend(t.strip() for t in extra.split(",") if t.strip())
+
+    # De-dupe, preserving order (a surname may collide with an extra term).
+    return list(dict.fromkeys(terms))
 
 
 def _utc_from_timestamp(ts: float) -> datetime:
@@ -114,12 +149,16 @@ def _district_derived_subs(db) -> list[str]:
             except Exception:
                 pass
 
-        # City name from "Scranton, PA" → "Scranton" → r/Scranton
-        # Take the first comma-separated token, strip non-letters.
-        first = raw.split(",")[0].strip()
-        first = re.sub(r"[^A-Za-z]", "", first)
-        if first and len(first) >= 3 and first not in subs:
-            subs.append(first)
+        # City name(s) from the pre-comma part. Locations often list MULTIPLE
+        # cities ("Scranton/Wilkes-Barre, PA-08"), so split on city separators
+        # first, THEN slug each (dropping internal punctuation: "Wilkes-Barre"
+        # → r/WilkesBarre). The old single-token strip produced the bogus
+        # concatenation "ScrantonWilkesBarre" — a sub that doesn't exist.
+        first_part = raw.split(",")[0]
+        for city in re.split(r"[/&]| and ", first_part):
+            slug = re.sub(r"[^A-Za-z]", "", city)
+            if len(slug) >= 3 and slug not in subs:
+                subs.append(slug)
 
     return subs
 

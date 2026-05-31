@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, Date, ForeignKey, Boolean, Float, UniqueConstraint, event
 from sqlalchemy.orm import relationship, validates
 from app.db import Base
 
@@ -82,6 +82,15 @@ class CampaignConfig(Base):
     # NULL or empty list = no social feeds get generated for that platform.
     instagram_handles = Column(Text, nullable=True)
     facebook_pages = Column(Text, nullable=True)
+    # Set when the campaign was created via /api/races/{id}/select. Lets the
+    # Setup page surface a "reset to FEC default" affordance per field by
+    # re-reading the linked RaceDirectory row. NULL = campaign was set up
+    # manually (or pre-dates the race-picker flow).
+    directory_race_id = Column(
+        Integer,
+        ForeignKey("race_directory.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -137,6 +146,12 @@ class SourceItem(Base):
     source_url = Column(String)
     # news | social | public_record | canvassing | opponent_statement | campaign_note
     source_type = Column(String, nullable=False)
+    # Orthogonal to source_type: the social platform a post originated on, if
+    # any (twitter|bluesky|reddit|youtube|mastodon|facebook|instagram), else
+    # NULL for plain news/web. Derived by services.platform_classify from the
+    # URL (primary) + source_name (fallback) — source_type does NOT track this
+    # because RSS ingestion flattens every feed item to "news"/"reference".
+    platform = Column(String, nullable=True, index=True)
     source_owner_type = Column(String, default="unclear")
     source_owner_confidence = Column(String, default="low")
     # Who actually posted/authored the content (page, account, byline).
@@ -538,6 +553,109 @@ class FrameStageHistory(Base):
     # JSON snapshot of supporting metrics at transition time:
     # {"art_total": 47, "art_this_week": 12, "baseline_weekly": 3, "days_since_article": 1}
     metrics_snapshot = Column(Text, nullable=True)
+
+
+class FeaturedAppearance(Base):
+    """Append-only log of dashboard "Featured Narratives" appearances.
+
+    Written when the Dashboard renders a featured card for a frame on a
+    given calendar day (frontend POSTs after the cards mount; the unique
+    constraint makes repeat-render writes idempotent).
+
+    Read by get_frames_with_counts() to populate the
+    `days_featured_last_7` field on each frame. That field feeds the
+    saturation penalty in lib/featuredFrame.ts:multiObjectiveScore() —
+    frames that have already been featured 3+ days in a row get their
+    rank decayed so the panel doesn't become wallpaper.
+
+    `appeared_on` is a Date (not DateTime). We don't care about the
+    moment of appearance, only the calendar day.
+    """
+    __tablename__ = "featured_appearances"
+    __table_args__ = (
+        UniqueConstraint("frame_id", "appeared_on", name="uq_featured_frame_day"),
+    )
+    id = Column(Integer, primary_key=True)
+    frame_id = Column(Integer, ForeignKey("narrative_frames.id", ondelete="CASCADE"), nullable=False)
+    appeared_on = Column(Date, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class IngestionHealthAlert(Base):
+    """Tracks per-source ingestion-quality regressions.
+
+    Motivated by the 2026-05-26 Google News body-excerpt collapse going
+    unnoticed for 3 days: half our feeds silently dropped from ~2000-char
+    article bodies to ~70-char title stubs, and nothing surfaced until
+    the spike-detector visibly dried up days later.
+
+    Two alert `kind` values today, both written by `ingestion_health.py`'s
+    daily detection job:
+
+    - `short_body`: trailing-24h avg `raw_text` length for this source is
+      < 50% of the trailing-7d baseline AND below ~300 chars in absolute
+      terms. Catches the Google-News-style collapse where a feed switches
+      from full body to title-only.
+    - `silent`: a source that historically posted ≥1 item/day has gone
+      silent for 24h+. Catches feed misconfiguration, IP bans, or upstream
+      outages.
+
+    One active+resolved row per (source_name, kind) — re-running the
+    detection job updates the existing row in place. `resolved_at`
+    transitions from NULL to a timestamp when the source recovers; the
+    row stays around so the frontend can render "Citizens' Voice:
+    recovered 2h ago" instead of just dropping the alert without
+    explanation. If we ever want a full audit trail we'd swap this for
+    an append-only log.
+
+    Surfaced to the dashboard via the notifications bell — see
+    `routes/health.py:ingestion_alerts` and `lib/notifications.ts`'s
+    `ingestion_quality` kind.
+    """
+    __tablename__ = "ingestion_health_alerts"
+    __table_args__ = (
+        UniqueConstraint("source_name", "kind", name="uq_ingestion_health_source_kind"),
+    )
+    id = Column(Integer, primary_key=True)
+    source_name = Column(String(256), nullable=False)
+    kind = Column(String(32), nullable=False)
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    # Metrics snapshot at detection time so the notification can render
+    # "Citizens' Voice: avg body dropped 1800 → 90 chars" without
+    # re-computing.
+    baseline_avg_len = Column(Float, nullable=True)
+    current_avg_len = Column(Float, nullable=True)
+    sample_count_24h = Column(Integer, nullable=True)
+    sample_count_7d = Column(Integer, nullable=True)
+    last_checked_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class TextOverride(Base):
+    """Admin-authored manual overrides for AI-generated text.
+
+    First consumer is the morning briefing — the admin can pencil-edit the
+    headline or body when the LLM produces a bad take, and the edit applies
+    for every user until the underlying input materially changes.
+
+    `key` is a stable string the consumer chooses (e.g. `briefing.memo.headline`,
+    `briefing.memo.text`). `input_hash` pins the override to the inputs the
+    LLM was working from when the admin made the edit. When the consumer
+    detects a hash mismatch on read it deletes the row — the news has moved
+    on and the override has nothing to say about the new state. See
+    briefing_summary.get_or_generate_grounded for the consumer pattern.
+    """
+    __tablename__ = "text_overrides"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(128), nullable=False, unique=True, index=True)
+    value = Column(Text, nullable=False)
+    # Stable hash of the inputs that produced the AI text being overridden.
+    # Nullable so a future consumer can pin an override that has no upstream
+    # hash (e.g. a static label). The briefing path always sets it.
+    input_hash = Column(String(128), nullable=True)
+    created_by_name = Column(String(128), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class NarrativeFrameMention(Base):
@@ -1288,3 +1406,27 @@ class RaceSentimentSnapshot(Base):
     __table_args__ = (
         UniqueConstraint("source", "captured_at", name="uq_race_sentiment_snapshot"),
     )
+
+
+# --- derived columns ---------------------------------------------------------
+# Keep source_items.platform in sync with (source_url, source_name) on every
+# ORM write. platform is a pure function of those two columns (see
+# services.platform_classify.derive_platform), so computing it from a single
+# mapper event — rather than in each of the ~6 ingestion call sites (RSS,
+# firehose, Reddit/Mastodon/Twitter scrapers, manual inserts) — guarantees a
+# consistent tag no matter which path created the row. A before_insert/
+# before_update listener fires once the object is fully populated, which is
+# why this is an event and not a @validates hook (platform needs BOTH columns
+# and we don't control the order they're set in).
+#
+# Idempotent: re-deriving on update yields the same value when url/name are
+# unchanged, so this is safe to fire on every flush (e.g. rescore). The raw-SQL
+# backfill (scripts/backfill_platform.py) uses Core UPDATEs, which do NOT
+# trigger this ORM event — so the two coexist without clobbering each other.
+from app.services.platform_classify import derive_platform  # noqa: E402
+
+
+@event.listens_for(SourceItem, "before_insert")
+@event.listens_for(SourceItem, "before_update")
+def _set_source_item_platform(mapper, connection, target: "SourceItem") -> None:
+    target.platform = derive_platform(target.source_url, target.source_name)

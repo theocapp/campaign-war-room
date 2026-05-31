@@ -1,8 +1,9 @@
 import { ArrowLeft, ExternalLink } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/api/client'
 import type { ArticleDetail as ArticleDetailType } from '@/api/types'
+import { useAuth } from '@/auth/AuthContext'
 import { formatArticleDateLong } from '@/lib/formatDate'
 
 const C = {
@@ -107,6 +108,31 @@ function framingColor(f?: string | null): string {
 export function ArticleDetail() {
   const { id } = useParams<{ id: string }>()
   const articleId = Number(id)
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
+  // React Router gives the initial route a key of 'default'. Any later
+  // in-app navigation gets a unique key, so a non-'default' key means the
+  // user arrived here from another page in this session — going back via
+  // browser history will land them where they came from. Direct hits
+  // (bookmark, pasted URL, fresh tab) keep the old fallback to /articles.
+  const hasInAppHistory = location.key !== 'default'
+  const backLabel = hasInAppHistory ? 'Back' : 'Back to articles'
+
+  function handleBack() {
+    if (hasInAppHistory) navigate(-1)
+    else navigate('/articles')
+  }
+
+  const backButtonStyle: React.CSSProperties = {
+    background: 'transparent', border: 'none', padding: 0,
+    font: 'inherit',
+    color: C.text2, fontSize: 13, cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16,
+    textAlign: 'left',
+  }
+
   const [data, setData] = useState<ArticleDetailType | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -136,15 +162,9 @@ export function ArticleDetail() {
   if (error || !data) {
     return (
       <div style={{ padding: '24px 28px', maxWidth: 900, margin: '0 auto' }}>
-        <Link
-          to="/articles"
-          style={{
-            color: C.text2, fontSize: 13, textDecoration: 'none',
-            display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16,
-          }}
-        >
-          <ArrowLeft size={14} /> Back to articles
-        </Link>
+        <button onClick={handleBack} style={backButtonStyle}>
+          <ArrowLeft size={14} /> {backLabel}
+        </button>
         <div style={{ padding: 40, textAlign: 'center', color: C.text3 }}>
           {error ? `Failed to load article: ${error}` : 'Article not found.'}
         </div>
@@ -154,15 +174,9 @@ export function ArticleDetail() {
 
   return (
     <div style={{ padding: '20px 28px 40px', maxWidth: 900, margin: '0 auto' }}>
-      <Link
-        to="/articles"
-        style={{
-          color: C.text2, fontSize: 13, textDecoration: 'none',
-          display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 16,
-        }}
-      >
-        <ArrowLeft size={14} /> Back to articles
-      </Link>
+      <button onClick={handleBack} style={backButtonStyle}>
+        <ArrowLeft size={14} /> {backLabel}
+      </button>
 
       {/* ── Header ── */}
       <header style={{ marginBottom: 22 }}>
@@ -196,8 +210,8 @@ export function ArticleDetail() {
 
       {/* ── Scoring chips ── */}
       <ChipRow>
-        {data.race_relevance_score != null && (
-          <Chip label="Relevance" value={`${data.race_relevance_score} · ${(data.race_relevance_label || 'unknown').toUpperCase()}`} color={relevanceColor(data.race_relevance_label)} />
+        {isAdmin && data.race_relevance_label && (
+          <Chip label="Relevance" value={data.race_relevance_label.toUpperCase()} color={relevanceColor(data.race_relevance_label)} />
         )}
         {data.framing && data.framing !== 'irrelevant' && (
           <Chip label="Framing" value={prettifyFraming(data.framing)} color={framingColor(data.framing)} />

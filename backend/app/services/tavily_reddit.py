@@ -41,7 +41,13 @@ class TavilyRedditResult:
 
 
 def _search_terms(db) -> list[str]:
-    """Same shape as ingestion_reddit._search_terms — keep them in sync."""
+    """Full names only — deliberately NARROWER than the direct-JSON path.
+
+    ingestion_reddit._search_terms broadens to surname tokens + an env hatch
+    because that path is free (cost = time). Here every term is a separate
+    Tavily query that spends a paid credit, so we keep this minimal on
+    purpose. Do NOT mirror the surname expansion into this path.
+    """
     from app.models import CampaignConfig, Opponent
     campaign = db.query(CampaignConfig).first()
     terms: list[str] = []

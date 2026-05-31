@@ -36,7 +36,24 @@ def client(monkeypatch):
 
     monkeypatch.setattr(rescore_svc, "start_rescore", _stub_start)
 
+    # Auth bypass: the access-code middleware and the require_admin
+    # dependency both flip to "fail open" when no ACCESS_CODES are
+    # configured (the dev-mode contract). These tests exercise
+    # guard-string and DB-cascade logic, not auth — so we set the env
+    # to an empty string (which load_dotenv won't overwrite when called
+    # with override=False) and reset the lru_cache that backs
+    # is_auth_configured(). Without this, the .env-loaded codes leak
+    # into tests and the middleware 401s before the route even runs.
+    monkeypatch.setenv("ACCESS_CODES", "")
+    from app.services.access_codes import reset_cache_for_tests
+    reset_cache_for_tests()
+
     from app.main import app
+    # Importing app may have triggered db.py's load_dotenv, which would
+    # restore ACCESS_CODES from .env. Re-clear after import so the
+    # middleware sees the empty env at request time.
+    monkeypatch.setenv("ACCESS_CODES", "")
+    reset_cache_for_tests()
     c = TestClient(app)
     c.calls = calls  # type: ignore[attr-defined]  — exposed for assertions
     return c
@@ -160,7 +177,7 @@ def test_delete_frame_dry_run_does_not_delete(client, frame_id):
     from app.db import SessionLocal
     from app.models import NarrativeFrame
     with SessionLocal() as db:
-        assert db.query(NarrativeFrame).get(frame_id) is not None
+        assert db.get(NarrativeFrame, frame_id) is not None
 
 
 def test_delete_frame_404_on_missing_id(client):

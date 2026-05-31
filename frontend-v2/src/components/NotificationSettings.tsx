@@ -69,16 +69,16 @@ export function NotificationSettings() {
             onChange={v => update(s => ({ ...s, triggers: { ...s.triggers, proposed_narratives_pending: v } }))}
           />
           <TriggerToggle
-            label="KG contradictions pending"
-            description="When the entity graph has unresolved support/oppose conflicts to review"
-            on={settings.triggers.kg_contradictions_pending}
-            onChange={v => update(s => ({ ...s, triggers: { ...s.triggers, kg_contradictions_pending: v } }))}
-          />
-          <TriggerToggle
             label="Daily briefing ready"
             description="Send a notification when the morning briefing memo is regenerated"
             on={settings.triggers.daily_briefing}
             onChange={v => update(s => ({ ...s, triggers: { ...s.triggers, daily_briefing: v } }))}
+          />
+          <TriggerToggle
+            label="Feed health alerts"
+            description="When a source's body content collapses or a feed goes silent for 24h+"
+            on={settings.triggers.ingestion_quality}
+            onChange={v => update(s => ({ ...s, triggers: { ...s.triggers, ingestion_quality: v } }))}
           />
         </div>
       </div>

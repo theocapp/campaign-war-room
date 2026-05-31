@@ -12,6 +12,11 @@ import { ActivityThisWeek } from '@/components/briefing/ActivityThisWeek'
 import { NeedsResponse } from '@/components/briefing/NeedsResponse'
 import { OvernightChanges } from '@/components/briefing/OvernightChanges'
 import { RaceSituation } from '@/components/briefing/RaceSituation'
+import {
+  selectFeatured,
+  sparklinePath,
+  surfaceReason,
+} from '@/lib/featuredFrame'
 import { formatArticleDate } from '@/lib/formatDate'
 
 // Plain-English explanations of jargon shown in the UI.
@@ -53,63 +58,13 @@ const REL_BADGE_STYLE: Record<string, { color: string; bg: string; border: strin
   irrelevant: { color: '#555', bg: 'rgba(85,85,85,0.08)', border: 'rgba(85,85,85,0.2)' },
 }
 
-// Order must include every stage the backend can emit; see
-// _narrative_stage() in backend/app/services/narrative_frames.py.
-// `active` and `resurfacing` were previously missing from the UI, which
-// silently hid frames in those stages from the by-stage filter and made
-// the chip counts not sum to "All".
-const STAGE_ORDER = ['mainstream', 'spreading', 'resurfacing', 'active', 'emerging', 'fading', 'dormant']
-
-// Composite "importance" score for the Featured Narratives section.
-// Higher = more worth your attention right now. Components, roughly in
-// order of weight:
-//
-//   • Strategic urgency  (the AI's "act now" call)             up to +40
-//   • Strategic posture  (defensive > offensive > amplify…)    up to +20
-//   • Momentum signal    (viral / amplified / missing / elite)  up to +25
-//   • Stage              (spreading > mainstream > emerging…)  up to +20
-//   • This-week volume   (capped — megavolume doesn't drown)   up to +30
-//   • Week-over-week Δ   (growing stories matter more)         positive boost
-//   • Outlet diversity   (broad coverage = bigger story)       up to +24
-//
-// Caps prevent a single noisy frame (e.g. 200 mentions this week from a
-// repeated tweet) from drowning out a 5-outlet, defensive, high-urgency
-// opponent attack — the second is the one the campaign actually needs to
-// react to today.
-function importanceScore(f: NarrativeFrame): number {
-  let score = 0
-
-  const urgency = f.strategic_lens?.urgency
-  if (urgency === 'high') score += 40
-  else if (urgency === 'medium') score += 20
-  else if (urgency === 'low') score += 10
-
-  const posture = f.strategic_lens?.posture
-  if (posture === 'defensive') score += 20
-  else if (posture === 'offensive') score += 15
-  else if (posture === 'amplify') score += 12
-  else if (posture === 'monitor') score += 5
-
-  if (f.momentum_signal === 'viral') score += 25
-  else if (f.momentum_signal === 'amplified') score += 18
-  else if (f.momentum_signal === 'missing_coverage') score += 20
-  else if (f.momentum_signal === 'elite_only') score += 10
-
-  const stagePts: Record<string, number> = {
-    spreading: 20, resurfacing: 18, mainstream: 15, emerging: 12,
-    active: 10, fading: 3, dormant: 0,
-  }
-  score += stagePts[f.stage] ?? 0
-
-  score += Math.min(f.mentions_this_week * 2, 30)
-
-  const delta = f.mentions_this_week - f.mentions_last_week
-  score += delta * 1.5
-
-  score += Math.min(f.unique_outlets_this_week * 3, 24)
-
-  return score
-}
+// NOTE: featured-card ranking now lives in lib/featuredFrame.ts as a
+// multi-objective score (urgency + acceleration + novelty + propagation +
+// persistence + momentum) with soft owner/stage diversity caps applied in
+// selectFeatured(). The old importanceScore() used WoW mention delta,
+// which is noisy at small N and conflates real spread with wire
+// syndication. Kept this comment as a breadcrumb in case a future session
+// wonders why the sort moved.
 
 function ownerColor(t: OwnerType): string {
   return t === 'candidate' ? C.candidate : t === 'opponent' ? C.opponent : C.media
@@ -127,9 +82,21 @@ function stageLabel(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-function FeaturedCard({ frame }: { frame: NarrativeFrame }) {
+// FeaturedCard — Phase 1 redesign.
+//
+// Card answers two questions an operator glancing at the panel needs:
+//
+//   1. What is it?              — owner dot + name (+ memo marker)
+//   2. Why is it featured now?  — surface-reason line + sparkline
+//                                  ("Going viral", "Accelerating", …)
+//
+// Every signal comes from existing fields on NarrativeFrame; no backend
+// work was needed. See lib/featuredFrame.ts for the detector rules and
+// scoring components.
+function FeaturedCard({ frame, inMemo = false }: { frame: NarrativeFrame; inMemo?: boolean }) {
   const oc = frameColor(frame)
-  const delta = frame.mentions_this_week - frame.mentions_last_week
+  const reason = surfaceReason(frame)
+  const sparkD = sparklinePath(frame.activity_30d, 80, 18)
   const [hovered, setHovered] = useState(false)
 
   return (
@@ -141,35 +108,69 @@ function FeaturedCard({ frame }: { frame: NarrativeFrame }) {
         background: hovered ? C.bg3 : C.bg2,
         border: `1px solid ${hovered ? C.borderBright : C.border}`,
         borderRadius: '0.625rem',
-        padding: '12px 14px',
+        padding: '10px 12px',
         cursor: 'pointer',
         transition: 'background 0.12s ease, border-color 0.12s ease',
         textDecoration: 'none',
         color: 'inherit',
-        display: 'block',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        minHeight: 96,
       } as CSSProperties}
     >
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+      {/* Row 1: owner dot + name + (memo marker) */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
         <span style={{
           width: 10, height: 10, borderRadius: '50%', background: oc,
           flexShrink: 0, marginTop: 3,
         }} />
         <span style={{
+          flex: 1,
           fontSize: 13, fontWeight: 600, color: C.text1, lineHeight: 1.3,
           overflow: 'hidden', display: '-webkit-box',
           WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
         } as CSSProperties}>
           {frame.name}
         </span>
-      </div>
-      <div style={{ fontSize: 12, color: oc, fontWeight: 600 }}>
-        {stageLabel(frame.stage)}
-        {delta !== 0 && (
-          <span style={{ color: C.text2, fontWeight: 400, marginLeft: 6 }}>
-            {delta > 0 ? `+${delta}` : delta} this week
+        {inMemo && (
+          <span
+            title="Cited in today's briefing memo"
+            style={{
+              flexShrink: 0,
+              fontSize: 10, fontWeight: 600, letterSpacing: '0.02em',
+              color: C.accent,
+              background: 'rgba(255,191,0,0.10)',
+              padding: '2px 6px', borderRadius: 4,
+              whiteSpace: 'nowrap',
+              cursor: 'help',
+            }}
+          >
+            In memo
           </span>
         )}
       </div>
+
+      {/* Row 2: surface reason + sparkline. Stage label fills in when
+          no reason fires, so the card never feels empty. */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 8, marginTop: 'auto',
+      }}>
+        <span style={{
+          fontSize: 11, fontWeight: 600,
+          color: reason ? C.text1 : oc,
+          letterSpacing: reason ? 0 : '0.02em',
+        }}>
+          {reason ? reason.label : stageLabel(frame.stage)}
+        </span>
+        {sparkD && (
+          <svg width={80} height={18} style={{ flexShrink: 0, opacity: 0.7 }}>
+            <path d={sparkD} fill="none" stroke={oc} strokeWidth={1.2} strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </div>
+
     </Link>
   )
 }
@@ -455,18 +456,40 @@ export function Dashboard() {
   const [loading, setLoading] = useState(!cached.frames)
   const [briefingLoading, setBriefingLoading] = useState(!cached.briefing)
   const [activeFilter, setActiveFilter] = useState<FilterKey>('all')
+  // The right rail loads 15 articles by default; Load more bumps this in
+  // 15-row chunks. A ref mirrors the state so the 60s refresh poll always
+  // reads the user's currently-expanded limit even though the polling
+  // useEffect captures the initial closure.
+  const [articleLimit, setArticleLimit] = useState(15)
+  const articleLimitRef = useRef(articleLimit)
+  articleLimitRef.current = articleLimit
+  const [loadingMoreArticles, setLoadingMoreArticles] = useState(false)
 
   const refresh = async () => {
     // Includes briefing — refresh is on a 60s timer, so a slow briefing
     // call here doesn't gate first paint (it ran independently on mount).
     const [fr, sp, ra, br] = await Promise.allSettled([
-      api.narrativeFrames(), api.spikes(), api.recentArticles(10),
+      api.narrativeFrames(), api.spikes(),
+      api.recentArticles(articleLimitRef.current),
       api.morningBriefing(2),
     ])
     if (fr.status === 'fulfilled') setFrames(fr.value)
     if (sp.status === 'fulfilled') setSpikes(sp.value)
     if (ra.status === 'fulfilled') setRecent(ra.value)
     if (br.status === 'fulfilled') setBriefing(br.value)
+  }
+
+  const onLoadMoreArticles = async () => {
+    const next = articleLimit + 15
+    setArticleLimit(next)
+    articleLimitRef.current = next
+    setLoadingMoreArticles(true)
+    try {
+      const more = await api.recentArticles(next)
+      setRecent(more)
+    } finally {
+      setLoadingMoreArticles(false)
+    }
   }
 
   useEffect(() => {
@@ -501,21 +524,39 @@ export function Dashboard() {
       if (['candidate', 'opponent', 'media'].includes(activeFilter)) return f.owner_type === activeFilter
       return f.stage === activeFilter
     })
-    // Sort by composite importance score (urgency + posture + momentum +
-    // stage + recent activity + growth + outlet diversity). This puts the
-    // narratives that ACTUALLY matter today at the top of the Featured
-    // Narratives section, instead of just "biggest historical pile."
-    // Ties fall back to stage order, then total mentions, so the order is
-    // deterministic even when scores collide.
-    .sort((a, b) => {
-      const ia = importanceScore(a), ib = importanceScore(b)
-      if (ia !== ib) return ib - ia
-      const sa = STAGE_ORDER.indexOf(a.stage), sb = STAGE_ORDER.indexOf(b.stage)
-      if (sa !== sb) return sa - sb
-      return b.mentions_total - a.mentions_total
-    })
 
-  const featuredFrames = filteredFrames.slice(0, 8)
+  // Frames cited in today's grounded memo are pinned into Featured — the
+  // editorial memo and the algorithmic panel should never disagree about
+  // what matters today. See lib/featuredFrame.ts:selectFeatured for the
+  // pinning + diversity-cap interaction. Empty set when briefing hasn't
+  // loaded yet or the memo has no citations.
+  const pinnedFrameIds = new Set<number>(
+    briefing?.cited_frames?.map(f => f.frame_id) ?? [],
+  )
+
+  // Multi-objective selection: ranks by urgency + acceleration + novelty +
+  // propagation + persistence + momentum, then applies soft per-owner and
+  // per-stage diversity caps so the panel isn't 8 versions of the same
+  // flavor. See lib/featuredFrame.ts for component weights.
+  const featuredFrames = selectFeatured(filteredFrames, 8, pinnedFrameIds)
+
+  // Log featured-card appearances once per page load. The backend upsert
+  // is idempotent on (frame_id, today), so reload spam is harmless. We
+  // only fire when frames have actually loaded (avoids logging the
+  // skeleton state). The count rendered yesterday gets credited yesterday;
+  // today's count only gets credited the first time the user opens the
+  // dashboard today. Ref guards against double-logging on filter changes.
+  const appearanceLoggedRef = useRef(false)
+  useEffect(() => {
+    if (appearanceLoggedRef.current) return
+    if (loading || featuredFrames.length === 0) return
+    appearanceLoggedRef.current = true
+    api.logFeaturedAppearance(featuredFrames.map(f => f.id)).catch(() => {
+      // Best-effort telemetry — if the POST fails (offline, backend down),
+      // we don't surface an error. Next load will write today's row.
+      appearanceLoggedRef.current = false
+    })
+  }, [loading, featuredFrames])
 
   const counts = {
     all: frames.length,
@@ -561,7 +602,7 @@ export function Dashboard() {
             </section>
           ) : briefing ? (
             <>
-              <RaceSituation memo={briefing.race_memo} />
+              <RaceSituation memo={briefing.race_memo} onRequestRefresh={refresh} />
               <NeedsResponse items={briefing.needs_response} />
               <OvernightChanges claims={briefing.overnight_changes} />
             </>
@@ -607,9 +648,9 @@ export function Dashboard() {
                         text={'The narratives that matter most this week, ranked by urgency and coverage. Filter by Owner or Stage to re-rank within a subset.'}
                       />
                     </div>
+                    <span style={{ flex: 1, height: 1, background: 'var(--bg-3)', display: 'block' }} />
                     <div style={{
                       display: 'inline-flex', alignItems: 'center', gap: 8,
-                      marginLeft: 'auto',
                     }}>
                       <FilterDropdown
                         label="Owner"
@@ -640,7 +681,9 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-                    {featuredFrames.map(f => <FeaturedCard key={f.id} frame={f} />)}
+                    {featuredFrames.map(f => (
+                      <FeaturedCard key={f.id} frame={f} inMemo={pinnedFrameIds.has(f.id)} />
+                    ))}
                   </div>
                 </div>
               )}
@@ -720,7 +763,30 @@ export function Dashboard() {
               <div key={i} className="skeleton" style={{ height: 52, marginBottom: 6 }} />
             ))
           ) : recent.length > 0 ? (
-            recent.map(item => <ArticleRow key={item.id} item={item} />)
+            <>
+              {recent.map(item => <ArticleRow key={item.id} item={item} />)}
+              {/* Load more — only render when the last fetch returned the
+                  full requested page. If recent.length < articleLimit, the
+                  backend has run out of articles and there's nothing more
+                  to fetch, so hide the button to avoid a dead click. */}
+              {recent.length >= articleLimit && (
+                <button
+                  type="button"
+                  onClick={onLoadMoreArticles}
+                  disabled={loadingMoreArticles}
+                  style={{
+                    marginTop: 8, width: '100%',
+                    padding: '8px 12px', borderRadius: 8,
+                    background: C.bg2, color: C.text2,
+                    border: `1px solid ${C.border}`,
+                    cursor: loadingMoreArticles ? 'wait' : 'pointer',
+                    fontSize: 12, fontFamily: 'inherit',
+                  } as CSSProperties}
+                >
+                  {loadingMoreArticles ? 'Loading…' : 'Load more'}
+                </button>
+              )}
+            </>
           ) : (
             <div style={{ textAlign: 'center', padding: '24px 0', fontSize: 13, color: C.text3 }}>
               No relevant articles in the last week.

@@ -17,6 +17,7 @@ import {
 } from 'recharts'
 import { api } from '@/api/client'
 import { InfoTooltip } from '@/components/InfoTooltip'
+import { RaceSentimentChart } from '@/components/RaceSentimentChart'
 import type { Spike, ToneSeries, TrendSeries } from '@/api/types'
 
 const CHART_TOOLTIP_STYLE = {
@@ -167,6 +168,12 @@ export function Analytics() {
   return (
     <div style={{ minHeight: '100vh' }}>
       <div style={{ padding: '24px 28px', margin: '0 auto' }}>
+        {/* Race sentiment chart — full-width, moved here from the retired
+            /forecast page on 2026-05-29. Sits above the 2-col analytics
+            grid because it's the marquee chart and needs the room. */}
+        <div style={{ marginBottom: 24 }}>
+          <RaceSentimentChart days={30} />
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
 
             {/* GDELT Tone — moved to top-left */}

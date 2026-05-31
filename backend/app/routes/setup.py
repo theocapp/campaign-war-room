@@ -19,12 +19,18 @@ from app.services.social_handle_discovery import (
     HandleCandidate,
     discover_social_handles,
 )
+from app.services.access_codes import require_admin
 from app.services.third_party_account_discovery import (
     DiscoveredAccount,
     discover_third_party_accounts,
 )
 
 router = APIRouter()
+
+# Discovery endpoints hit a paid web-search provider, so the per-click cost is
+# real even though they don't directly call the LLM. Save/list/delete endpoints
+# stay open — they're pure DB ops.
+_admin_only = [Depends(require_admin)]
 
 
 class DiscoveredHandle(BaseModel):
@@ -60,7 +66,7 @@ def _to_payload(c: HandleCandidate) -> DiscoveredHandle:
     )
 
 
-@router.get("/setup/discover-handles", response_model=HandleDiscoveryOut)
+@router.get("/setup/discover-handles", response_model=HandleDiscoveryOut, dependencies=_admin_only)
 def discover_handles(
     name: str,
     location: Optional[str] = None,
@@ -323,7 +329,7 @@ def _collect_own_handles(db: Session) -> dict[str, set[str]]:
     return exclude
 
 
-@router.get("/setup/discover-third-party", response_model=ThirdPartyDiscoveryOut)
+@router.get("/setup/discover-third-party", response_model=ThirdPartyDiscoveryOut, dependencies=_admin_only)
 def discover_third_party(db: Session = Depends(get_db)):
     """Run third-party account discovery anchored to the current campaign.
 

@@ -22,16 +22,43 @@ logger = logging.getLogger(__name__)
 
 GDELT_DOC_API = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-# How far back (minutes) the real-time poll looks. 30 min gives a generous
-# overlap window so we don't miss articles in case a poll fires late.
-REALTIME_LOOKBACK_MINUTES = 30
+# How far back (minutes) the real-time poll looks. Matched to the
+# scheduler cadence (`gdelt_realtime` runs every 30 min) plus a small
+# overlap, so consecutive polls don't re-fetch the same window twice and
+# burn the GDELT rate limit on duplicates. Bumped 2026-05-30 along with
+# the scheduler cadence change from 15min → 30min — the prior config
+# produced overlapping 30-min lookbacks every 15 min and was the primary
+# driver of sustained 429s (gdelt_realtime delivered only 11 items in
+# 7 days at that point).
+REALTIME_LOOKBACK_MINUTES = 35
 
 # Pause between article ingest calls — be polite to article origin servers.
-INGEST_DELAY = 0.5
+# Tightened from 0.5s; high-output GDELT responses can carry 100+ articles
+# and the old cadence produced 50s+ of inline blocking per cycle which
+# pushed runs past the scheduler's max_instances=1 guard rail.
+INGEST_DELAY = 0.2
+
+# Pause between successive GDELT API calls within one cycle. The DOC API
+# throttles on aggregate per-IP request rate, so back-to-back queries at
+# sub-second intervals are exactly the pattern that triggers 429. Bumped
+# from 0.5s to 5s — total per-cycle overhead is ~15s for 3 queries, well
+# inside a 30-min cycle budget.
+INTER_QUERY_DELAY = 5.0
+
+# Inter-cycle throttle guard. If the last cycle got throttled, the next
+# cycle skips entirely instead of piling another wave of requests onto a
+# rate-limited window. Stored on the function object across calls.
+THROTTLE_COOLOFF_SECONDS = 300
+
+# Track when the last 429 fired so the next cycle can skip if we're still
+# in the cool-off window. Module-level rather than per-call state because
+# the scheduler invokes `poll_gdelt_realtime` once per cycle with a fresh
+# DB session — there's no caller to thread state through.
+_last_throttle_at: Optional[datetime] = None
 
 
 def _gdelt_artlist(
-    query: str, start: datetime, end: datetime, *, max_retries: int = 3,
+    query: str, start: datetime, end: datetime, *, max_retries: int = 2,
 ) -> tuple[list[dict], Optional[str]]:
     """Fetch articles from GDELT DOC artlist mode for the given window.
 
@@ -41,9 +68,11 @@ def _gdelt_artlist(
     from "0 articles in window" so the scheduler-health view doesn't
     silently report success when GDELT is rejecting us.
 
-    Retries 429s with exponential backoff (10s, 20s, 40s) since GDELT
-    throttle windows are typically ~minute-long. Other errors (network,
-    parse, 5xx) also retry the same way — cheap insurance.
+    Retry budget tuned for the GDELT 429 reality: prior config used
+    10/20/40s backoff and 3 retries, which on a sustained throttle window
+    burned 70s waiting for a result that wasn't coming. We now cap at 2
+    attempts with 30s, 60s — same total budget but the cycle gives up
+    sooner instead of holding the scheduler slot.
     """
     params = {
         "query": query,
@@ -69,7 +98,7 @@ def _gdelt_artlist(
                     query, max_retries, exc,
                 )
                 return [], last_exc
-            backoff = 10 * (2 ** attempt)  # 10s, 20s, 40s
+            backoff = 30 * (2 ** attempt)  # 30s, 60s
             logger.info(
                 "gdelt_artlist for '%s' failed (%s) — retry %d/%d in %ds",
                 query, exc, attempt + 1, max_retries - 1, backoff,
@@ -126,11 +155,31 @@ def _gdelt_timelinetone(query: str, days_back: int = 7, *, max_retries: int = 4)
 
 
 def poll_gdelt_realtime(db) -> dict:
-    """Query GDELT for articles from the past 30 minutes and ingest new ones.
+    """Query GDELT for articles from the past `REALTIME_LOOKBACK_MINUTES`
+    minutes and ingest new ones.
 
-    Called by the scheduler every 15 minutes. Ingests only URLs not already
-    in the database — the normal ingest_url dedup handles that.
+    Called by the scheduler every 30 minutes (was 15min before
+    2026-05-30 — see scheduler.py for the cadence change rationale).
+    Ingests only URLs not already in the database — the normal
+    `ingest_url` dedup handles that.
+
+    Skips entirely if the previous cycle 429'd within
+    `THROTTLE_COOLOFF_SECONDS` — piling more requests onto an actively
+    rate-limited window just guarantees another wave of 429s and burns
+    the cycle's whole budget on retries.
     """
+    global _last_throttle_at
+
+    # Check cool-off from prior cycle's throttle.
+    if _last_throttle_at is not None:
+        since = (datetime.utcnow() - _last_throttle_at).total_seconds()
+        if since < THROTTLE_COOLOFF_SECONDS:
+            logger.info(
+                "gdelt_realtime: skipping — in throttle cool-off (%.0fs since last 429, need %ds)",
+                since, THROTTLE_COOLOFF_SECONDS,
+            )
+            return {"skipped": True, "reason": "throttle_cooloff"}
+
     from app.models import CampaignConfig, Opponent
     from app.services.ingestion import ingest_url
 
@@ -178,6 +227,16 @@ def poll_gdelt_realtime(db) -> dict:
             # observability signal, not a "0 articles in window" success.
             throttled_queries += 1
             last_throttle_reason = fetch_err
+            # Short-circuit the remaining queries in this cycle. Once we
+            # know GDELT is rejecting us, hitting it again with a
+            # different query just wastes the cycle's budget and risks
+            # extending the throttle window.
+            _last_throttle_at = datetime.utcnow()
+            logger.info(
+                "gdelt_realtime: aborting cycle after first 429; "
+                "remaining queries skipped to let throttle window clear"
+            )
+            break
         for art in articles:
             url = art.get("url", "").strip()
             if not url or url in seen_urls:
@@ -193,7 +252,10 @@ def poll_gdelt_realtime(db) -> dict:
                 logger.debug("gdelt_realtime: ingest failed for %s: %s", url, exc)
                 errors += 1
             time.sleep(INGEST_DELAY)
-        time.sleep(0.5)  # be polite to GDELT between queries
+        # Inter-query pause — GDELT throttles on aggregate per-IP request
+        # rate, so back-to-back queries at sub-second intervals are exactly
+        # what triggers 429.
+        time.sleep(INTER_QUERY_DELAY)
 
     logger.info(
         "gdelt_realtime: added=%d skipped=%d errors=%d throttled=%d (window=%s→%s)",

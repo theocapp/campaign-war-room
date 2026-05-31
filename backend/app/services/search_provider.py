@@ -80,11 +80,22 @@ class TavilySearchProvider:
     Tavily's free dev keys are limited to 1000 credits/month each. We accept
     multiple keys (comma-separated TAVILY_API_KEY or numbered
     TAVILY_API_KEY_1 / _2 / ... in .env) and rotate between them. When one
-    returns a 401/402/429 we mark it as exhausted for the rest of the
-    process lifetime and continue with the others.
+    returns a quota/auth error (see _EXHAUSTED_CODES) we mark it as
+    exhausted for the rest of the process lifetime and continue with the
+    others.
     """
     name = "tavily"
     endpoint = "https://api.tavily.com/search"
+    # HTTP codes that mean "this key can't be used again until restart":
+    #   401 invalid / revoked
+    #   402 quota exhausted (some integrations)
+    #   429 rate-limited (we treat this as exhausted-this-session for safety;
+    #       the next process restart will retry)
+    #   432 Tavily's non-standard "monthly credit limit exceeded" response.
+    #       Without this, an exhausted key falls into the generic except branch
+    #       and the rotation keeps re-trying it on every request — observed
+    #       2026-05-29 with the live keys.
+    _EXHAUSTED_CODES = (401, 402, 429, 432)
 
     def __init__(self, api_keys: list[str]):
         # Preserve insertion order; .keys list is treated as a round-robin.
@@ -114,7 +125,8 @@ class TavilySearchProvider:
             attempts += 1
             key = self._next_key()
             if key is None:
-                msg = "Tavily: all keys exhausted (401/402/429). Add more or wait for monthly reset."
+                codes = "/".join(str(c) for c in self._EXHAUSTED_CODES)
+                msg = f"Tavily: all keys exhausted ({codes}). Add more or wait for monthly reset."
                 logger.warning(msg)
                 return SearchResponse(results=[], provider=self.name, message=msg)
             try:
@@ -134,8 +146,8 @@ class TavilySearchProvider:
                     },
                     timeout=15,
                 )
-                if resp.status_code in (401, 402, 429):
-                    # 401=invalid, 402=quota, 429=rate-limit — all reasons to rotate.
+                if resp.status_code in self._EXHAUSTED_CODES:
+                    # See _EXHAUSTED_CODES for the meaning of each.
                     logger.warning(
                         "Tavily: key …%s returned %d — marking exhausted, rotating",
                         key[-4:], resp.status_code,
@@ -175,33 +187,39 @@ class TavilySearchProvider:
 
 
 def _load_tavily_keys() -> list[str]:
-    """Read Tavily API keys from env. Supports two formats:
+    """Read Tavily API keys from env. Mirrors the Groq/Cerebras pattern:
 
-    1. TAVILY_API_KEY = comma-separated list of keys
-    2. TAVILY_API_KEY_1, TAVILY_API_KEY_2, ... = numbered keys
+      TAVILY_API_KEY          = key #1
+      TAVILY_API_KEY_2 … _10  = extra keys (gap-tolerant, empty slots skipped)
 
-    Either format works; mixing is fine. Empty / whitespace keys are dropped.
-    Order is: comma-list first, then numbered. The provider round-robins
-    between them and quarantines keys that return 401/402/429.
+    Also accepts a legacy comma-separated TAVILY_API_KEY for back-compat with
+    the old format. Order is: base, then numbered slots. Empty / whitespace
+    values and duplicates are silently dropped.
+
+    The provider round-robins between the returned keys and quarantines any
+    that return 401/402/429/432 (see TavilySearchProvider._EXHAUSTED_CODES).
     """
     keys: list[str] = []
     seen: set[str] = set()
-    csv = os.getenv("TAVILY_API_KEY", "").strip()
-    if csv:
-        for k in csv.split(","):
-            k = k.strip()
-            if k and k not in seen:
-                keys.append(k)
-                seen.add(k)
-    i = 1
-    while True:
-        k = os.getenv(f"TAVILY_API_KEY_{i}", "").strip()
-        if not k:
-            break
-        if k not in seen:
-            keys.append(k)
-            seen.add(k)
-        i += 1
+
+    def _add(value: str) -> None:
+        v = value.strip()
+        if v and v not in seen:
+            keys.append(v)
+            seen.add(v)
+
+    # Base slot accepts a single key OR the legacy CSV format.
+    base = os.getenv("TAVILY_API_KEY", "")
+    if "," in base:
+        for k in base.split(","):
+            _add(k)
+    else:
+        _add(base)
+
+    # Numbered extras. Bounded loop matches services/llm_provider.py — gaps
+    # are fine, the loop doesn't bail on the first empty slot.
+    for n in range(2, 11):
+        _add(os.getenv(f"TAVILY_API_KEY_{n}", ""))
     return keys
 
 

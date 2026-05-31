@@ -1,0 +1,759 @@
+{
+  "_meta": {
+    "generated": "2026-05-31",
+    "purpose": "Backfill Outlet.monthly_visitors for editorial outlets that lacked a value, so reach weighting is no longer dominated by the ~30 outlets that happened to get a number at campaign setup.",
+    "source": "Tranco top-1M domain ranking (https://tranco-list.eu) \u2014 free, research-grade, no auth.",
+    "model": "monthly_visitors = min(CAP, round(K / tranco_rank)); unranked domains use FLOOR_UNRANKED.",
+    "K": 12000000000.0,
+    "CAP": 100000000,
+    "FLOOR_UNRANKED": 15000,
+    "calibration": "K fit to median(existing_mv * rank) across 22 known editorial outlets. Accuracy vs those anchors: 20/22 exact log10 band, 22/22 within one band, median |log10 ratio| 0.29.",
+    "honesty_policy": "Band-accurate, NOT count-accurate. Surface as outlet reach TIERS (National ~1M / Regional ~100K / Local ~10K), never as precise per-article viewer counts.",
+    "apply_policy": "ADDITIVE ONLY \u2014 the apply script fills monthly_visitors WHERE NULL and never overwrites existing values. Excluded categories (social platforms, portals/aggregators, .gov/.mil, non-editorial) are deliberately left NULL because domain traffic != article readership.",
+    "count": 106
+  },
+  "outlets": [
+    {
+      "domain": "nytimes.com",
+      "monthly_visitors": 78431373,
+      "tranco_rank": 153,
+      "items_at_generation": 41,
+      "basis": "model"
+    },
+    {
+      "domain": "cnn.com",
+      "monthly_visitors": 64864865,
+      "tranco_rank": 185,
+      "items_at_generation": 20,
+      "basis": "model"
+    },
+    {
+      "domain": "theguardian.com",
+      "monthly_visitors": 64516129,
+      "tranco_rank": 186,
+      "items_at_generation": 8,
+      "basis": "model"
+    },
+    {
+      "domain": "bbc.com",
+      "monthly_visitors": 57142857,
+      "tranco_rank": 210,
+      "items_at_generation": 3,
+      "basis": "model"
+    },
+    {
+      "domain": "washingtonpost.com",
+      "monthly_visitors": 33898305,
+      "tranco_rank": 354,
+      "items_at_generation": 5,
+      "basis": "model"
+    },
+    {
+      "domain": "cnbc.com",
+      "monthly_visitors": 31413613,
+      "tranco_rank": 382,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "businessinsider.com",
+      "monthly_visitors": 29126214,
+      "tranco_rank": 412,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "abcnews.go.com",
+      "monthly_visitors": 27334852,
+      "tranco_rank": 439,
+      "items_at_generation": 4,
+      "basis": "model"
+    },
+    {
+      "domain": "npr.org",
+      "monthly_visitors": 25210084,
+      "tranco_rank": 476,
+      "items_at_generation": 5,
+      "basis": "model"
+    },
+    {
+      "domain": "foxnews.com",
+      "monthly_visitors": 24539877,
+      "tranco_rank": 489,
+      "items_at_generation": 1018,
+      "basis": "model"
+    },
+    {
+      "domain": "independent.co.uk",
+      "monthly_visitors": 19077901,
+      "tranco_rank": 629,
+      "items_at_generation": 2811,
+      "basis": "model"
+    },
+    {
+      "domain": "cbsnews.com",
+      "monthly_visitors": 19047619,
+      "tranco_rank": 630,
+      "items_at_generation": 12,
+      "basis": "model"
+    },
+    {
+      "domain": "apnews.com",
+      "monthly_visitors": 18750000,
+      "tranco_rank": 640,
+      "items_at_generation": 6,
+      "basis": "model"
+    },
+    {
+      "domain": "latimes.com",
+      "monthly_visitors": 14150943,
+      "tranco_rank": 848,
+      "items_at_generation": 102,
+      "basis": "model"
+    },
+    {
+      "domain": "aljazeera.com",
+      "monthly_visitors": 12631579,
+      "tranco_rank": 950,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "pbs.org",
+      "monthly_visitors": 12565445,
+      "tranco_rank": 955,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "usnews.com",
+      "monthly_visitors": 9577015,
+      "tranco_rank": 1253,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "newsweek.com",
+      "monthly_visitors": 9097801,
+      "tranco_rank": 1319,
+      "items_at_generation": 195,
+      "basis": "model"
+    },
+    {
+      "domain": "thedailybeast.com",
+      "monthly_visitors": 3968254,
+      "tranco_rank": 3024,
+      "items_at_generation": 8,
+      "basis": "model"
+    },
+    {
+      "domain": "nymag.com",
+      "monthly_visitors": 3848621,
+      "tranco_rank": 3118,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "salon.com",
+      "monthly_visitors": 3491417,
+      "tranco_rank": 3437,
+      "items_at_generation": 5,
+      "basis": "model"
+    },
+    {
+      "domain": "msnbc.com",
+      "monthly_visitors": 2720472,
+      "tranco_rank": 4411,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "breitbart.com",
+      "monthly_visitors": 2406256,
+      "tranco_rank": 4987,
+      "items_at_generation": 679,
+      "basis": "model"
+    },
+    {
+      "domain": "theepochtimes.com",
+      "monthly_visitors": 2179837,
+      "tranco_rank": 5505,
+      "items_at_generation": 63,
+      "basis": "model"
+    },
+    {
+      "domain": "ibtimes.com",
+      "monthly_visitors": 2162162,
+      "tranco_rank": 5550,
+      "items_at_generation": 229,
+      "basis": "model"
+    },
+    {
+      "domain": "inquirer.com",
+      "monthly_visitors": 2123894,
+      "tranco_rank": 5650,
+      "items_at_generation": 59,
+      "basis": "model"
+    },
+    {
+      "domain": "thenation.com",
+      "monthly_visitors": 1983799,
+      "tranco_rank": 6049,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "post-gazette.com",
+      "monthly_visitors": 1667593,
+      "tranco_rank": 7196,
+      "items_at_generation": 7,
+      "basis": "model"
+    },
+    {
+      "domain": "c-span.org",
+      "monthly_visitors": 1564129,
+      "tranco_rank": 7672,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "washingtonexaminer.com",
+      "monthly_visitors": 1513241,
+      "tranco_rank": 7930,
+      "items_at_generation": 507,
+      "basis": "model"
+    },
+    {
+      "domain": "rawstory.com",
+      "monthly_visitors": 1375674,
+      "tranco_rank": 8723,
+      "items_at_generation": 672,
+      "basis": "model"
+    },
+    {
+      "domain": "audacy.com",
+      "monthly_visitors": 1049226,
+      "tranco_rank": 11437,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "alternet.org",
+      "monthly_visitors": 995851,
+      "tranco_rank": 12050,
+      "items_at_generation": 410,
+      "basis": "model"
+    },
+    {
+      "domain": "dailycaller.com",
+      "monthly_visitors": 992966,
+      "tranco_rank": 12085,
+      "items_at_generation": 326,
+      "basis": "model"
+    },
+    {
+      "domain": "news.ballotpedia.org",
+      "monthly_visitors": 991244,
+      "tranco_rank": 12106,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "townhall.com",
+      "monthly_visitors": 892061,
+      "tranco_rank": 13452,
+      "items_at_generation": 408,
+      "basis": "model"
+    },
+    {
+      "domain": "northjersey.com",
+      "monthly_visitors": 810866,
+      "tranco_rank": 14799,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "rollcall.com",
+      "monthly_visitors": 694083,
+      "tranco_rank": 17289,
+      "items_at_generation": 34,
+      "basis": "model"
+    },
+    {
+      "domain": "dailywire.com",
+      "monthly_visitors": 693161,
+      "tranco_rank": 17312,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "nbcwashington.com",
+      "monthly_visitors": 692641,
+      "tranco_rank": 17325,
+      "items_at_generation": 73,
+      "basis": "model"
+    },
+    {
+      "domain": "newsnationnow.com",
+      "monthly_visitors": 692481,
+      "tranco_rank": 17329,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "6abc.com",
+      "monthly_visitors": 682477,
+      "tranco_rank": 17583,
+      "items_at_generation": 21,
+      "basis": "model"
+    },
+    {
+      "domain": "govtech.com",
+      "monthly_visitors": 659631,
+      "tranco_rank": 18192,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "whyy.org",
+      "monthly_visitors": 654129,
+      "tranco_rank": 18345,
+      "items_at_generation": 150,
+      "basis": "model"
+    },
+    {
+      "domain": "nbcphiladelphia.com",
+      "monthly_visitors": 653951,
+      "tranco_rank": 18350,
+      "items_at_generation": 300,
+      "basis": "model"
+    },
+    {
+      "domain": "mcall.com",
+      "monthly_visitors": 575098,
+      "tranco_rank": 20866,
+      "items_at_generation": 4,
+      "basis": "model"
+    },
+    {
+      "domain": "thefederalist.com",
+      "monthly_visitors": 564254,
+      "tranco_rank": 21267,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "freebeacon.com",
+      "monthly_visitors": 464792,
+      "tranco_rank": 25818,
+      "items_at_generation": 7,
+      "basis": "model"
+    },
+    {
+      "domain": "dailysignal.com",
+      "monthly_visitors": 451026,
+      "tranco_rank": 26606,
+      "items_at_generation": 199,
+      "basis": "model"
+    },
+    {
+      "domain": "wfmz.com",
+      "monthly_visitors": 443475,
+      "tranco_rank": 27059,
+      "items_at_generation": 166,
+      "basis": "model"
+    },
+    {
+      "domain": "usafacts.org",
+      "monthly_visitors": 439174,
+      "tranco_rank": 27324,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "governing.com",
+      "monthly_visitors": 425879,
+      "tranco_rank": 28177,
+      "items_at_generation": 5,
+      "basis": "model"
+    },
+    {
+      "domain": "abc27.com",
+      "monthly_visitors": 352288,
+      "tranco_rank": 34063,
+      "items_at_generation": 675,
+      "basis": "model"
+    },
+    {
+      "domain": "fox29.com",
+      "monthly_visitors": 331217,
+      "tranco_rank": 36230,
+      "items_at_generation": 7,
+      "basis": "model"
+    },
+    {
+      "domain": "lehighvalleylive.com",
+      "monthly_visitors": 320770,
+      "tranco_rank": 37410,
+      "items_at_generation": 3,
+      "basis": "model"
+    },
+    {
+      "domain": "tapinto.net",
+      "monthly_visitors": 293671,
+      "tranco_rank": 40862,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "270towin.com",
+      "monthly_visitors": 284387,
+      "tranco_rank": 42196,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "goerie.com",
+      "monthly_visitors": 243561,
+      "tranco_rank": 49269,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "wsls.com",
+      "monthly_visitors": 239507,
+      "tranco_rank": 50103,
+      "items_at_generation": 14,
+      "basis": "model"
+    },
+    {
+      "domain": "phillyburbs.com",
+      "monthly_visitors": 216080,
+      "tranco_rank": 55535,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "nam.org",
+      "monthly_visitors": 207785,
+      "tranco_rank": 57752,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "news.scranton.edu",
+      "monthly_visitors": 198059,
+      "tranco_rank": 60588,
+      "items_at_generation": 27,
+      "basis": "model"
+    },
+    {
+      "domain": "fox43.com",
+      "monthly_visitors": 187585,
+      "tranco_rank": 63971,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "democracydocket.com",
+      "monthly_visitors": 183939,
+      "tranco_rank": 65239,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "thedp.com",
+      "monthly_visitors": 163348,
+      "tranco_rank": 73463,
+      "items_at_generation": 5,
+      "basis": "model"
+    },
+    {
+      "domain": "wesa.fm",
+      "monthly_visitors": 153687,
+      "tranco_rank": 78081,
+      "items_at_generation": 33,
+      "basis": "model"
+    },
+    {
+      "domain": "notus.org",
+      "monthly_visitors": 148594,
+      "tranco_rank": 80757,
+      "items_at_generation": 4,
+      "basis": "model"
+    },
+    {
+      "domain": "jewishinsider.com",
+      "monthly_visitors": 146902,
+      "tranco_rank": 81687,
+      "items_at_generation": 4,
+      "basis": "model"
+    },
+    {
+      "domain": "centerforpolitics.org",
+      "monthly_visitors": 118527,
+      "tranco_rank": 101243,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "billypenn.com",
+      "monthly_visitors": 104967,
+      "tranco_rank": 114322,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "panow.com",
+      "monthly_visitors": 101978,
+      "tranco_rank": 117672,
+      "items_at_generation": 80,
+      "basis": "model"
+    },
+    {
+      "domain": "theintelligencer.net",
+      "monthly_visitors": 100828,
+      "tranco_rank": 119014,
+      "items_at_generation": 4,
+      "basis": "model"
+    },
+    {
+      "domain": "afge.org",
+      "monthly_visitors": 94261,
+      "tranco_rank": 127306,
+      "items_at_generation": 3,
+      "basis": "model"
+    },
+    {
+      "domain": "yourerie.com",
+      "monthly_visitors": 91140,
+      "tranco_rank": 131666,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "yellowhammernews.com",
+      "monthly_visitors": 74377,
+      "tranco_rank": 161340,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "fox56.com",
+      "monthly_visitors": 65025,
+      "tranco_rank": 184544,
+      "items_at_generation": 201,
+      "basis": "model"
+    },
+    {
+      "domain": "ncnewsonline.com",
+      "monthly_visitors": 63541,
+      "tranco_rank": 188855,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "publicsource.org",
+      "monthly_visitors": 60313,
+      "tranco_rank": 198961,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "saf.org",
+      "monthly_visitors": 55369,
+      "tranco_rank": 216728,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "lockhaven.com",
+      "monthly_visitors": 53990,
+      "tranco_rank": 222263,
+      "items_at_generation": 11,
+      "basis": "model"
+    },
+    {
+      "domain": "pahouse.com",
+      "monthly_visitors": 52520,
+      "tranco_rank": 228485,
+      "items_at_generation": 5,
+      "basis": "model"
+    },
+    {
+      "domain": "wfmd.com",
+      "monthly_visitors": 42256,
+      "tranco_rank": 283983,
+      "items_at_generation": 3,
+      "basis": "model"
+    },
+    {
+      "domain": "nrcc.org",
+      "monthly_visitors": 41727,
+      "tranco_rank": 287586,
+      "items_at_generation": 84,
+      "basis": "model"
+    },
+    {
+      "domain": "thephiladelphiacitizen.org",
+      "monthly_visitors": 41015,
+      "tranco_rank": 292575,
+      "items_at_generation": 3,
+      "basis": "model"
+    },
+    {
+      "domain": "epgn.com",
+      "monthly_visitors": 39120,
+      "tranco_rank": 306747,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "ivn.us",
+      "monthly_visitors": 38309,
+      "tranco_rank": 313242,
+      "items_at_generation": 32,
+      "basis": "model"
+    },
+    {
+      "domain": "cityandstatepa.com",
+      "monthly_visitors": 37656,
+      "tranco_rank": 318673,
+      "items_at_generation": 31,
+      "basis": "model"
+    },
+    {
+      "domain": "lehighvalleynews.com",
+      "monthly_visitors": 27464,
+      "tranco_rank": 436940,
+      "items_at_generation": 1,
+      "basis": "model"
+    },
+    {
+      "domain": "politicspa.com",
+      "monthly_visitors": 26897,
+      "tranco_rank": 446142,
+      "items_at_generation": 197,
+      "basis": "model"
+    },
+    {
+      "domain": "blackchronicle.com",
+      "monthly_visitors": 24960,
+      "tranco_rank": 480768,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "tricountyindependent.com",
+      "monthly_visitors": 17337,
+      "tranco_rank": 692161,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "psdispatch.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 102,
+      "basis": "floor"
+    },
+    {
+      "domain": "riponadvance.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 82,
+      "basis": "floor"
+    },
+    {
+      "domain": "pikecountycourier.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 7,
+      "basis": "floor"
+    },
+    {
+      "domain": "democraticmayors.org",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 4,
+      "basis": "floor"
+    },
+    {
+      "domain": "thehousemajoritypac.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 3,
+      "basis": "floor"
+    },
+    {
+      "domain": "theabingtonjournal.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 3,
+      "basis": "floor"
+    },
+    {
+      "domain": "dioceseofscranton.org",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 2,
+      "basis": "floor"
+    },
+    {
+      "domain": "armchairlehighvalley.substack.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 2,
+      "basis": "floor"
+    },
+    {
+      "domain": "etownian.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 2,
+      "basis": "floor"
+    },
+    {
+      "domain": "nepascene.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 2,
+      "basis": "floor"
+    },
+    {
+      "domain": "decisiondeskhq.substack.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 1,
+      "basis": "floor"
+    },
+    {
+      "domain": "statecapitallobbyist.com",
+      "monthly_visitors": 15000,
+      "tranco_rank": null,
+      "items_at_generation": 1,
+      "basis": "floor"
+    },
+    {
+      "domain": "alliednews.com",
+      "monthly_visitors": 13005,
+      "tranco_rank": 922738,
+      "items_at_generation": 2,
+      "basis": "model"
+    },
+    {
+      "domain": "keystonenewsroom.com",
+      "monthly_visitors": 12993,
+      "tranco_rank": 923581,
+      "items_at_generation": 55,
+      "basis": "model"
+    },
+    {
+      "domain": "washingtonreporter.news",
+      "monthly_visitors": 12260,
+      "tranco_rank": 978828,
+      "items_at_generation": 53,
+      "basis": "model"
+    }
+  ]
+}

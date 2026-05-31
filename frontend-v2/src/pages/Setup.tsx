@@ -1,13 +1,17 @@
-import { Bell, CheckCircle, Circle, Facebook, Globe, Instagram, Loader, MessageSquare, Search, Users, X, Youtube } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { Bell, CheckCircle, ChevronDown, ChevronRight, Circle, Facebook, Globe, Instagram, Loader, Lock, MapPin, MessageSquare, RotateCcw, Search, Users, X, Youtube } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { api } from '@/api/client'
+import { useAuth } from '@/auth/AuthContext'
 import type {
   CampaignConfig,
   DiscoveredHandle,
   DiscoveredThirdPartyAccount,
   HandleDiscoveryResult,
   Opponent,
+  RaceCandidate,
+  RaceDirectory,
+  SetupChecklistItem,
   SetupStatus,
   ThirdPartyDiscoveryResult,
   ThirdPartyPlatform,
@@ -45,9 +49,11 @@ const PAUSED_PLATFORMS: ReadonlySet<ThirdPartyPlatform> = new Set(['instagram', 
 
 /** Sticky top nav for the Setup page. Lets the user jump between the
  *  four major sections (campaign profile, notifications, social handles,
- *  third-party accounts) without scroll-hunting. Tracks the active tab
- *  from the URL hash so deep-links and in-page anchor clicks both light
- *  up the right pill.
+ *  third-party accounts) without scroll-hunting. Pill lights up via two
+ *  signals: (1) URL hash for deep-links and the initial render, (2) an
+ *  IntersectionObserver scrollspy that tracks the topmost section
+ *  currently in view so scrolling between sections updates the pill
+ *  automatically.
  */
 function SetupSectionNav() {
   const SECTIONS: Array<{ id: string; label: string }> = [
@@ -65,6 +71,72 @@ function SetupSectionNav() {
     const onHash = () => setActive(window.location.hash.slice(1) || SECTIONS[0].id)
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Scrollspy. The rootMargin shifts the "in view" zone: -90px from the top
+  // skips the sticky nav itself so the pill flips when a section's heading
+  // crosses just below the nav, and -55% from the bottom keeps the trigger
+  // zone narrow so two sections don't both claim "active" at once. Among
+  // currently-intersecting sections, pick the topmost — that's the one the
+  // user is reading.
+  //
+  // CRITICAL: Layout wraps the page in a flex column where <main> has its
+  // own overflow-y scroll (the document never scrolls). Passing the <main>
+  // element as `root` makes the observer track intersections inside that
+  // scroller; with the default (viewport root) the callback would only
+  // fire on initial mount because the document scroll position never
+  // changes.
+  //
+  // Section divs are mounted by the Setup component, which loads data async,
+  // so the observer setup waits for the elements to exist before attaching.
+  useEffect(() => {
+    let observer: IntersectionObserver | null = null
+    const attach = () => {
+      const targets = SECTIONS.map(s => document.getElementById(s.id)).filter(Boolean) as HTMLElement[]
+      if (targets.length === 0) return false
+      // Find the nearest scrolling ancestor — that's the IntersectionObserver
+      // root we want. Looking up from a known section is more robust than
+      // assuming a specific Layout structure. Only check overflow-y style,
+      // NOT current scrollHeight vs clientHeight — at first mount content
+      // may still be expanding and the scrollHeight check would reject the
+      // real scroller, leaving the observer rooted at the viewport (which
+      // doesn't actually scroll in this layout).
+      const findScroller = (el: HTMLElement | null): HTMLElement | null => {
+        while (el) {
+          const oy = getComputedStyle(el).overflowY
+          if (oy === 'auto' || oy === 'scroll') return el
+          el = el.parentElement
+        }
+        return null
+      }
+      const root = findScroller(targets[0]) ?? null  // null = viewport, valid fallback
+      observer = new IntersectionObserver(
+        entries => {
+          const visible = entries
+            .filter(e => e.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
+          if (visible.length > 0) {
+            setActive(visible[0].target.id)
+          }
+        },
+        { root, rootMargin: '-90px 0px -55% 0px', threshold: 0 },
+      )
+      for (const el of targets) observer.observe(el)
+      return true
+    }
+    // Try immediately; if sections aren't mounted yet, poll briefly via rAF
+    // until they appear. Stops as soon as attach succeeds or after ~30 frames
+    // (~500ms at 60fps) to avoid a runaway loop if the user navigates away.
+    if (!attach()) {
+      let tries = 0
+      const tick = () => {
+        if (tries++ > 30 || attach()) return
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    }
+    return () => observer?.disconnect()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -145,13 +217,15 @@ function FilterChip({
  * trust the backend to canonicalize (de-dup, strip @, trim).
  */
 function HandleRow({
-  platform, actor, currentHandles, location, onSave,
+  platform, actor, currentHandles, location, onSave, canEdit = true,
 }: {
   platform: 'instagram' | 'facebook'
   actor: { name: string; kind: 'candidate' | 'opponent'; opponent_id?: number }
   currentHandles: string[]
   location?: string
   onSave: (handles: string[]) => Promise<void>
+  /** False = disable discover/save/remove buttons for read-only viewers. */
+  canEdit?: boolean
 }) {
   const [candidates, setCandidates] = useState<DiscoveredHandle[] | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -249,12 +323,14 @@ function HandleRow({
                      style={{ color: 'var(--text-1)', textDecoration: 'none', fontWeight: 500 }}>
                     @{h}
                   </a>
-                  <button type="button" onClick={() => remove(h)} disabled={saving}
+                  <button type="button" onClick={() => remove(h)} disabled={!canEdit || saving}
                     style={{
-                      background: 'transparent', border: 'none', cursor: 'pointer',
+                      background: 'transparent', border: 'none',
+                      cursor: canEdit ? 'pointer' : 'not-allowed',
                       padding: 2, color: 'var(--text-3)', display: 'inline-flex',
+                      opacity: canEdit ? 1 : 0.4,
                     }}
-                    title={`Stop tracking @${h}`}
+                    title={canEdit ? `Stop tracking @${h}` : 'Admin only'}
                   >
                     <X size={12} />
                   </button>
@@ -264,17 +340,19 @@ function HandleRow({
           )}
         </div>
         <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-          <button type="button" onClick={discover} disabled={discovering || saving}
+          <button type="button" onClick={discover} disabled={!canEdit || discovering || saving}
                   className="btn btn-secondary"
-                  style={{ padding: '5px 10px', fontSize: 11 }}>
+                  title={canEdit ? undefined : 'Admin only — discovery hits a paid web search'}
+                  style={{ padding: '5px 10px', fontSize: 11, opacity: canEdit ? 1 : 0.55 }}>
             {discovering
               ? <><Loader size={11} style={{ animation: 'spin 1s linear infinite' }} /> Searching…</>
               : <><Search size={11} /> Discover</>
             }
           </button>
-          <button type="button" onClick={() => setShowManual(v => !v)} disabled={saving}
+          <button type="button" onClick={() => setShowManual(v => !v)} disabled={!canEdit || saving}
                   className="btn btn-secondary"
-                  style={{ padding: '5px 10px', fontSize: 11 }}>
+                  title={canEdit ? undefined : 'Admin only'}
+                  style={{ padding: '5px 10px', fontSize: 11, opacity: canEdit ? 1 : 0.55 }}>
             Enter manually
           </button>
         </div>
@@ -290,12 +368,15 @@ function HandleRow({
             value={manualValue}
             onChange={e => setManualValue(e.target.value)}
             placeholder="handle"
-            style={{ flex: 1, fontSize: 12 }}
-            onKeyDown={e => { if (e.key === 'Enter') addManual() }}
+            disabled={!canEdit}
+            style={{ flex: 1, fontSize: 12, opacity: canEdit ? 1 : 0.55 }}
+            onKeyDown={e => { if (e.key === 'Enter' && canEdit) addManual() }}
           />
           <button type="button" onClick={addManual}
-                  disabled={saving || !manualValue.trim()}
-                  className="btn btn-primary" style={{ padding: '6px 12px', fontSize: 12 }}>
+                  disabled={!canEdit || saving || !manualValue.trim()}
+                  className="btn btn-primary"
+                  title={canEdit ? undefined : 'Admin only'}
+                  style={{ padding: '6px 12px', fontSize: 12, opacity: canEdit ? 1 : 0.55 }}>
             Add
           </button>
         </div>
@@ -314,8 +395,10 @@ function HandleRow({
               Candidates — pick which to track
             </div>
             <button type="button" onClick={addSelected}
-                    disabled={saving || selected.size === 0}
-                    className="btn btn-primary" style={{ padding: '5px 12px', fontSize: 11 }}>
+                    disabled={!canEdit || saving || selected.size === 0}
+                    className="btn btn-primary"
+                    title={canEdit ? undefined : 'Admin only'}
+                    style={{ padding: '5px 12px', fontSize: 11, opacity: canEdit ? 1 : 0.55 }}>
               Add {selected.size > 0 ? `${selected.size} selected` : ''}
             </button>
           </div>
@@ -332,12 +415,15 @@ function HandleRow({
                     border: `1px solid ${isOn ? 'var(--accent)' : 'var(--bg-3)'}`,
                     borderRadius: 4,
                     fontSize: 12,
-                    cursor: 'pointer',
+                    cursor: canEdit ? 'pointer' : 'not-allowed',
+                    opacity: canEdit ? 1 : 0.6,
                   }}
+                  title={canEdit ? undefined : 'Admin only'}
                 >
                   <input
                     type="checkbox"
                     checked={isOn}
+                    disabled={!canEdit}
                     onChange={e => {
                       setSelected(prev => {
                         const next = new Set(prev)
@@ -382,6 +468,7 @@ function HandleRow({
 /** A panel of two HandleRows (IG + FB) for a single actor. */
 function ActorHandlePanel({
   title, subtitle, kind, opponentId, name, location, instagramHandles, facebookPages, onChange,
+  canEdit = true,
 }: {
   title: string
   subtitle?: string
@@ -392,6 +479,8 @@ function ActorHandlePanel({
   instagramHandles: string[]
   facebookPages: string[]
   onChange: (next: { instagram_handles: string[]; facebook_pages: string[] }) => void
+  /** False = read-only preview: disable discover/save/remove buttons. */
+  canEdit?: boolean
 }) {
   const saveList = useCallback(async (platform: 'instagram' | 'facebook', list: string[]) => {
     const body = {
@@ -421,6 +510,7 @@ function ActorHandlePanel({
         currentHandles={instagramHandles}
         location={location}
         onSave={(list) => saveList('instagram', list)}
+        canEdit={canEdit}
       />
       <HandleRow
         platform="facebook"
@@ -428,43 +518,53 @@ function ActorHandlePanel({
         currentHandles={facebookPages}
         location={location}
         onSave={(list) => saveList('facebook', list)}
+        canEdit={canEdit}
       />
     </div>
   )
 }
 
-function CheckItem({ done, label, desc }: { done: boolean; label: string; desc: string }) {
-  return (
-    <div style={{
-      display: 'flex',
-      gap: 14,
-      padding: '14px 18px',
-      background: done ? 'rgba(14,124,58,0.06)' : 'var(--bg-2)',
-      border: `1px solid ${done ? 'rgba(14,124,58,0.2)' : 'var(--bg-3)'}`,
-      borderLeft: `3px solid ${done ? '#0e7c3a' : 'var(--bg-3)'}`,
-      borderRadius: 3,
-      marginBottom: 8,
-    }}>
-      <div style={{ flexShrink: 0, marginTop: 1 }}>
-        {done
-          ? <CheckCircle size={18} style={{ color: '#2db866' }} />
-          : <Circle size={18} style={{ color: 'var(--text-3)' }} />
-        }
-      </div>
-      <div>
-        <div style={{
-          fontSize: 15,
-          fontWeight: 700,
-          color: done ? '#2db866' : 'var(--text-1)',
-          letterSpacing: '0.02em',
-          marginBottom: 2,
-        }}>
-          {label}
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{desc}</div>
-      </div>
+/** One chip in the horizontal setup checklist. Renders from the backend's
+ *  SetupChecklistItem shape — label inline, helper text moved to the hover
+ *  tooltip. Each unchecked chip links to its action_path so the checklist
+ *  doubles as quick navigation while the campaign is being set up. The
+ *  whole checklist hides itself once every step is complete, so this
+ *  component only matters during onboarding.
+ */
+function CheckChip({ item }: { item: SetupChecklistItem }) {
+  const { complete: done, label, helper_text: desc, action_path } = item
+  const inner = (
+    <div
+      title={done ? desc : `${desc} — click to set up`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '5px 10px',
+        background: done ? 'rgba(14,124,58,0.07)' : 'var(--bg-2)',
+        border: `1px solid ${done ? 'rgba(14,124,58,0.25)' : 'var(--bg-3)'}`,
+        borderRadius: 999,
+        fontSize: 11,
+        textDecoration: 'none',
+        color: 'inherit',
+        whiteSpace: 'nowrap',
+      }}>
+      {done
+        ? <CheckCircle size={12} style={{ color: '#2db866', flexShrink: 0 }} />
+        : <Circle size={12} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
+      }
+      <span style={{
+        fontWeight: 600,
+        color: done ? '#2db866' : 'var(--text-1)',
+        letterSpacing: '0.02em',
+      }}>
+        {label}
+      </span>
+      {!done && <ChevronRight size={11} style={{ color: 'var(--text-3)', flexShrink: 0 }} />}
     </div>
   )
+  if (done || !action_path) return inner
+  return <Link to={action_path} style={{ textDecoration: 'none', color: 'inherit' }}>{inner}</Link>
 }
 
 /**
@@ -479,7 +579,7 @@ function CheckItem({ done, label, desc }: { done: boolean; label: string; desc: 
  * the candidate's and opponents' OWN accounts. These are anyone ELSE the
  * user wants ingested.
  */
-function ThirdPartyAccountsPanel() {
+function ThirdPartyAccountsPanel({ canEdit = true }: { canEdit?: boolean }) {
   const [tracked, setTracked] = useState<TrackedThirdPartyAccount[]>([])
   const [loading, setLoading] = useState(true)
   const [discovery, setDiscovery] = useState<ThirdPartyDiscoveryResult | null>(null)
@@ -646,11 +746,14 @@ function ThirdPartyAccountsPanel() {
                         </span>
                       )}
                       <button type="button" onClick={() => removeTracked(row.id)}
+                        disabled={!canEdit}
                         style={{
-                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          background: 'transparent', border: 'none',
+                          cursor: canEdit ? 'pointer' : 'not-allowed',
                           padding: 2, color: 'var(--text-3)', display: 'inline-flex',
+                          opacity: canEdit ? 1 : 0.4,
                         }}
-                        title={`Stop tracking ${row.display_name || row.identifier}`}
+                        title={canEdit ? `Stop tracking ${row.display_name || row.identifier}` : 'Admin only'}
                       >
                         <X size={12} />
                       </button>
@@ -665,8 +768,10 @@ function ThirdPartyAccountsPanel() {
 
       {/* Discover action */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button type="button" onClick={runDiscovery} disabled={discovering || saving}
-                className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: 12 }}>
+        <button type="button" onClick={runDiscovery} disabled={!canEdit || discovering || saving}
+                className="btn btn-secondary"
+                title={canEdit ? undefined : 'Admin only — discovery hits a paid web search'}
+                style={{ padding: '6px 12px', fontSize: 12, opacity: canEdit ? 1 : 0.55 }}>
           {discovering
             ? <><Loader size={12} style={{ animation: 'spin 1s linear infinite' }} /> Searching…</>
             : <><Search size={12} /> Discover accounts</>
@@ -714,8 +819,11 @@ function ThirdPartyAccountsPanel() {
               display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8,
             }}>
               <div className="section-label">Discovery results — pick accounts to track</div>
-              <button type="button" onClick={addSelected} disabled={saving || selected.size === 0}
-                      className="btn btn-primary" style={{ padding: '5px 12px', fontSize: 11 }}>
+              <button type="button" onClick={addSelected}
+                      disabled={!canEdit || saving || selected.size === 0}
+                      className="btn btn-primary"
+                      title={canEdit ? undefined : 'Admin only'}
+                      style={{ padding: '5px 12px', fontSize: 11, opacity: canEdit ? 1 : 0.55 }}>
                 {selected.size === 0 ? 'Add selected' : `Add ${selected.size} selected`}
               </button>
             </div>
@@ -781,9 +889,12 @@ function ThirdPartyAccountsPanel() {
                           padding: '8px 10px',
                           background: isOn ? 'rgba(255,191,0,0.08)' : 'var(--bg-1)',
                           border: `1px solid ${isOn ? 'var(--accent)' : 'var(--bg-3)'}`,
-                          borderRadius: 4, fontSize: 12, cursor: 'pointer',
-                        }}>
+                          borderRadius: 4, fontSize: 12,
+                          cursor: canEdit ? 'pointer' : 'not-allowed',
+                          opacity: canEdit ? 1 : 0.6,
+                        }} title={canEdit ? undefined : 'Admin only'}>
                           <input type="checkbox" checked={isOn}
+                                 disabled={!canEdit}
                                  onChange={() => toggleSelection(key)}
                                  style={{ marginTop: 2 }} />
                           <span style={{
@@ -849,7 +960,251 @@ function ThirdPartyAccountsPanel() {
   )
 }
 
+/** Inline race picker — search by candidate name, district, or state and
+ *  pick the candidate within the chosen race. Selecting calls
+ *  /api/races/{id}/select on the backend, which auto-fills party, district,
+ *  office, location, election_date, geography_keywords on the campaign
+ *  and creates Opponent rows for everyone else in the race.
+ *
+ *  The component manages its own search/results state but bubbles the
+ *  result up via onSelected so the parent can refresh campaign config.
+ */
+function RacePicker({
+  currentRaceLabel,
+  onSelected,
+  onCancel,
+  canEdit = true,
+}: {
+  currentRaceLabel?: string | null
+  onSelected: () => Promise<void> | void
+  onCancel?: () => void
+  /** False = read-only preview: search runs but "Use this →" is disabled. */
+  canEdit?: boolean
+}) {
+  const [q, setQ] = useState('')
+  const [results, setResults] = useState<RaceDirectory[]>([])
+  const [searching, setSearching] = useState(false)
+  const [expandedRaceId, setExpandedRaceId] = useState<number | null>(null)
+  const [committingCandidateId, setCommittingCandidateId] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  // Debounced search. <2 chars = clear results to avoid huge result sets.
+  useEffect(() => {
+    if (q.trim().length < 2) {
+      setResults([])
+      setSearching(false)
+      return
+    }
+    let cancelled = false
+    setSearching(true)
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await api.searchRaces(q.trim(), 15)
+        if (!cancelled) setResults(r)
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Search failed')
+      } finally {
+        if (!cancelled) setSearching(false)
+      }
+    }, 250)
+    return () => { cancelled = true; window.clearTimeout(t) }
+  }, [q])
+
+  async function pick(race: RaceDirectory, candidate: RaceCandidate) {
+    setCommittingCandidateId(candidate.id)
+    setError(null)
+    try {
+      await api.selectRace(race.id, candidate.id)
+      await onSelected()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not select race')
+    } finally {
+      setCommittingCandidateId(null)
+    }
+  }
+
+  return (
+    <div style={{
+      padding: 16,
+      background: 'var(--bg-2)',
+      border: '1px solid var(--bg-3)',
+      borderRadius: 6,
+      marginBottom: 16,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
+          {currentRaceLabel ? 'Change race' : 'Pick your race'}
+        </div>
+        {onCancel && (
+          <button type="button" onClick={onCancel} className="btn btn-secondary"
+                  style={{ padding: '4px 10px', fontSize: 11 }}>
+            Cancel
+          </button>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <Search size={14} style={{ color: 'var(--text-3)', flexShrink: 0 }} />
+        <input
+          className="input"
+          autoFocus
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          placeholder="Search by candidate name, state, or district (e.g. 'Cognetti', 'PA-08', 'Ohio')"
+          style={{ flex: 1, fontSize: 13 }}
+        />
+        {searching && <Loader size={14} style={{ animation: 'spin 1s linear infinite', color: 'var(--text-3)' }} />}
+      </div>
+      {error && (
+        <div style={{ fontSize: 11, color: '#f05050', marginBottom: 8 }}>{error}</div>
+      )}
+      {q.trim().length < 2 && (
+        <div style={{ fontSize: 11, color: 'var(--text-3)', fontStyle: 'italic' }}>
+          Type at least two characters. Results come from the FEC 2026 candidate filings.
+        </div>
+      )}
+      {q.trim().length >= 2 && !searching && results.length === 0 && (
+        <div style={{ fontSize: 11, color: 'var(--text-3)', fontStyle: 'italic' }}>
+          No races matched. Try a candidate name, "PA-08" style district code, or a state abbreviation.
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+        {results.map(race => {
+          const expanded = expandedRaceId === race.id
+          const candidates = race.candidates ?? []
+          return (
+            <div key={race.id} style={{
+              background: 'var(--bg-1)',
+              border: '1px solid var(--bg-3)',
+              borderRadius: 4,
+              overflow: 'hidden',
+            }}>
+              <button
+                type="button"
+                onClick={() => setExpandedRaceId(expanded ? null : race.id)}
+                style={{
+                  width: '100%', background: 'transparent', border: 'none',
+                  padding: '10px 12px', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  fontFamily: 'inherit', textAlign: 'left',
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
+                    {race.race_name}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>
+                    {[race.office_name, race.district_label, race.state]
+                      .filter(Boolean).join(' · ')} · {candidates.length} candidate{candidates.length === 1 ? '' : 's'}
+                  </div>
+                </div>
+                {expanded
+                  ? <ChevronDown size={14} style={{ color: 'var(--text-3)' }} />
+                  : <ChevronRight size={14} style={{ color: 'var(--text-3)' }} />
+                }
+              </button>
+              {expanded && (
+                <div style={{ borderTop: '1px solid var(--bg-3)', padding: '6px 8px 8px' }}>
+                  <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-3)', padding: '4px 4px 6px' }}>
+                    Pick your candidate
+                  </div>
+                  {candidates.map(c => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      disabled={!canEdit || committingCandidateId !== null}
+                      onClick={() => pick(race, c)}
+                      title={canEdit ? undefined : 'Only campaign admins can change the linked race'}
+                      style={{
+                        width: '100%', textAlign: 'left',
+                        padding: '8px 10px', marginBottom: 4,
+                        background: 'var(--bg-2)',
+                        border: '1px solid var(--bg-3)',
+                        borderRadius: 4,
+                        cursor: canEdit ? 'pointer' : 'not-allowed',
+                        fontFamily: 'inherit',
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        opacity: !canEdit ? 0.55 : committingCandidateId !== null && committingCandidateId !== c.id ? 0.5 : 1,
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
+                          {c.candidate_name}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>
+                          {[c.party, c.is_incumbent ? 'Incumbent' : null].filter(Boolean).join(' · ') || 'Party unknown'}
+                        </div>
+                      </div>
+                      {committingCandidateId === c.id
+                        ? <Loader size={14} style={{ animation: 'spin 1s linear infinite', color: 'var(--text-3)' }} />
+                        : <span style={{ fontSize: 11, color: canEdit ? 'var(--accent)' : 'var(--text-3)', fontWeight: 600 }}>
+                            {canEdit ? 'Use this →' : 'Admin only'}
+                          </span>
+                      }
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/** One cell of the compact campaign-profile summary card. Label on top,
+ *  value on the second line — keeps the steady-state header dense but
+ *  readable. */
+function SummaryField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="section-label" style={{ marginBottom: 2 }}>{label}</div>
+      <div style={{
+        fontSize: 13, color: 'var(--text-1)', fontWeight: 600,
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      }} title={value}>
+        {value}
+      </div>
+    </div>
+  )
+}
+
+/** Reset-to-FEC button shown next to auto-filled fields when the current
+ *  value differs from the directory default. One click reverts that single
+ *  field. Hidden when the field already matches the default. */
+function ResetToFecButton({
+  visible, onReset, title,
+}: { visible: boolean; onReset: () => void; title: string }) {
+  if (!visible) return null
+  return (
+    <button
+      type="button"
+      onClick={onReset}
+      title={title}
+      style={{
+        background: 'transparent',
+        border: '1px solid var(--bg-3)',
+        borderRadius: 3,
+        cursor: 'pointer',
+        padding: '2px 6px',
+        color: 'var(--text-3)',
+        fontSize: 10,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        letterSpacing: '0.04em',
+        textTransform: 'uppercase',
+      }}
+    >
+      <RotateCcw size={10} />
+      reset
+    </button>
+  )
+}
+
 export function Setup() {
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
   const [config, setConfig] = useState<CampaignConfig | null>(null)
   const [status, setStatus] = useState<SetupStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -871,8 +1226,10 @@ export function Setup() {
     })
   }, [loading, location.hash])
 
-  // Form fields
+  // Form fields. `party` was added when the race-picker flow started
+  // auto-filling it — previous Setup didn't expose it as an editable input.
   const [candidateName, setCandidateName] = useState('')
+  const [party, setParty] = useState('')
   const [office, setOffice] = useState('')
   const [district, setDistrict] = useState('')
   const [state, setState] = useState('')
@@ -882,24 +1239,85 @@ export function Setup() {
   const [priorities, setPriorities] = useState('')
   const [opponents, setOpponents] = useState<Opponent[]>([])
 
+  // Race-picker UI state.
+  const [directoryRace, setDirectoryRace] = useState<RaceDirectory | null>(null)
+  const [showRacePicker, setShowRacePicker] = useState(false)
+  const [showEditDetails, setShowEditDetails] = useState(false)
+
+  function hydrateFromConfig(d: CampaignConfig) {
+    setConfig(d)
+    setCandidateName(d.candidate_name ?? '')
+    setParty(d.party ?? '')
+    setOffice(d.office ?? '')
+    setDistrict(d.district ?? '')
+    setState(d.state ?? '')
+    setElectionDate(d.election_date ? d.election_date.slice(0, 10) : '')
+    setCampaignMessage(d.campaign_message ?? '')
+    // Server stores these as key_priorities / relevance_keywords; the legacy
+    // `keywords` / `priorities` aliases are still in the type for back-compat
+    // but the canonical fields are what the backend actually returns.
+    setKeywords((d.relevance_keywords ?? d.keywords ?? []).join(', '))
+    setPriorities((d.key_priorities ?? d.priorities ?? []).join('\n'))
+  }
+
   useEffect(() => {
     Promise.allSettled([api.campaign(), api.setupStatus(), api.opponents()]).then(([c, s, o]) => {
       if (c.status === 'fulfilled') {
-        const d = c.value
-        setConfig(d)
-        setCandidateName(d.candidate_name ?? '')
-        setOffice(d.office ?? '')
-        setDistrict(d.district ?? '')
-        setState(d.state ?? '')
-        setElectionDate(d.election_date ?? '')
-        setCampaignMessage(d.campaign_message ?? '')
-        setKeywords((d.keywords ?? []).join(', '))
-        setPriorities((d.priorities ?? []).join('\n'))
+        hydrateFromConfig(c.value)
       }
       if (s.status === 'fulfilled') setStatus(s.value)
       if (o.status === 'fulfilled') setOpponents(o.value)
     }).finally(() => setLoading(false))
   }, [])
+
+  // Fetch the linked FEC race entry when the campaign points to one. Powers
+  // the per-field "reset to FEC default" affordance and the compact summary
+  // header. Runs whenever the linked race id changes.
+  useEffect(() => {
+    const raceId = config?.directory_race_id
+    if (!raceId) {
+      setDirectoryRace(null)
+      return
+    }
+    let cancelled = false
+    api.getRace(raceId)
+      .then(r => { if (!cancelled) setDirectoryRace(r) })
+      .catch(() => { if (!cancelled) setDirectoryRace(null) })
+    return () => { cancelled = true }
+  }, [config?.directory_race_id])
+
+  // Selected RaceCandidate row inside the linked race — the one whose data
+  // got copied onto the campaign config. Identified by name match; that's
+  // what select_directory_race uses too.
+  const linkedCandidate: RaceCandidate | null = useMemo(() => {
+    if (!directoryRace || !candidateName) return null
+    const normalize = (s: string) => s.trim().toLowerCase()
+    const target = normalize(candidateName)
+    return directoryRace.candidates.find(c => normalize(c.candidate_name) === target) ?? null
+  }, [directoryRace, candidateName])
+
+  // FEC-derived defaults the reset buttons compare against. Undefined when
+  // no race is linked (resets become no-ops and the buttons hide).
+  const fecDefaults = useMemo(() => {
+    if (!directoryRace) return null
+    return {
+      party: linkedCandidate?.party ?? '',
+      office: directoryRace.office_name ?? '',
+      district: directoryRace.district_label ?? '',
+      state: directoryRace.state ?? '',
+      election_date: directoryRace.election_date ? directoryRace.election_date.slice(0, 10) : '',
+    }
+  }, [directoryRace, linkedCandidate])
+
+  async function refreshAfterRacePick() {
+    setShowRacePicker(false)
+    // After /races/{id}/select, both the campaign and the opponents list
+    // need to be refetched — selecting also created/updated Opponent rows.
+    const [c, s, o] = await Promise.allSettled([api.campaign(), api.setupStatus(), api.opponents()])
+    if (c.status === 'fulfilled') hydrateFromConfig(c.value)
+    if (s.status === 'fulfilled') setStatus(s.value)
+    if (o.status === 'fulfilled') setOpponents(o.value)
+  }
 
   async function save(e: React.FormEvent) {
     e.preventDefault()
@@ -909,13 +1327,16 @@ export function Setup() {
     try {
       const updated = await api.updateCampaign({
         candidate_name: candidateName.trim(),
+        party: party.trim() || undefined,
         office: office.trim() || undefined,
         district: district.trim() || undefined,
         state: state.trim() || undefined,
         election_date: electionDate || undefined,
         campaign_message: campaignMessage.trim() || undefined,
-        keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
-        priorities: priorities.split('\n').map(p => p.trim()).filter(Boolean),
+        // Backend canonical names. The legacy aliases stay in the type so
+        // older code reading config.keywords / config.priorities still works.
+        relevance_keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
+        key_priorities: priorities.split('\n').map(p => p.trim()).filter(Boolean),
       })
       setConfig(updated)
       setSaved(true)
@@ -927,10 +1348,9 @@ export function Setup() {
     }
   }
 
-  const setupDone = status
-    ? Object.values(status).filter(Boolean).length
-    : 0
-  const setupTotal = 4
+  const checklistItems: SetupChecklistItem[] = status?.items ?? []
+  const setupDone = checklistItems.filter(i => i.complete).length
+  const setupTotal = checklistItems.length || 4
 
   return (
     <div style={{ minHeight: '100vh' }}>
@@ -951,22 +1371,230 @@ export function Setup() {
               default when no hash is set. */}
           <SetupSectionNav />
 
-          <div id="campaign-profile" style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 28, alignItems: 'start', scrollMarginTop: 70 }}>
-            {/* Campaign config form */}
-            <div>
+          {/* Admin-only banner for non-admins. The page itself is open so
+              viewers can see how the campaign is configured and adjust
+              their own notification preferences — but every campaign
+              setting is disabled, and the backend require_admin gate is
+              the real authority if someone bypasses the disable client-
+              side. Hidden for admins so it doesn't add noise. */}
+          {!isAdmin && (
+            <div style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10,
+              padding: '12px 14px', marginBottom: 18,
+              background: 'rgba(255,191,0,0.07)',
+              border: '1px solid rgba(255,191,0,0.25)',
+              borderRadius: 6,
+            }}>
+              <Lock size={14} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 2 }} />
+              <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5 }}>
+                <strong style={{ color: 'var(--text-1)' }}>Read-only view.</strong>{' '}
+                Only campaign admins can change these settings. You can still
+                adjust your personal notification preferences below.
+              </div>
+            </div>
+          )}
+
+          {/* Setup checklist — only renders while there are unfinished steps.
+              Goes ABOVE the campaign profile as a compact horizontal strip
+              so the profile gets full width below. Once every step is
+              complete the whole block disappears — onboarding is a
+              transient state, not a permanent fixture. */}
+          {checklistItems.length > 0 && setupDone < setupTotal && (
+            <div style={{
+              padding: '10px 14px',
+              background: 'var(--bg-2)',
+              border: '1px solid var(--bg-3)',
+              borderRadius: 6,
+              marginBottom: 18,
+            }}>
               <div style={{
-                fontSize: 16,
-                fontWeight: 700,
-                letterSpacing: '0.06em',
-                color: 'var(--text-2)',
-                textTransform: 'uppercase',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                marginBottom: 8,
+              }}>
+                <span style={{
+                  fontSize: 12, fontWeight: 700, letterSpacing: '0.06em',
+                  color: 'var(--text-2)', textTransform: 'uppercase',
+                }}>
+                  Setup Checklist
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--text-2)', fontWeight: 600 }}>
+                  {setupDone}/{setupTotal} · click a step to set it up
+                </span>
+              </div>
+              <div style={{
+                height: 3, background: 'var(--bg-3)', borderRadius: 2,
+                overflow: 'hidden', marginBottom: 10,
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${(setupDone / setupTotal) * 100}%`,
+                  background: 'linear-gradient(90deg, #1d6ae5, #4f8ef7)',
+                  borderRadius: 2,
+                  transition: 'width 0.5s ease',
+                }} />
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {checklistItems.map(item => (
+                  <CheckChip key={item.id} item={item} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div id="campaign-profile" style={{ scrollMarginTop: 70 }}>
+            {/* Campaign config — race picker + compact summary + collapsible edit form. */}
+            <div>
+              {/* Section header with the Edit-details toggle pinned to the
+                  same row. The toggle used to sit under the summary card —
+                  moving it here keeps the steady-state view tighter and
+                  lets users open the form without scrolling past the
+                  summary every time. */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
                 marginBottom: 16,
                 paddingBottom: 8,
                 borderBottom: '1px solid var(--bg-3)',
               }}>
-                Campaign Profile
+                <div style={{
+                  fontSize: 16,
+                  fontWeight: 700,
+                  letterSpacing: '0.06em',
+                  color: 'var(--text-2)',
+                  textTransform: 'uppercase',
+                }}>
+                  Campaign Profile
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowEditDetails(v => !v)}
+                  style={{
+                    background: 'transparent',
+                    border: '1px solid var(--bg-3)',
+                    borderRadius: 4,
+                    padding: '5px 10px',
+                    fontSize: 11,
+                    color: 'var(--text-2)',
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    flexShrink: 0,
+                  }}
+                >
+                  {showEditDetails ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  {showEditDetails ? 'Hide details' : 'Edit details'}
+                </button>
               </div>
-              <form onSubmit={save}>
+
+              {/* Race-picker UI — three states:
+                  1. picker open (showRacePicker = true): search + results list
+                  2. linked race (directoryRace) and picker closed: compact "Linked
+                     to {race}" card with a "Change race" affordance
+                  3. unlinked campaign (no directoryRace) and picker closed: prompt
+                     to pick a race so per-field FEC defaults work */}
+              {showRacePicker ? (
+                <RacePicker
+                  currentRaceLabel={directoryRace?.race_name}
+                  onSelected={refreshAfterRacePick}
+                  onCancel={() => setShowRacePicker(false)}
+                  canEdit={isAdmin}
+                />
+              ) : directoryRace ? (
+                <div style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 12,
+                  padding: '12px 14px',
+                  background: 'var(--bg-2)',
+                  border: '1px solid var(--bg-3)',
+                  borderRadius: 6,
+                  marginBottom: 16,
+                }}>
+                  <MapPin size={14} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 3 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="section-label" style={{ marginBottom: 4 }}>Linked race</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
+                      {directoryRace.race_name}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>
+                      Source: {directoryRace.data_source.toUpperCase()} · auto-fills party,
+                      district, office, election date, and opponents from the FEC filing.
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => setShowRacePicker(true)}
+                          disabled={!isAdmin}
+                          className="btn btn-secondary"
+                          title={isAdmin ? undefined : 'Admin only'}
+                          style={{ padding: '5px 12px', fontSize: 11, flexShrink: 0, opacity: isAdmin ? 1 : 0.55 }}>
+                    Change race
+                  </button>
+                </div>
+              ) : (
+                <div style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 12,
+                  padding: '12px 14px',
+                  background: 'rgba(255,191,0,0.07)',
+                  border: '1px solid rgba(255,191,0,0.25)',
+                  borderRadius: 6,
+                  marginBottom: 16,
+                }}>
+                  <Search size={14} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 3 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)' }}>
+                      Pick your race
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 2, lineHeight: 1.5 }}>
+                      Choose your race from the FEC 2026 candidate filings and we'll fill in
+                      party, district, office, election date, and opponents automatically.
+                      You can still edit anything below.
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => setShowRacePicker(true)}
+                          disabled={!isAdmin}
+                          className="btn btn-primary"
+                          title={isAdmin ? undefined : 'Admin only'}
+                          style={{ padding: '5px 12px', fontSize: 11, flexShrink: 0, opacity: isAdmin ? 1 : 0.55 }}>
+                    Pick a race
+                  </button>
+                </div>
+              )}
+
+              {/* Compact summary card — always visible once a candidate is set. */}
+              {candidateName && (
+                <div style={{
+                  padding: '12px 14px',
+                  background: 'var(--bg-2)',
+                  border: '1px solid var(--bg-3)',
+                  borderRadius: 6,
+                  marginBottom: 12,
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+                  gap: 12,
+                }}>
+                  <SummaryField label="Candidate" value={candidateName} />
+                  <SummaryField label="Party" value={party || '—'} />
+                  <SummaryField label="Office" value={office || '—'} />
+                  <SummaryField label="District" value={district || state || '—'} />
+                  <SummaryField
+                    label="Election"
+                    value={electionDate
+                      ? new Date(electionDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                      : '—'
+                    }
+                  />
+                </div>
+              )}
+
+              {showEditDetails && (
+              <form onSubmit={save} style={{
+                padding: 16,
+                background: 'var(--bg-2)',
+                border: '1px solid var(--bg-3)',
+                borderRadius: 6,
+                opacity: isAdmin ? 1 : 0.85,
+              }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
                   <div>
                     <label className="section-label" style={{ display: 'block', marginBottom: 6 }}>CANDIDATE NAME *</label>
@@ -976,46 +1604,109 @@ export function Setup() {
                       onChange={e => setCandidateName(e.target.value)}
                       placeholder="Paige Cognetti"
                       required
+                      disabled={!isAdmin}
                     />
                   </div>
                   <div>
-                    <label className="section-label" style={{ display: 'block', marginBottom: 6 }}>OFFICE</label>
+                    <label className="section-label" style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6,
+                    }}>
+                      <span>PARTY</span>
+                      <ResetToFecButton
+                        visible={isAdmin && !!fecDefaults && (party ?? '') !== (fecDefaults.party ?? '')}
+                        onReset={() => setParty(fecDefaults?.party ?? '')}
+                        title={`Reset to FEC default: ${fecDefaults?.party || '(blank)'}`}
+                      />
+                    </label>
+                    <input
+                      className="input"
+                      value={party}
+                      onChange={e => setParty(e.target.value)}
+                      placeholder="Democrat"
+                      disabled={!isAdmin}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
+                  <div>
+                    <label className="section-label" style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6,
+                    }}>
+                      <span>OFFICE</span>
+                      <ResetToFecButton
+                        visible={isAdmin && !!fecDefaults && (office ?? '') !== (fecDefaults.office ?? '')}
+                        onReset={() => setOffice(fecDefaults?.office ?? '')}
+                        title={`Reset to FEC default: ${fecDefaults?.office || '(blank)'}`}
+                      />
+                    </label>
                     <input
                       className="input"
                       value={office}
                       onChange={e => setOffice(e.target.value)}
                       placeholder="U.S. House of Representatives"
+                      disabled={!isAdmin}
+                    />
+                  </div>
+                  <div>
+                    <label className="section-label" style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6,
+                    }}>
+                      <span>ELECTION DATE</span>
+                      <ResetToFecButton
+                        visible={isAdmin && !!fecDefaults && (electionDate ?? '') !== (fecDefaults.election_date ?? '')}
+                        onReset={() => setElectionDate(fecDefaults?.election_date ?? '')}
+                        title={`Reset to FEC default: ${fecDefaults?.election_date || '(blank)'}`}
+                      />
+                    </label>
+                    <input
+                      className="input"
+                      type="date"
+                      value={electionDate}
+                      onChange={e => setElectionDate(e.target.value)}
+                      disabled={!isAdmin}
                     />
                   </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 14 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
                   <div>
-                    <label className="section-label" style={{ display: 'block', marginBottom: 6 }}>DISTRICT</label>
+                    <label className="section-label" style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6,
+                    }}>
+                      <span>DISTRICT</span>
+                      <ResetToFecButton
+                        visible={isAdmin && !!fecDefaults && (district ?? '') !== (fecDefaults.district ?? '')}
+                        onReset={() => setDistrict(fecDefaults?.district ?? '')}
+                        title={`Reset to FEC default: ${fecDefaults?.district || '(blank)'}`}
+                      />
+                    </label>
                     <input
                       className="input"
                       value={district}
                       onChange={e => setDistrict(e.target.value)}
                       placeholder="PA-08"
+                      disabled={!isAdmin}
                     />
                   </div>
                   <div>
-                    <label className="section-label" style={{ display: 'block', marginBottom: 6 }}>STATE</label>
+                    <label className="section-label" style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6,
+                    }}>
+                      <span>STATE</span>
+                      <ResetToFecButton
+                        visible={isAdmin && !!fecDefaults && (state ?? '') !== (fecDefaults.state ?? '')}
+                        onReset={() => setState(fecDefaults?.state ?? '')}
+                        title={`Reset to FEC default: ${fecDefaults?.state || '(blank)'}`}
+                      />
+                    </label>
                     <input
                       className="input"
                       value={state}
                       onChange={e => setState(e.target.value)}
                       placeholder="PA"
                       maxLength={2}
-                    />
-                  </div>
-                  <div>
-                    <label className="section-label" style={{ display: 'block', marginBottom: 6 }}>ELECTION DATE</label>
-                    <input
-                      className="input"
-                      type="date"
-                      value={electionDate}
-                      onChange={e => setElectionDate(e.target.value)}
+                      disabled={!isAdmin}
                     />
                   </div>
                 </div>
@@ -1029,6 +1720,7 @@ export function Setup() {
                     placeholder="Core campaign message or contrast with opponent..."
                     rows={3}
                     style={{ resize: 'vertical' }}
+                    disabled={!isAdmin}
                   />
                 </div>
 
@@ -1042,6 +1734,7 @@ export function Setup() {
                     value={keywords}
                     onChange={e => setKeywords(e.target.value)}
                     placeholder="Paige Cognetti, PA-08, Lackawanna County, Scranton..."
+                    disabled={!isAdmin}
                   />
                 </div>
 
@@ -1057,6 +1750,7 @@ export function Setup() {
                     placeholder={"healthcare\neconomy\ninfrastructure\neducation"}
                     rows={4}
                     style={{ resize: 'vertical', fontSize: 12 }}
+                    disabled={!isAdmin}
                   />
                 </div>
 
@@ -1075,7 +1769,9 @@ export function Setup() {
                 )}
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <button type="submit" disabled={saving} className="btn btn-primary">
+                  <button type="submit" disabled={!isAdmin || saving} className="btn btn-primary"
+                          title={isAdmin ? undefined : 'Admin only'}
+                          style={{ opacity: isAdmin ? 1 : 0.55 }}>
                     {saving ? (
                       <>
                         <Loader size={13} style={{ animation: 'spin 1s linear infinite' }} />
@@ -1083,6 +1779,11 @@ export function Setup() {
                       </>
                     ) : 'Save Configuration'}
                   </button>
+                  {!isAdmin && (
+                    <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                      Read-only — only admins can save changes.
+                    </span>
+                  )}
                   {saved && (
                     <span style={{
                       fontSize: 11,
@@ -1094,116 +1795,9 @@ export function Setup() {
                   )}
                 </div>
               </form>
+              )}
             </div>
 
-            {/* Setup checklist */}
-            <div>
-              <div style={{
-                fontSize: 16,
-                fontWeight: 700,
-                letterSpacing: '0.06em',
-                color: 'var(--text-2)',
-                textTransform: 'uppercase',
-                marginBottom: 16,
-                paddingBottom: 8,
-                borderBottom: '1px solid var(--bg-3)',
-              }}>
-                Setup Checklist
-              </div>
-
-              {/* Progress bar */}
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span className="section-label">COMPLETION</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-2)' }}>
-                    {setupDone}/{setupTotal}
-                  </span>
-                </div>
-                <div style={{ height: 4, background: 'var(--bg-3)', borderRadius: 2, overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%',
-                    width: `${(setupDone / setupTotal) * 100}%`,
-                    background: setupDone === setupTotal
-                      ? 'linear-gradient(90deg, #0e7c3a, #2db866)'
-                      : 'linear-gradient(90deg, #1d6ae5, #4f8ef7)',
-                    borderRadius: 2,
-                    transition: 'width 0.5s ease',
-                  }} />
-                </div>
-              </div>
-
-              {status && (
-                <>
-                  <CheckItem
-                    done={status.campaign_profile}
-                    label="Campaign Profile"
-                    desc="Set candidate name, office, and election details"
-                  />
-                  <CheckItem
-                    done={status.opponent_added}
-                    label="Opponent Added"
-                    desc="Add at least one opponent to track"
-                  />
-                  <CheckItem
-                    done={status.source_added}
-                    label="Source Added"
-                    desc="Configure an RSS feed or monitor"
-                  />
-                  <CheckItem
-                    done={status.narrative_frame_added}
-                    label="Narrative Frame"
-                    desc="Create at least one narrative frame to track"
-                  />
-                </>
-              )}
-
-              {setupDone === setupTotal && (
-                <div style={{
-                  marginTop: 16,
-                  padding: '12px 16px',
-                  background: 'rgba(14,124,58,0.1)',
-                  border: '1px solid rgba(14,124,58,0.25)',
-                  borderRadius: 3,
-                  fontSize: 11,
-                  color: '#2db866',
-                  letterSpacing: '0.08em',
-                  textAlign: 'center',
-                }}>
-                  ✓ WAR ROOM FULLY OPERATIONAL
-                </div>
-              )}
-
-              {/* Info box */}
-              <div style={{
-                marginTop: 16,
-                padding: '12px 14px',
-                background: 'var(--bg-4)',
-                border: '1px solid var(--bg-3)',
-                borderRadius: 3,
-              }}>
-                <div className="section-label" style={{ marginBottom: 6 }}>SYSTEM INFO</div>
-                <div style={{ fontSize: 10, color: 'var(--text-3)', lineHeight: 1.6 }}>
-                  <div>CANDIDATE: {config?.candidate_name ?? '—'}</div>
-                  {/* Derive state from district format ("PA-08" → "PA") so
-                      we don't show the misleading "(—)" placeholder when
-                      no separate state field is stored. Try three patterns:
-                      explicit state field; "XX-N" district; "...XX..." location
-                      ("Scranton, PA"). Returns nothing if no source matches —
-                      better to omit than mislead. */}
-                  <div>DISTRICT: {config?.district ?? '—'}
-                    {(() => {
-                      if (config?.state) return ` (${config.state})`
-                      const m1 = config?.district?.match(/^([A-Z]{2})[- ]/)
-                      if (m1) return ` (${m1[1]})`
-                      const m2 = config?.location?.match(/,\s*([A-Z]{2})\b/)
-                      if (m2) return ` (${m2[1]})`
-                      return ''
-                    })()}
-                  </div>
-                  <div>ELECTION: {config?.election_date ?? '—'}</div>
-                </div>
-              </div>
-            </div>
           </div>
 
           {/* Notification preferences — full-width section below the
@@ -1281,6 +1875,7 @@ export function Setup() {
                 instagramHandles={config.instagram_handles ?? []}
                 facebookPages={config.facebook_pages ?? []}
                 onChange={(next) => setConfig(c => c ? { ...c, ...next } : c)}
+                canEdit={isAdmin}
               />
             )}
 
@@ -1298,6 +1893,7 @@ export function Setup() {
                 onChange={(next) => setOpponents(list =>
                   list.map(o => o.id === opp.id ? { ...o, ...next } : o)
                 )}
+                canEdit={isAdmin}
               />
             ))}
 
@@ -1330,7 +1926,7 @@ export function Setup() {
               FB accounts save here but stay paused until the fetcher is wired
               up (same as the Social handles section above).
             </div>
-            <ThirdPartyAccountsPanel />
+            <ThirdPartyAccountsPanel canEdit={isAdmin} />
           </div>
           </>
         )}

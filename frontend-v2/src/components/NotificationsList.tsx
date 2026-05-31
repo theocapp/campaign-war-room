@@ -1,6 +1,7 @@
 import {
-  AlertTriangle, Bell, CheckCheck, ChevronDown, ChevronRight, Flag, Flame, Inbox,
+  AlertTriangle, Bell, CheckCheck, ChevronDown, ChevronRight, Flame, Inbox,
   MessageSquare, Settings as SettingsIcon, Sparkles, Trash2, X, Zap,
+  WifiOff,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
@@ -30,8 +31,8 @@ const KIND_META: Record<NotificationKind, { icon: typeof Bell; color: string; la
   viral:               { icon: Flame,         color: '#22d3ee', label: 'Viral' },
   review_queue:        { icon: Inbox,         color: C.text2,  label: 'Articles' },
   proposed_narratives: { icon: Sparkles,      color: C.accent, label: 'Proposed narratives' },
-  kg_contradictions:   { icon: Flag,          color: '#a78bfa', label: 'KG contradictions' },
   briefing:            { icon: MessageSquare, color: '#a78bfa', label: 'Briefing' },
+  ingestion_quality:   { icon: WifiOff,       color: '#fb923c', label: 'Feed health' },
 }
 
 type Bucket = 'critical' | 'momentum' | 'background'
@@ -45,6 +46,9 @@ const BUCKET_META: Record<Bucket, { title: string; color: string; icon: typeof B
 function bucketOf(kind: NotificationKind): Bucket {
   if (kind === 'opponent_attack') return 'critical'
   if (kind === 'spike' || kind === 'viral') return 'momentum'
+  // Feed-health alerts are operational signals — read at leisure.
+  // They go in `background` rather than top-of-list so they don't
+  // visually compete with active campaign events.
   return 'background'
 }
 

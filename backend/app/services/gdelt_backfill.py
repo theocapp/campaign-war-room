@@ -221,6 +221,8 @@ def run_gdelt_backfill(db, *, force: bool = False, days_back: int = 365) -> dict
             if not title:
                 title = art.get("title") or url.rstrip("/").split("/")[-1].replace("-", " ").title() or url
 
+            from app.services.ingestion import clean_title as _clean_title
+            title = _clean_title(title) or ""
             item = _SI(
                 title=title[:200],
                 raw_text=body_text,

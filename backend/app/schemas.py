@@ -43,6 +43,7 @@ class CampaignProfileOut(OrmBase):
     trends_keywords: Optional[list[str]] = None
     instagram_handles: Optional[list[str]] = None
     facebook_pages: Optional[list[str]] = None
+    directory_race_id: Optional[int] = None
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 
@@ -142,6 +143,10 @@ class SourceItemOut(OrmBase):
     source_name: Optional[str]
     source_url: Optional[str]
     source_type: str
+    # Social platform the post originated on, if any (twitter|bluesky|reddit|
+    # youtube|mastodon|facebook|instagram); None for plain news/web. Orthogonal
+    # to source_type — see services.platform_classify.
+    platform: Optional[str] = None
     source_owner_type: str = "unclear"
     source_owner_confidence: str = "low"
     source_author: Optional[str] = None
@@ -1044,7 +1049,15 @@ class RaceSentimentOut(OrmBase):
 
 class RaceSentimentUpdate(BaseModel):
     """Partial-update payload. Every field is optional so the UI can patch
-    one cell at a time without resending the whole row."""
+    one cell at a time without resending the whole row.
+
+    The market *pointers* (external_id / external_metadata) are deliberately
+    NOT editable here. They identify which external market/rating a source
+    tracks and are auto-discovered + maintained by race_sentiment_sync. Letting
+    a request repoint a source at an arbitrary external feed was a
+    confused-deputy hole (the server fetches whatever id it's handed), so the
+    pointers are now sync-owned and read-only. RaceSentimentOut still exposes
+    them so the UI can show what a source is wired to."""
     candidate_pct: Optional[float] = None
     opponent_pct: Optional[float] = None
     delta_7d: Optional[float] = None
@@ -1055,8 +1068,6 @@ class RaceSentimentUpdate(BaseModel):
     source_url: Optional[str] = None
     as_of: Optional[datetime] = None
     notes: Optional[str] = None
-    external_id: Optional[str] = None
-    external_metadata: Optional[dict] = None  # JSON serialized on write
 
 
 class RaceSentimentSnapshotOut(OrmBase):

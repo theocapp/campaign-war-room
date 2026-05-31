@@ -1,10 +1,11 @@
 // Shared date formatters for article-style timestamps.
 //
 // Rule (applied wherever an article / quote / observation date is shown):
-//   < 1 minute  → "just now"
-//   < 1 hour    → "Xm ago"
-//   < 24 hours  → "Xh ago"
-//   >= 24 hours → date + time, e.g. "Nov 26, 3:45 PM" (year added if not current)
+//   < 1 minute     → "just now"
+//   < 1 hour       → "Xm ago"
+//   < 24 hours     → "Xh ago"
+//   24–48 hours    → "yesterday at 3:45 PM"
+//   >= 48 hours    → date + time, e.g. "Nov 26, 3:45 PM" (year added if not current)
 //
 // `formatArticleDateLong` adds the weekday and always shows the year, for
 // detail-page headers where the extra context fits.
@@ -39,6 +40,11 @@ function relativeWithin24h(ms: number): string | null {
   return null
 }
 
+function isWithin24To48hWindow(ms: number): boolean {
+  const h = ms / (60 * 60 * 1000)
+  return h >= 24 && h < 48
+}
+
 export function formatArticleDate(iso?: string | null): string {
   if (!iso) return ''
   const ms = diffMs(iso)
@@ -46,6 +52,9 @@ export function formatArticleDate(iso?: string | null): string {
   const rel = relativeWithin24h(ms)
   if (rel) return rel
   const d = parseAsUtcWhenNaive(iso)
+  if (isWithin24To48hWindow(ms)) {
+    return `yesterday at ${d.toLocaleString('en-US', SHORT_TIME)}`
+  }
   const currentYear = new Date().getFullYear()
   const opts: Intl.DateTimeFormatOptions = {
     month: 'short',

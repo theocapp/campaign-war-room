@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import RaceSentiment, RaceSentimentSnapshot, SourceItem
+from app.services.access_codes import require_admin
 from app.services.source_display import display_source_name, preload_outlets
 from app.schemas import (
     RaceSentimentOut,
@@ -19,6 +20,14 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+# Gate the live-fetch triggers (sync / backfill / sync-all) — each hits an
+# external market/ratings API and writes snapshots. Reads stay open. The
+# PUT upsert is left open: its primary use is manual rating entry (typing in
+# Cook / Sabato numbers), which is curation. NOTE: that PUT can also overwrite
+# external_id/external_metadata, repointing what market the gated sync pulls
+# from — flagged as an open question in INTER_SESSION (confused-deputy corner).
+_admin_only = [Depends(require_admin)]
 
 
 @router.get("/race-sentiment", response_model=list[RaceSentimentOut])
@@ -46,10 +55,11 @@ def upsert_race_sentiment(
     if row is None:
         raise HTTPException(status_code=404, detail=f"Unknown race sentiment source: {source}")
 
+    # Market pointers (external_id / external_metadata) are intentionally not
+    # in RaceSentimentUpdate — they're sync-owned and read-only. So every key
+    # here is a plain value/label field that maps straight onto the row.
     data = payload.model_dump(exclude_unset=True)
     for k, v in data.items():
-        if k == "external_metadata" and v is not None:
-            v = json.dumps(v)
         setattr(row, k, v)
     row.updated_at = datetime.utcnow()
     db.commit()
@@ -57,7 +67,7 @@ def upsert_race_sentiment(
     return row
 
 
-@router.post("/race-sentiment/{source}/sync", response_model=RaceSentimentOut)
+@router.post("/race-sentiment/{source}/sync", response_model=RaceSentimentOut, dependencies=_admin_only)
 def manual_sync(source: str, db: Session = Depends(get_db)):
     """Run this source's connector right now. Phase 2 mostly for testing.
 
@@ -82,7 +92,7 @@ def manual_sync(source: str, db: Session = Depends(get_db)):
     return row
 
 
-@router.post("/race-sentiment/{source}/backfill")
+@router.post("/race-sentiment/{source}/backfill", dependencies=_admin_only)
 def backfill_history(
     source: str,
     days_back: int = 90,
@@ -199,7 +209,7 @@ def list_suspect_snapshots(days: int = 90, db: Session = Depends(get_db)):
     ]
 
 
-@router.post("/race-sentiment/sync-all")
+@router.post("/race-sentiment/sync-all", dependencies=_admin_only)
 def sync_all_endpoint(db: Session = Depends(get_db)):
     """Manually trigger the daily sync. Same code path the scheduler runs."""
     from app.services.race_sentiment_sync import sync_all
@@ -295,6 +305,12 @@ def list_timeline_events(days: int = 30, db: Session = Depends(get_db)):
         .all()
     )
     outlets_map = preload_outlets(db, articles)
+    # Per-article (owner_type, subject_type) for the 4-quadrant color scheme
+    # on the Timeline. Without these, every top-article pin renders gray
+    # "Neutral" — even campaign-owned tweets. See article_quadrant.py for
+    # the cascade. Batched: one SQL query for all article ids.
+    from app.services.article_quadrant import quadrants_for_articles
+    quadrant_map = quadrants_for_articles(articles, db)
     seen_dates: set[str] = set()
     for a in articles:
         if not a.published_at:
@@ -303,6 +319,7 @@ def list_timeline_events(days: int = 30, db: Session = Depends(get_db)):
         if d in seen_dates:
             continue
         seen_dates.add(d)
+        owner_type, subject_type = quadrant_map.get(a.id, ("media", "media"))
         events.append({
             "type": "top_article",
             "timestamp": a.published_at.isoformat() + "Z",
@@ -310,6 +327,8 @@ def list_timeline_events(days: int = 30, db: Session = Depends(get_db)):
             "article_id": a.id,
             "score": a.race_relevance_score,
             "source_name": display_source_name(a, outlets_map.get(a.outlet_id)),
+            "owner_type": owner_type,
+            "subject_type": subject_type,
         })
 
     # Final sort: oldest first, ties broken by type (so a stage_change on

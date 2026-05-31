@@ -127,6 +127,8 @@ def _post_envelope_to_dict(envelope: dict, handle: str) -> Optional[dict]:
         title = title.rstrip() + "…"
     if not title:
         title = f"Bluesky post by @{handle}"
+    from app.services.ingestion import clean_title as _clean_title
+    title = _clean_title(title) or f"Bluesky post by @{handle}"
 
     author = post.get("author") or {}
     display = author.get("displayName") or handle

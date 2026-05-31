@@ -69,6 +69,41 @@ def _normalize_text(text: str) -> str:
     return _WHITESPACE.sub(' ', _html.unescape(text)).strip()
 
 
+# Unicode blocks that contain emoji + their joiners. Body text is left alone
+# (emoji can be load-bearing inside the social-post content the AI scores),
+# but article titles surface throughout the UI and we want them clean per the
+# project's no-emoji-in-UI rule. Backfill ran 2026-05-30 — see
+# scripts/strip_emoji_from_titles.sql for the one-off UPDATE.
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FFFF"   # most pictographs, emoji, supplements
+    "\U00002600-\U000027BF"   # misc symbols + dingbats
+    "\U00002B00-\U00002BFF"   # misc symbols & arrows
+    "\U00002300-\U000023FF"   # misc technical (incl. ⌛️ ♻️ etc.)
+    "‍"                  # ZWJ (binds emoji sequences)
+    "️"                  # variation selector-16 (emoji presentation)
+    "⃣"                  # combining enclosing keycap
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def clean_title(text: str | None) -> str | None:
+    """Normalize a SourceItem title for storage and display.
+
+    Runs `_normalize_text` then strips emoji and collapses the whitespace
+    that emoji removal leaves behind. Call this at every SourceItem
+    construction site that sets `title=...` — see grep for the inventory.
+    """
+    if not text:
+        return text
+    text = _normalize_text(text)
+    if not text:
+        return text
+    text = _EMOJI_RE.sub("", text)
+    return _WHITESPACE.sub(" ", text).strip()
+
+
 def _strip_tags(fragment: str) -> str:
     # _decode_entities → _TAG_STRIP → whitespace collapse → NUL strip.
     # Same Postgres-TEXT NUL hazard as _normalize_text.
@@ -542,8 +577,60 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
         db.flush()
         return item
 
+    # Inline duplicate check: catches the same article arriving via
+    # multiple feeds (Google News redirect, direct publisher RSS, etc.).
+    # Default dedup is keyed on source_url so SQL sees these as distinct
+    # rows; this check fuzzy-matches the title instead. Verdict semantics:
+    #   - "new_is_duplicate": existing row already covers this article
+    #     with a longer body → archive the new one without scoring (saves
+    #     an LLM call) and return early.
+    #   - "existing_is_duplicate": the existing row is a stub, the new
+    #     row is the canonical version → archive the existing in place,
+    #     continue normal pipeline for the new item.
+    #   - "neither_canonical" or "no_match": let the normal pipeline run.
+    #     The batch dedup pass catches any duplicates that surface later.
+    from app.services.dedup_merge import find_canonical_for_item, mark_as_duplicate
+    dedup_decision = find_canonical_for_item(db, item)
+    if dedup_decision.verdict == "new_is_duplicate":
+        canon = dedup_decision.canonical
+        logger.info(
+            "ingestion: inline dedup — new item is duplicate of source_item_id=%d "
+            "(similarity=%.3f) title=%r",
+            canon.id, dedup_decision.similarity, (item.title or "")[:60],
+        )
+        item.archived_as_irrelevant = True
+        item.race_relevance_score = canon.race_relevance_score or 0
+        item.race_relevance_label = canon.race_relevance_label or "irrelevant"
+        item.content_category = canon.content_category or "irrelevant"
+        item.reviewed = True
+        item.relevance_reasons = json.dumps([{
+            "reason": "duplicate",
+            "canonical_source_item_id": canon.id,
+            "title_similarity": round(dedup_decision.similarity, 3),
+            "merged_at": datetime.utcnow().isoformat(),
+        }])
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return item
+
     db.add(item)
     db.flush()
+
+    # If the existing row is the stub and we're the canonical, archive it.
+    # Has to run after `db.flush()` so `item.id` exists for the duplicate
+    # marker pointing at us.
+    if dedup_decision.verdict == "existing_is_duplicate":
+        canon_target = dedup_decision.canonical
+        logger.info(
+            "ingestion: inline dedup — new item supersedes existing source_item_id=%d "
+            "(similarity=%.3f); archiving the existing row",
+            canon_target.id, dedup_decision.similarity,
+        )
+        mark_as_duplicate(
+            db, duplicate=canon_target, canonical=item,
+            similarity=dedup_decision.similarity,
+        )
     ownership = classify_source_owner(db, item)
     item.source_owner_type = ownership.source_owner_type
     item.source_owner_confidence = ownership.source_owner_confidence
@@ -695,7 +782,7 @@ def ingest_text(
     source_author: Optional[str] = None,
 ) -> SourceItem:
     item = SourceItem(
-        title=_normalize_text(title),
+        title=clean_title(title),
         raw_text=_normalize_text(raw_text),
         source_name=source_name,
         source_type=source_type,
@@ -851,8 +938,9 @@ def ingest_url(db: Session, url: str, source_type: str) -> Optional[SourceItem]:
         # passed through _strip_tags via _clean_html_with_quality, which
         # strips NULs after the 2026-05-29 hot-fix.
         title = title.replace("\x00", "") if title else title
+        cleaned_title = clean_title(title) or ""
         item = SourceItem(
-            title=title[:200],
+            title=cleaned_title[:200],
             raw_text=body_text,
             source_url=url,
             source_name=url.split("/")[2] if "://" in url else url[:50],
@@ -1160,13 +1248,59 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
 
         raw_text = _strip_tags(entry.get("summary") or entry.get("description") or "")[:4000]
 
+        # Extract publisher_domain BEFORE body recovery so recover_body's
+        # title-search fallback (used when the Google News decoder fails)
+        # has the publisher to search against. Same code that ran below
+        # before — moved up so the recovery step can see it.
+        publisher_domain: str | None = None
+        entry_source = entry.get("source") or {}
+        if entry_source and "news.google.com" in feed_url:
+            src_href = entry_source.get("href") or ""
+            if src_href:
+                from urllib.parse import urlparse as _urlparse
+                import re as _re
+                publisher_domain = _re.sub(r"^www\.", "", _urlparse(src_href).netloc).lower() or None
+
+        # Body recovery for short RSS payloads.
+        #
+        # Three scenarios this catches:
+        #   (a) Google News intermediary feeds where, since 2026-05-26,
+        #       Google stopped including body excerpts — every entry is
+        #       just a `<title> <outlet>` string. We try to decode the
+        #       redirect to the underlying publisher URL and fetch from
+        #       there; if the decoder fails (it currently does, in any
+        #       geography — Google removed the data attrs), we fall back
+        #       to a title-based search on `publisher_domain`.
+        #   (b) Direct publisher feeds (e.g. timesleader.com/feed/) that
+        #       only ship 200-400 char excerpts. We follow `entry.link`
+        #       to the article page and run our readability pipeline.
+        #   (c) YouTube-via-Google-News items: the decoder, when it
+        #       works, resolves to a youtube.com URL — captured below as
+        #       `resolved_url` for the transcript path.
+        #
+        # Recovery is best-effort — failure leaves raw_text unchanged.
+        resolved_url: str | None = None
+        if url:
+            from app.services.article_body_recovery import recover_body
+            recovered_body, resolved_url = recover_body(
+                url, raw_text,
+                publisher_domain=publisher_domain,
+                title=title,
+            )
+            if recovered_body:
+                raw_text = recovered_body[:4000]
+
         # YouTube videos: the RSS feed only carries title + description, not
         # the spoken content. Fetch the auto-generated transcript when we
         # can — politicians' video remarks are first-party signal that
         # otherwise wouldn't reach the scoring pipeline. Append to raw_text
         # so downstream LLM scoring / frame matching sees it as if it were
         # article body.
-        video_id = _youtube_video_id(url)
+        #
+        # The video_id lookup tries the raw URL first; if that's a Google
+        # News redirect that we decoded above, the resolved URL is where
+        # the youtube.com link actually lives.
+        video_id = _youtube_video_id(url) or _youtube_video_id(resolved_url)
         if video_id:
             transcript = _fetch_youtube_transcript(video_id)
             if transcript:
@@ -1193,21 +1327,25 @@ def ingest_rss(db: Session, feed_url: str, label: Optional[str] = None) -> RSSIn
 
         inferred_type = "reference" if (not published and _is_reference_url(url)) else "news"
 
-        # For Google News feeds, each entry carries a <source url="publisher.com">
-        # element that feedparser exposes as entry.source.  Extract the publisher
-        # domain so we can attribute the article to the right outlet even though
-        # the stored source_url remains the Google News redirect (for dedup).
-        publisher_domain: str | None = None
-        entry_source = entry.get("source") or {}
-        if entry_source and "news.google.com" in feed_url:
-            src_href = entry_source.get("href") or ""
-            if src_href:
-                from urllib.parse import urlparse as _urlparse
-                import re as _re
-                publisher_domain = _re.sub(r"^www\.", "", _urlparse(src_href).netloc).lower() or None
+        # publisher_domain was extracted above (before recover_body), so the
+        # title-search fallback could see it. This block just handles the
+        # fallback for when entry.source was empty but the recovery path
+        # resolved a URL we can derive a domain from.
+        # Fallback: if the decoder resolved a Google News redirect, use the
+        # resolved URL's domain when entry.source didn't carry one. This
+        # mostly affects YouTube-via-Google-News entries where entry.source
+        # is the youtube.com homepage anyway, but it also covers feeds where
+        # Google omits the source element.
+        if not publisher_domain and resolved_url:
+            from urllib.parse import urlparse as _urlparse
+            import re as _re
+            try:
+                publisher_domain = _re.sub(r"^www\.", "", _urlparse(resolved_url).netloc).lower() or None
+            except Exception:
+                publisher_domain = None
 
         item = SourceItem(
-            title=title,
+            title=clean_title(title),
             raw_text=raw_text,
             source_url=url or None,
             source_name=label or feed.feed.get("title", feed_url),

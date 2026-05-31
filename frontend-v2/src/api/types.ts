@@ -40,10 +40,28 @@ export interface NarrativeFrame {
   mentions_this_week: number
   mentions_last_week: number
   articles_last_30d?: number
-  activity_30d?: Array<{ date: string; count: number }>
+  // 30-day daily activity with outlet-tier breakdown. `count` mirrors
+  // `total` for legacy consumers; tier fields power the cross-tier
+  // transition detectors in lib/featuredFrame.ts.
+  activity_30d?: Array<{
+    date: string
+    count: number
+    total?: number
+    national?: number
+    regional?: number
+    local?: number
+    blog?: number
+    social?: number
+    unknown?: number
+  }>
   unique_outlets_this_week: number
   unique_outlets_last_week: number
   days_active_last_7: number
+  // Saturation signal — how many of the last 7 calendar days this frame
+  // has been featured on the dashboard. Drives the saturation penalty
+  // in lib/featuredFrame.ts so the panel doesn't become wallpaper.
+  // Optional because legacy responses may not include it.
+  days_featured_last_7?: number
   reach_this_week: number
   reach_last_week: number
   reach_total: number
@@ -367,10 +385,39 @@ export interface SourceItem {
   source_name?: string
   source_url?: string
   source_type?: string
+  /**
+   * The social platform a post originated on, if any: 'twitter' | 'bluesky' |
+   * 'reddit' | 'youtube' | 'mastodon' | 'facebook' | 'instagram'. Undefined/
+   * null for plain news/web. Orthogonal to both source_type and
+   * source_category — derived from the item URL on the backend (see
+   * backend/app/services/platform_classify.py), because source_type does NOT
+   * track platform (RSS ingestion flattens everything to 'news').
+   */
+  platform?: string
+  /**
+   * Coarse category derived from outlet metadata + source_name on the
+   * backend. One of: 'local_news' | 'national_news' | 'social_media' |
+   * 'campaign_source' | 'other'. Drives the Articles-page Source filter.
+   * See backend/app/services/source_category.py.
+   */
+  source_category?: string
+  /**
+   * Whose "side" the article reads as benefiting: 'pro_candidate' |
+   * 'pro_opponent' | 'neutral'. Combined with `sentiment` on the
+   * Articles page to derive the 5-bucket pro/anti × candidate/opponent
+   * filter.
+   */
+  perspective?: string
   published_at?: string
   created_at: string
   summary?: string
   race_relevance_score?: number
+  /**
+   * Coarse bucket derived from race_relevance_score by the backend
+   * (critical/high/medium/low/irrelevant). Surface this rather than the
+   * raw score — the bucket is what the UI shows so users don't read false
+   * precision into the number.
+   */
   race_relevance_label?: RelevanceLabel
   actionability_score?: number
   actionability_label?: string
@@ -387,6 +434,12 @@ export interface SourceItem {
    * endpoints that explicitly group (currently /articles/recent).
    */
   duplicates?: ArticleDuplicate[]
+  /**
+   * Active narrative frames this article matches. Only populated by
+   * /articles/recent (used to drive the Frame filter on the Articles
+   * page).
+   */
+  frames?: { id: number; name: string }[]
 }
 
 export interface ArticleDuplicate {
@@ -633,14 +686,79 @@ export interface CampaignConfig {
   // derivation when district doesn't encode it.
   location?: string
   party?: string
+  race?: string
+  race_level?: string
+  election_type?: string
+  district_number?: string
   election_date?: string
+  /** True when the stored election_date matches the auto-inferred date for
+   *  this race level + state + year. UI shows a subtle "auto" badge when
+   *  true so the user knows they can override without "losing" anything. */
+  election_date_inferred?: boolean
   campaign_message?: string
+  /** Legacy alias for relevance_keywords used by the current Setup form. */
   keywords?: string[]
+  /** Legacy alias for key_priorities used by the current Setup form. */
   priorities?: string[]
+  key_priorities?: string[]
+  relevance_keywords?: string[]
+  excluded_keywords?: string[]
+  geography_keywords?: string[]
+  trends_keywords?: string[]
+  neighborhood_keywords?: string[]
+  sparse_race_mode?: boolean
   /** Bare IG usernames — see Opponent.instagram_handles. */
   instagram_handles?: string[] | null
   /** Bare FB page slugs — see Opponent.facebook_pages. */
   facebook_pages?: string[] | null
+  /** Set when the campaign was created via /api/races/{id}/select. Null for
+   *  campaigns set up manually or pre-dating the race-picker flow. */
+  directory_race_id?: number | null
+  created_at?: string
+  updated_at?: string
+}
+
+// ── Race Directory ───────────────────────────────────────────────────────
+// Mirrors backend RaceDirectoryOut / RaceCandidateOut from schemas.py.
+// Source: FEC Candidate Master snapshot, seeded into the race_directory
+// table at boot. Powers the "Pick your race" picker in Setup.
+export interface RaceCandidate {
+  id: number
+  race_id: number
+  candidate_name: string
+  party?: string | null
+  is_incumbent: boolean
+  /** "candidate" for the row representing the user's pick, "other" for
+   *  everyone else (they become Opponents on select). */
+  role: string
+  campaign_url?: string | null
+  notes?: string | null
+}
+
+export interface RaceDirectory {
+  id: number
+  race_key: string
+  race_name: string
+  race_level: string
+  office_name: string
+  state: string
+  district_label?: string | null
+  district_number?: string | null
+  election_type: string
+  election_date?: string | null
+  geography_summary?: string | null
+  data_source: string
+  is_active: boolean
+  candidates: RaceCandidate[]
+}
+
+export interface RaceSelectResult {
+  race: RaceDirectory
+  campaign: CampaignConfig
+  selected_candidate_name: string
+  opponents_created: number
+  opponents_updated: number
+  message: string
 }
 
 export interface IngestStatus {
@@ -740,9 +858,24 @@ export interface BriefingClaim {
 }
 
 export interface GroundedMemo {
+  headline: string | null         // 1-line LLM-generated summary ("Linear-style"
+                                  // headline). Null if the model didn't produce
+                                  // one in the expected format — the frontend
+                                  // renders the body alone in that case.
   text: string                    // prose with [C1] [C2] markers
   citations: BriefingCitation[]
   sources_used: BriefingClaim[]   // also drives the "Sources Used" expandable
+  // Admin manual-override metadata. `input_hash` pins an override to the
+  // inputs the LLM was working from when the admin saved — the frontend
+  // echoes it back on the next PUT so the override is auto-cleared when
+  // the news materially changes. `overridden_*` flag which fields the
+  // admin manually edited; `overridden_by` / `overridden_at` drive a small
+  // "Edited by X · 5m ago" indicator for non-admin viewers.
+  input_hash?: string
+  overridden_headline?: boolean
+  overridden_text?: boolean
+  overridden_by?: string | null
+  overridden_at?: string | null
 }
 
 export interface BriefingEntity {
@@ -750,10 +883,25 @@ export interface BriefingEntity {
   name: string
   type: 'person' | 'organization' | 'bill' | 'event' | 'location'
   affiliation: 'D' | 'R' | 'I' | null
-  mentions_this_week: number
+  mentions_this_week: number      // race-context-gated for context entities; raw for always-show candidates
   mentions_last_week: number
   delta: number
+  // gated/raw ratio for context entities (e.g. 0.15 = 15% race-focused).
+  // null for always-show candidates (gate is meaningless — they ARE the race)
+  // and when raw count is zero (no denominator).
+  race_share: number | null
   sample_recent_titles: string[]
+}
+
+// Frames whose articles are cited in the v2 grounded memo. Powers
+// Featured Narratives pinning — every frame in this list is guaranteed
+// a slot in the dashboard panel so the memo and panel always agree.
+// Top-confidence frame per article, ties included.
+export interface BriefingCitedFrame {
+  frame_id: number
+  frame_name: string
+  confidence: number
+  cited_article_ids: number[]
 }
 
 export interface MorningBriefing {
@@ -777,13 +925,26 @@ export interface MorningBriefing {
   // Only present when ?v=2 — last 48h of candidate-specific labeled claims.
   // May be empty in quiet windows; render conditionally.
   overnight_changes?: BriefingClaim[]
+  // Only present when ?v=2 — frames cited in the memo (top-confidence
+  // per article, ties included). Drives Featured Narratives pinning.
+  cited_frames?: BriefingCitedFrame[]
+}
+
+// Backend returns the checklist as a list of items so the labels, help text,
+// and click-through paths live on the server side. The Setup page renders
+// `items[].complete` for each row and uses `complete` for the overall banner.
+export interface SetupChecklistItem {
+  id: string
+  label: string
+  complete: boolean
+  helper_text: string
+  /** Frontend route the user should visit to complete this step. */
+  action_path: string
 }
 
 export interface SetupStatus {
-  campaign_profile: boolean
-  opponent_added: boolean
-  source_added: boolean
-  narrative_frame_added: boolean
+  complete: boolean
+  items: SetupChecklistItem[]
 }
 
 // AI triage verdict for a proposed (HDBSCAN-clustered) cluster of candidate
@@ -850,7 +1011,11 @@ export interface RaceSentiment {
   updated_at: string | null     // ISO datetime — when our DB row was last touched
 }
 
-export type RaceSentimentUpdate = Partial<Omit<RaceSentiment, 'id' | 'source' | 'source_type' | 'display_name' | 'updated_at' | 'last_synced_at' | 'last_sync_error'>>
+// Market pointers (external_id / external_metadata) are sync-owned and
+// read-only — they're omitted here to match the backend RaceSentimentUpdate,
+// which no longer accepts them (repointing a source at an arbitrary external
+// feed was a confused-deputy hole).
+export type RaceSentimentUpdate = Partial<Omit<RaceSentiment, 'id' | 'source' | 'source_type' | 'display_name' | 'updated_at' | 'last_synced_at' | 'last_sync_error' | 'external_id' | 'external_metadata'>>
 
 export interface RaceSentimentSnapshot {
   id: number
@@ -908,5 +1073,134 @@ export interface NarrativeLifecycleEvent {
   // for one narrative are sized comparably.
   total_mentions: number
   peak_count?: number           // only on narrative_peaked
+}
+
+// ─── Global search (header dropdown) ─────────────────────────────────────
+// Returned by /api/search/entities · /search/quotes · /search/outlets.
+// These power the universal search bar — articles and narrative frames
+// already have their own shapes.
+export interface EntitySearchHit {
+  id: number
+  canonical_id: string
+  name: string
+  type: string                  // person | organization | bill | event | location | issue
+  affiliation: string | null    // D | R | I | null
+  mention_count: number
+  source_count: number
+}
+
+// ─── Entity detail page (/entities/:id) ───────────────────────────────
+// Powers the `/entities/:id` page that Activity-This-Week cards link to.
+// Backend: GET /api/entities/{canonical_id}
+export interface EntityDetail {
+  entity: {
+    id: string                  // canonical_id, e.g. "person:bresnahan"
+    name: string
+    type: 'person' | 'organization' | 'bill' | 'event' | 'location' | 'issue'
+    affiliation: 'D' | 'R' | 'I' | null
+    description: string | null
+    mention_count: number       // counter on entities table — extractor-maintained, possibly stale
+    source_count: number
+    first_seen: string | null
+    last_seen: string | null
+  }
+  stats: {
+    window_days: number
+    mentions_this_week: number  // raw article-distinct count in last `window_days`
+    mentions_last_week: number  // same metric for the preceding `window_days`
+    delta: number
+    total_articles: number      // articles mentioning this entity (any time)
+    total_quotes: number        // v15.0 claim_records mentioning this entity (any time)
+  }
+  recent_articles: Array<{
+    id: number
+    title: string
+    source_url: string
+    source_name: string
+    published_at: string | null
+    summary: string | null
+    sentiment: string | null
+    race_relevance_score: number
+  }>
+  supporting_quotes: Array<{
+    id: number
+    evidence_span: string
+    label: string | null
+    confidence: string
+    article: {
+      id: number
+      title: string
+      source_url: string
+      source_name: string
+      published_at: string | null
+    } | null
+  }>
+  narrative_frames: Array<{
+    id: number
+    name: string
+    owner_type: 'candidate' | 'opponent' | 'media'
+    stage: string | null
+    article_count: number
+  }>
+}
+
+export interface QuoteSearchHit {
+  id: number
+  evidence_span: string
+  label: string | null          // statement | attack | endorsement | …
+  article_id: number
+  article_title: string | null
+  source_name: string           // already publisher-resolved server-side
+}
+
+export interface OutletSearchHit {
+  id: number
+  name: string
+  domain: string
+  outlet_type: string
+  city: string | null
+  state: string | null
+  authority_score: number
+}
+
+// Empty-state "Try searching" tour. Returned by /api/search/suggestions.
+// Each sub-shape is intentionally narrower than the corresponding
+// SearchHit above — suggestions only need enough to render one example
+// row, not full search-result detail.
+export interface EntitySuggestion {
+  id: number
+  canonical_id: string
+  name: string
+  type: string
+  affiliation: string | null
+  mentions_this_week: number
+}
+
+export interface OutletSuggestion {
+  id: number
+  name: string
+  domain: string
+  articles_this_week: number
+}
+
+export interface FrameSuggestion {
+  id: number
+  name: string
+  owner_type: string | null
+  mentions_this_week: number
+}
+
+export interface QuoteSuggestion {
+  id: number
+  evidence_span: string
+  article_id: number
+  source_name: string
+}
+
+export interface SearchSuggestions {
+  entities: EntitySuggestion[]
+  outlets: OutletSuggestion[]
+  frames: FrameSuggestion[]
+  quotes: QuoteSuggestion[]
 }
 

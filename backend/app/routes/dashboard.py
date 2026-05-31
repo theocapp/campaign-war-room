@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session, joinedload
 from app.db import get_db
 from app.models import (
     CampaignConfig,
+    FeaturedAppearance,
     Issue,
     IssueMention,
     NarrativeFrame,
+    NarrativeFrameMention,
     Opponent,
     OpponentActivity,
     Outlet,
@@ -22,6 +24,7 @@ from app.services.briefing_retrieval import (
     top_claims_for_briefing,
     top_entities_for_briefing,
 )
+from app.services.source_category import categorize as categorize_source
 from app.services.source_display import display_source_name, preload_outlets
 
 
@@ -68,9 +71,16 @@ def _item_dict(item: SourceItem, outlet: Outlet | None = None) -> dict:
         "summary": item.summary,
         "source_name": display_source_name(item, outlet),
         "source_url": item.source_url,
+        "source_type": item.source_type,
+        "platform": item.platform,
+        "source_category": categorize_source(item, outlet),
         "published_at": item.published_at.isoformat() if item.published_at else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
         "race_relevance_score": item.race_relevance_score,
+        "race_relevance_label": item.race_relevance_label,
         "actionability_label": item.actionability_label,
+        "sentiment": item.sentiment,
+        "perspective": item.perspective,
         "framing": getattr(item, "framing", None),
     }
 
@@ -81,6 +91,7 @@ def _duplicate_dict(item: SourceItem, outlet: Outlet | None = None) -> dict:
         "source_name": display_source_name(item, outlet),
         "source_url": item.source_url,
         "published_at": item.published_at.isoformat() if item.published_at else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
     }
 
 
@@ -162,6 +173,77 @@ def _is_llm_scored(item: SourceItem) -> bool:
     if " —" in s and ("(WB" in s or "(WN" in s or "(WY" in s or "(AP)" in s):
         return False
     return True
+
+
+def _cited_frames_from_memo(db: Session, memo) -> list[dict]:
+    """Frames whose articles are cited in the grounded race memo.
+
+    For each cited article, returns the top-confidence frame match(es);
+    ties at the max confidence are all included (so an article matching
+    two frames at 90 confidence pins both). A frame cited via multiple
+    articles appears once with all cited_article_ids attached.
+
+    Returns [] when the memo has no citations or none of its articles
+    have active frame matches.
+    """
+    if not isinstance(memo, dict):
+        return []
+    citations = memo.get("citations") or []
+    article_ids = list({c["article_id"] for c in citations if c.get("article_id")})
+    if not article_ids:
+        return []
+    rows = (
+        db.query(
+            NarrativeFrameMention.source_item_id,
+            NarrativeFrameMention.frame_id,
+            NarrativeFrameMention.confidence,
+            NarrativeFrame.name,
+        )
+        .join(NarrativeFrame, NarrativeFrame.id == NarrativeFrameMention.frame_id)
+        .filter(NarrativeFrameMention.source_item_id.in_(article_ids))
+        .filter(NarrativeFrame.active == True)  # noqa: E712
+        .all()
+    )
+    # Group by article, then keep only rows at the article's max confidence.
+    per_article: dict[int, list[tuple[int, int, str]]] = {}
+    for source_item_id, frame_id, confidence, frame_name in rows:
+        per_article.setdefault(source_item_id, []).append(
+            (frame_id, confidence, frame_name)
+        )
+    pinned: dict[int, dict] = {}
+    for source_item_id, entries in per_article.items():
+        max_conf = max(e[1] for e in entries)
+        for frame_id, confidence, frame_name in entries:
+            if confidence != max_conf:
+                continue
+            slot = pinned.setdefault(frame_id, {
+                "frame_id": frame_id,
+                "frame_name": frame_name,
+                "confidence": confidence,
+                "cited_article_ids": [],
+            })
+            slot["cited_article_ids"].append(source_item_id)
+    return list(pinned.values())
+
+
+@router.get("/campaign/names")
+def get_campaign_names(db: Session = Depends(get_db)):
+    """Return the configured candidate + opponent display names.
+
+    Used by the Articles-page sentiment filter to label its dropdown
+    buckets dynamically ("pro-{candidate first name}", etc.) instead of
+    hardcoding names — keeps the UI SaaS-ready across campaigns.
+
+    Names come from CampaignConfig (set in /setup) and the first Opponent
+    row. Falls back to None when nothing is configured yet so the
+    frontend can degrade to generic "pro-candidate / pro-opponent" labels.
+    """
+    config = db.query(CampaignConfig).first()
+    opp = db.query(Opponent).first()
+    return {
+        "candidate_name": config.candidate_name if config else None,
+        "opponent_name": opp.name if opp else None,
+    }
 
 
 @router.get("/briefing/morning")
@@ -312,13 +394,21 @@ def get_morning_briefing(
         # Grounded memo + structured retrieval. The frontend renders this
         # with citation superscript links and a "Sources used" expandable.
         top_claims = top_claims_for_briefing(db, days=7, limit=15)
-        response["race_memo"] = briefing_svc.get_or_generate_grounded(
+        race_memo = briefing_svc.get_or_generate_grounded(
             db, all_articles, campaign, opponents, top_claims
         )
+        response["race_memo"] = race_memo
         response["top_entities"] = top_entities_for_briefing(db, days=7)
         # "What changed in the race" — labeled candidate-specific claims
         # from the last 48h. May be empty in quiet windows; frontend hides.
         response["overnight_changes"] = overnight_changes(db)
+        # Frames cited in the memo — top-confidence frame(s) per cited
+        # article, ties included. Powers Dashboard "pinning": every frame
+        # in this list is guaranteed a slot in Featured Narratives, so the
+        # editorial memo and the algorithmic featured panel always agree.
+        # Empty list when memo has no citations or cited articles have no
+        # frame matches.
+        response["cited_frames"] = _cited_frames_from_memo(db, race_memo)
     else:
         # v1: legacy prose memo (string). Default for the current frontend.
         response["race_memo"] = briefing_svc.get_or_generate(
@@ -330,7 +420,8 @@ def get_morning_briefing(
 
 @router.get("/articles/recent")
 def get_recent_relevant_articles(limit: int = 10, db: Session = Depends(get_db)):
-    """Most recent race-relevant articles for the Dashboard right rail.
+    """Most recent race-relevant articles for the Dashboard right rail and
+    the full Articles page.
 
     This is the *confirmed-relevant* feed — only articles that have already
     cleared review (either auto_review approved them, or a human marked them
@@ -344,24 +435,30 @@ def get_recent_relevant_articles(limit: int = 10, db: Session = Depends(get_db))
         - reviewed == True  (auto-approved by auto_review OR manually reviewed)
         - LLM-scored (real summary, not raw RSS)
         - race_relevance_score >= 50
-        - published within the last 7 days
 
-    Ordered by published_at desc so freshest reviewed items surface first.
+    No upper date bound — the Articles page paginates back through the full
+    lifetime pool (~2,700 reviewed-relevant articles) via `limit`. Ordered
+    by published_at desc so the freshest reviewed items surface first.
     """
-    cutoff = datetime.utcnow() - timedelta(days=7)
     # Over-fetch generously — both the LLM-scored filter AND the per-title
     # grouping below can drop rows, so we want plenty of headroom to still
     # return `limit` distinct stories.
+    # COALESCE(published_at, created_at) — Postgres puts NULL first under
+    # ORDER BY ... DESC, so a plain published_at sort was burning the
+    # over-fetch budget on the 136 reviewed+relevant items that have
+    # published_at IS NULL (mostly setup-time seed URLs without a feed-
+    # provided publish date). Falling back to created_at here matches the
+    # in-Python tiebreaker that runs after grouping.
+    recency = func.coalesce(SourceItem.published_at, SourceItem.created_at)
     candidates = (
         db.query(SourceItem)
         .filter(
             SourceItem.archived_as_irrelevant == False,  # noqa: E712
             SourceItem.dismissed == False,               # noqa: E712
             SourceItem.reviewed == True,                 # noqa: E712 — cleared, not in queue
-            SourceItem.published_at >= cutoff,
             SourceItem.race_relevance_score >= 50,
         )
-        .order_by(SourceItem.published_at.desc())
+        .order_by(recency.desc())
         .limit(limit * 6)
         .all()
     )
@@ -378,10 +475,33 @@ def get_recent_relevant_articles(limit: int = 10, db: Session = Depends(get_db))
         all_items.append(rep)
         all_items.extend(dupes)
     outlets_map = preload_outlets(db, all_items)
+    # Batch-load narrative frame matches for the representatives only — the
+    # client-side Frame filter operates on whichever row is being rendered,
+    # which is always the representative. Skipping duplicates keeps the
+    # query small.
+    rep_ids = [rep.id for rep, _ in groups]
+    frames_by_item: dict[int, list[dict]] = {}
+    if rep_ids:
+        rows = (
+            db.query(
+                NarrativeFrameMention.source_item_id,
+                NarrativeFrame.id,
+                NarrativeFrame.name,
+            )
+            .join(NarrativeFrame, NarrativeFrame.id == NarrativeFrameMention.frame_id)
+            .filter(NarrativeFrameMention.source_item_id.in_(rep_ids))
+            .filter(NarrativeFrame.active == True)  # noqa: E712
+            .all()
+        )
+        for source_item_id, frame_id, frame_name in rows:
+            frames_by_item.setdefault(source_item_id, []).append(
+                {"id": frame_id, "name": frame_name}
+            )
     return {
         "items": [
             {
                 **_item_dict(rep, outlets_map.get(rep.outlet_id)),
+                "frames": frames_by_item.get(rep.id, []),
                 "duplicates": [
                     _duplicate_dict(d, outlets_map.get(d.outlet_id)) for d in dupes
                 ],
@@ -415,7 +535,7 @@ def get_article_detail(article_id: int, db: Session = Depends(get_db)):
     if not a:
         raise HTTPException(status_code=404, detail=f"Article {article_id} not found")
 
-    outlet = db.query(Outlet).get(a.outlet_id) if a.outlet_id else None
+    outlet = db.get(Outlet, a.outlet_id) if a.outlet_id else None
     return {
         "id": a.id,
         "title": a.title,
@@ -526,3 +646,42 @@ def get_article_detail(article_id: int, db: Session = Depends(get_db)):
             for oa in a.opponent_activities
         ],
     }
+
+
+# ─── Featured-narratives appearance log ───────────────────────────────────
+# Frontend POSTs the IDs of frames it just rendered in the homepage's
+# Featured Narratives panel. We record one row per (frame_id, today)
+# using ON CONFLICT DO NOTHING so repeat renders on the same day are
+# idempotent. The count of rows per frame in the last 7 days drives the
+# saturation-penalty term in the frontend's multi-objective score —
+# frames that stay featured 3+ days running get demoted unless their
+# urgency keeps them at the top anyway.
+#
+# Not admin-gated: this is per-visit telemetry, not a write that costs
+# money or changes campaign state. Any authenticated session can log.
+
+from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from datetime import date as _date
+
+
+class FeaturedAppearanceIn(BaseModel):
+    frame_ids: list[int]
+
+
+@router.post("/dashboard/featured-appearance")
+def log_featured_appearance(
+    payload: FeaturedAppearanceIn,
+    db: Session = Depends(get_db),
+):
+    if not payload.frame_ids:
+        return {"recorded": 0}
+    # Dedupe in case the same id is sent twice in a single POST.
+    unique_ids = sorted(set(payload.frame_ids))
+    today = _date.today()
+    rows = [{"frame_id": fid, "appeared_on": today} for fid in unique_ids]
+    stmt = pg_insert(FeaturedAppearance).values(rows)
+    stmt = stmt.on_conflict_do_nothing(constraint="uq_featured_frame_day")
+    db.execute(stmt)
+    db.commit()
+    return {"recorded": len(unique_ids), "day": today.isoformat()}

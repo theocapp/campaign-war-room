@@ -46,7 +46,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -74,9 +76,28 @@ _BACKOFF_MAX_S = 60.0
 # are short; pathological 3-MB strings shouldn't waste cycles.
 _MAX_TEXT_SCAN_LEN = 4000
 
+# Watchdog: the websockets client won't raise on a "wedged" socket — one
+# that stays connected but stops delivering frames. The network carries
+# ~500 posts/sec, so a multi-minute silence WHILE WE BELIEVE WE'RE CONNECTED
+# is a wedge, not a quiet news day. _WEDGE_STALL_S is the silence that trips
+# a restart. It is bounded on both sides by existing constants:
+#   below the 5-min watchdog poll interval (scheduler) → one flat poll trips it
+#   above _BACKOFF_MAX_S (60s)                          → a normal reconnect's
+#                                                          quiet gap can't
+#                                                          false-positive
+_WEDGE_STALL_S = 240.0
+# Grace between cancel and re-spawn in restart(); lets the cancelled task
+# unwind on the loop before the replacement is created (see restart()).
+_RESTART_GRACE_S = 2.0
+
 # Internal state: one daemon per process.
 _task: Optional[asyncio.Task] = None
 _running = False
+# Monotonic timestamp of the last WS frame observed (set on connect and per
+# event). None until the first connect. get_health() compares it against
+# now to detect a wedged socket; kept out of _stats because a raw monotonic
+# float is meaningless to the JSON observability consumers of get_stats().
+_last_event_monotonic: Optional[float] = None
 _stats = {
     "started_at": None,
     "events_seen": 0,
@@ -92,6 +113,75 @@ def get_stats() -> dict:
     """Snapshot of firehose runtime stats for the /api/system/llm-status
     style observability endpoint. Cheap to call."""
     return dict(_stats)
+
+
+def get_health(now: Optional[float] = None) -> dict:
+    """Liveness assessment for the watchdog. Returns {state, ...}.
+
+    `state` is one of:
+      "disabled" — never started (firehose turned off via env)
+      "dead"     — the asyncio task is gone/finished but should be running
+      "wedged"   — connected but no frames for > _WEDGE_STALL_S (silent socket)
+      "ok"       — task alive and recently delivering (or freshly connected)
+
+    The "wedged" check keys off _last_event_monotonic, which the loop stamps
+    on connect and on every frame — so a socket that connects then goes
+    silent is caught (silence measured from connect), while a task that is
+    still legitimately reconnecting through backoff is left alone.
+
+    `now` is injectable for testing; defaults to time.monotonic() so the
+    function has no dependency on a running event loop (it may be called from
+    a sync observability endpoint).
+    """
+    if now is None:
+        now = time.monotonic()
+
+    task_alive = _task is not None and not _task.done()
+    last = _last_event_monotonic
+    silent_for = (now - last) if last is not None else None
+
+    if not task_alive:
+        # started_at is set the moment _firehose_loop runs; if it's still None
+        # and we're not running, the firehose was simply never turned on.
+        state = "disabled" if (_stats["started_at"] is None and not _running) else "dead"
+    elif _running and silent_for is not None and silent_for > _WEDGE_STALL_S:
+        state = "wedged"
+    else:
+        state = "ok"
+
+    return {
+        "state": state,
+        "events_seen": _stats["events_seen"],
+        "events_matched": _stats["events_matched"],
+        "silent_for_s": round(silent_for, 1) if silent_for is not None else None,
+        "reconnects": _stats["reconnects"],
+        "last_error": _stats["last_error"],
+    }
+
+
+# Place-name fragments that look like city tokens but match everything.
+# Applied on top of BLOCK when harvesting city tokens from config.location.
+_GEO_STOPWORDS = {"pennsylvania", "penn", "county", "city", "town", "area",
+                  "north", "south", "east", "west", "greater", "metro"}
+
+
+def _load_keyword_overrides() -> tuple[set[str], set[str]]:
+    """Optional env escape hatches, mirroring NITTER_INSTANCES for twitter.
+
+    BLUESKY_EXTRA_KEYWORDS — comma-separated terms to ADD (a hashtag, a local
+        issue, a newly-relevant name the auto-derived set misses).
+    BLUESKY_BLOCK_KEYWORDS — comma-separated terms to REMOVE (e.g. a derived
+        city token like "barre" that turns out to match unrelated noise).
+
+    Both are lower-cased + trimmed. Lets the user tune recall vs. precision
+    without a code change. Extras bypass the length/BLOCK guard (the user
+    asked for them); blocks are applied last so a removal always wins.
+    """
+    def _parse(name: str) -> set[str]:
+        raw = os.getenv(name, "").strip()
+        return {t.strip().lower() for t in raw.split(",") if t.strip()} if raw else set()
+
+    return _parse("BLUESKY_EXTRA_KEYWORDS"), _parse("BLUESKY_BLOCK_KEYWORDS")
 
 
 def _build_keyword_set(db) -> set[str]:
@@ -122,13 +212,24 @@ def _build_keyword_set(db) -> set[str]:
             if last:
                 kws.add(last)
         if config.district:
-            kws.add(config.district.lower())
-            # "PA-08" → also "pa 08" form people sometimes write
-            kws.add(config.district.lower().replace("-", " "))
-        # NOTE: deliberately NOT adding config.location verbatim. It's
-        # often "Scranton/Wilkes-Barre, PA-08" — a unique string that
-        # would never appear in real posts. The district code above
-        # handles geography matching.
+            d = config.district.lower()
+            kws.add(d)
+            kws.add(d.replace("-", " "))   # "PA-08" → "pa 08"
+            kws.add(d.replace("-", ""))    # "PA-08" → "pa08" (hashtag/handle form)
+        # Harvest distinctive CITY tokens from config.location. We still do
+        # NOT add the verbatim string ("Scranton/Wilkes-Barre, PA-08" never
+        # appears in real posts), but the individual city names do — and they
+        # materially broaden recall ("scranton" is this module's own canonical
+        # keyword, see the docstring). Place-name fragments are noisier than
+        # surnames, so these are the likeliest terms to need tuning; the
+        # BLUESKY_BLOCK_KEYWORDS env hatch exists for exactly that.
+        if getattr(config, "location", None):
+            # Strip the district code so "PA-08" isn't re-split into junk.
+            loc = re.sub(r"\bPA[- ]?\d{2}\b", " ", config.location, flags=re.IGNORECASE)
+            for tok in re.split(r"[^A-Za-z]+", loc):
+                t = tok.lower()
+                if len(t) >= 4 and t not in _GEO_STOPWORDS:
+                    kws.add(t)
 
     for opp in db.query(Opponent).all():
         if opp.name:
@@ -141,6 +242,11 @@ def _build_keyword_set(db) -> set[str]:
     BLOCK = {"the", "for", "and", "of", "or", "rep", "sen", "rev", "dr",
              "mr", "mrs", "ms", "us", "pa", "ca", "ny", "tx"}
     kws = {k for k in kws if k and k not in BLOCK and len(k) >= 4}
+
+    # User escape hatches: extras bypass the guard above; blocks win last.
+    extra, blocked = _load_keyword_overrides()
+    kws |= extra
+    kws -= blocked
     return kws
 
 
@@ -243,6 +349,8 @@ def _event_to_fields(event: dict, matched_kw: str) -> Optional[dict]:
         title = title.rstrip() + "…"
     if not title:
         title = "Bluesky post"
+    from app.services.ingestion import clean_title as _clean_title
+    title = _clean_title(title) or "Bluesky post"
 
     return {
         "title": title,
@@ -260,7 +368,7 @@ def _event_to_fields(event: dict, matched_kw: str) -> Optional[dict]:
 async def _firehose_loop():
     """The long-running asyncio task. Connects, reads, filters, batches,
     commits. Reconnects on disconnect with exponential backoff."""
-    global _running
+    global _running, _last_event_monotonic
     import websockets
     from app.db import SessionLocal
 
@@ -283,6 +391,11 @@ async def _firehose_loop():
             ) as ws:
                 backoff = _BACKOFF_INITIAL_S
                 logger.info("bluesky_firehose: connected")
+                # Start the wedge clock at connect: a socket that connects
+                # then never delivers a frame is exactly the silent failure
+                # the watchdog must catch (without this, _last_event_monotonic
+                # would stay None and the wedge would read as "ok").
+                _last_event_monotonic = time.monotonic()
 
                 batch: list[dict] = []
                 batch_started_at = asyncio.get_event_loop().time()
@@ -291,6 +404,7 @@ async def _firehose_loop():
                     if not _running:
                         break
                     _stats["events_seen"] += 1
+                    _last_event_monotonic = time.monotonic()
 
                     # Refresh keywords every ~10 min so adding an opponent
                     # starts matching without a restart.
@@ -398,3 +512,23 @@ def stop_firehose():
     if _task and not _task.done():
         _task.cancel()
         _task = None
+
+
+async def restart(reason: str = "") -> None:
+    """Stop and re-spawn the firehose task. Async on purpose.
+
+    The await between stop and start is load-bearing: stop_firehose() merely
+    *schedules* a CancelledError on the old task; the sleep yields control so
+    the loop actually delivers it (the old _firehose_loop catches it, sets
+    _running=False, and returns) BEFORE we create the replacement. Skipping
+    the yield would let the dying task's `_running = False` race the new
+    task's `_running = True` and immediately stop the fresh loop.
+
+    Called by the scheduler watchdog when get_health() reports dead/wedged.
+    """
+    global _last_event_monotonic
+    logger.warning("bluesky_firehose: restart requested (%s)", reason or "manual")
+    stop_firehose()
+    _last_event_monotonic = None  # fresh wedge clock for the new connection
+    await asyncio.sleep(_RESTART_GRACE_S)
+    start_firehose()

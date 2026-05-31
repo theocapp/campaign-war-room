@@ -205,7 +205,17 @@ def _polymarket_extract_metadata(event: dict, slug: str) -> Optional[dict]:
         return None
 
     def _yes_token(m):
+        # Gamma sometimes returns clobTokenIds as a JSON-encoded string
+        # (e.g. '["91...", "98..."]') rather than a real array — silently
+        # indexing into the string yields "[", which then makes downstream
+        # CLOB calls fail with a 400. Parse if it's a string.
         tokens = m.get("clobTokenIds") or []
+        if isinstance(tokens, str):
+            import json
+            try:
+                tokens = json.loads(tokens)
+            except Exception:
+                return ""
         return tokens[0] if tokens else ""
 
     return {

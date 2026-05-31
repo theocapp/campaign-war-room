@@ -14,10 +14,10 @@ export type NotificationKind =
   | 'spike'
   | 'review_queue'
   | 'proposed_narratives'
-  | 'kg_contradictions'
   | 'viral'
   | 'opponent_attack'
   | 'briefing'
+  | 'ingestion_quality'
 
 export interface Notification {
   /** Stable id used for read/dismiss tracking across reloads. */
@@ -37,9 +37,9 @@ export interface NotificationSettings {
     opponent_attacks: boolean
     review_queue_full: boolean
     proposed_narratives_pending: boolean
-    kg_contradictions_pending: boolean
     viral_narratives: boolean
     daily_briefing: boolean
+    ingestion_quality: boolean
   }
   channels: {
     email: { enabled: boolean; address: string }
@@ -106,12 +106,12 @@ export async function fetchNotifications(): Promise<Notification[]> {
   const out: Notification[] = []
 
   // Run independently so one failure doesn't sink the rest.
-  const [spikes, queueCount, frames, proposals, kg] = await Promise.allSettled([
+  const [spikes, queueCount, frames, proposals, ingestionAlerts] = await Promise.allSettled([
     api.spikes(),
     api.reviewQueueCount(),
     api.narrativeFrames(),
     api.narrativeProposalsSnapshot(),
-    api.entityReviewQueue(),
+    api.ingestionAlerts(),
   ])
 
   // Build a frame lookup so spike alerts can use the frame's last_seen_at
@@ -175,26 +175,6 @@ export async function fetchNotifications(): Promise<Notification[]> {
     }
   }
 
-  // KG contradictions alert — pairs where the graph has both support- and
-  // opposition-type relations against the same target. Threshold of 1 so
-  // even a single contradiction surfaces; the user can filter on the page.
-  if (
-    settings.triggers.kg_contradictions_pending &&
-    kg.status === 'fulfilled'
-  ) {
-    const n = kg.value.summary?.contradictions ?? 0
-    if (n >= 1) {
-      out.push({
-        id: 'kg-contradictions-pending',
-        kind: 'kg_contradictions',
-        title: `${n} KG contradiction${n === 1 ? '' : 's'} pending`,
-        body: 'Resolve in the KG Contradictions tab',
-        timestamp: now, // overridden below
-        href: '/review?tab=kg',
-      })
-    }
-  }
-
   // Viral narratives — momentum_signal === 'viral'.
   if (settings.triggers.viral_narratives && frames.status === 'fulfilled') {
     for (const f of frames.value) {
@@ -208,6 +188,31 @@ export async function fetchNotifications(): Promise<Notification[]> {
           href: `/narratives/${f.id}`,
         })
       }
+    }
+  }
+
+  // Ingestion-quality alerts — surface per-source body-length collapses
+  // and gone-silent feeds. Detector runs every 6h server-side; alerts
+  // persist across reloads via the backend table. The id ties to the
+  // backend row so dismissal stays sticky if the same source re-fires.
+  if (settings.triggers.ingestion_quality && ingestionAlerts.status === 'fulfilled') {
+    for (const a of ingestionAlerts.value.alerts) {
+      const title = a.kind === 'silent'
+        ? `Feed silent: ${a.source_name}`
+        : `Feed quality dropped: ${a.source_name}`
+      const body = a.kind === 'silent'
+        ? `No items in 24h — normally ${Math.round((a.sample_count_7d ?? 0) / 29)}/day`
+        : a.baseline_avg_len && a.current_avg_len
+          ? `Avg body length ${Math.round(a.baseline_avg_len)} → ${Math.round(a.current_avg_len)} chars`
+          : 'Body length collapsed vs trailing 7-day baseline'
+      out.push({
+        id: `ingestion-${a.kind}-${a.id}`,
+        kind: 'ingestion_quality',
+        title,
+        body,
+        timestamp: a.detected_at || now,
+        href: '/monitors',
+      })
     }
   }
 
@@ -238,7 +243,7 @@ export async function fetchNotifications(): Promise<Notification[]> {
   // resetting to "just now" on every refresh.
   const firstSeen = recordFirstSeen(live.map(n => n.id), now)
   const queueLikeKinds: NotificationKind[] = [
-    'review_queue', 'proposed_narratives', 'kg_contradictions',
+    'review_queue', 'proposed_narratives',
   ]
   for (const n of live) {
     if (queueLikeKinds.includes(n.kind) && firstSeen[n.id]) {
@@ -320,9 +325,9 @@ const DEFAULT_SETTINGS: NotificationSettings = {
     opponent_attacks: true,
     review_queue_full: true,
     proposed_narratives_pending: true,
-    kg_contradictions_pending: true,
     viral_narratives: true,
     daily_briefing: false,
+    ingestion_quality: true,
   },
   channels: {
     email:  { enabled: false, address: '' },

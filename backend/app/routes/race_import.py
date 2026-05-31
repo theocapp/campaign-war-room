@@ -10,8 +10,13 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import CampaignConfig, Opponent, RssFeed, ManualSourceReminder
 from app.schemas import RaceImportResult
+from app.services.access_codes import require_admin
 
 router = APIRouter()
+
+# Bulk CSV import overwrites the campaign profile and mass-creates opponents /
+# feeds / reminders — a privileged config mutation, so gate it.
+_admin_only = [Depends(require_admin)]
 
 _VALID_TYPES = {"campaign", "opponent", "rss_feed", "reminder"}
 
@@ -27,7 +32,7 @@ def _parse_date(s: str) -> Optional[datetime]:
     return None
 
 
-@router.post("/race/import-csv", response_model=RaceImportResult)
+@router.post("/race/import-csv", response_model=RaceImportResult, dependencies=_admin_only)
 async def import_race_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     content = await file.read()
     try:

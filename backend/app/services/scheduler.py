@@ -4,7 +4,7 @@ Background scheduler for automated RSS ingestion.
 Controlled by two environment variables (set in .env or shell):
 
     RSS_AUTO_INGEST_ENABLED          true | false   (default: true)
-    RSS_AUTO_INGEST_INTERVAL_MINUTES integer        (default: 60)
+    RSS_AUTO_INGEST_INTERVAL_MINUTES integer        (default: 30)
 
 The scheduler uses APScheduler's AsyncIOScheduler so it integrates cleanly
 with FastAPI's asyncio event loop.  The actual ingestion work is offloaded to
@@ -261,23 +261,26 @@ def _run_crawler() -> None:
 
 
 def _run_reddit() -> None:
-    """Sync: ingest Reddit via two paths.
+    """Sync: ingest Reddit via the direct JSON API.
 
-    1. Direct Reddit JSON API (`ingest_reddit`) — fast-fails on 403 when
-       unauthed (which is the post-2024 default; needs OAuth wired up).
-    2. Tavily-backed Reddit search (`ingest_tavily_reddit`) — works when
-       SEARCH_PROVIDER=tavily + TAVILY_API_KEY are set; no Reddit auth
-       needed at all.
+    Fast-fails on 403 when unauthed (which is the post-2024 default; needs
+    OAuth wired up to be productive). Stays at the 30-min cadence so that
+    once OAuth is wired up the firehose is responsive — direct Reddit is
+    free, no API credits at stake.
+
+    The Tavily-backed Reddit path was split into `_run_reddit_via_tavily`
+    on 2026-05-29 so it can run on a slower cadence: every Tavily call
+    spends paid credits, and the 30-min × ~10-query cadence was burning
+    ~14k credits/month (well past the free tier's 1000/mo cap per key).
 
     Google News Reddit feeds (added in source_discovery.py) come in via
     the normal RSS path — not handled here, they're regular monitors.
     """
     from app.db import SessionLocal
     from app.services.ingestion_reddit import ingest_reddit
-    from app.services.tavily_reddit import ingest_tavily_reddit
     from app.routes import ingest as ingest_routes
 
-    log.info("Scheduled Reddit ingestion starting")
+    log.info("Scheduled Reddit (direct) ingestion starting")
     try:
         with SessionLocal() as db:
             direct = ingest_reddit(db)
@@ -288,7 +291,24 @@ def _run_reddit() -> None:
         )
     except Exception:
         log.exception("Reddit direct ingestion failed")
-    # Tavily path — runs alongside, no-op if not configured.
+
+
+def _run_reddit_via_tavily() -> None:
+    """Sync: ingest Reddit posts/comments via Tavily search.
+
+    Runs on a slower cadence than direct Reddit because every query spends
+    Tavily credits (1 credit per basic search; free tier caps at 1000/mo
+    per key). At every 4h × ~10 keyword queries, this consumes ~1800
+    credits/month total across the rotation — comfortably inside a single
+    free-tier key or one Bootstrap-plan account.
+
+    No-op when SEARCH_PROVIDER is mock or TAVILY_API_KEY isn't set; the
+    underlying service short-circuits in that case.
+    """
+    from app.db import SessionLocal
+    from app.services.tavily_reddit import ingest_tavily_reddit
+
+    log.info("Scheduled Reddit via Tavily ingestion starting")
     try:
         with SessionLocal() as db:
             tav = ingest_tavily_reddit(db)
@@ -633,8 +653,9 @@ def _resume_pipeline_if_needed() -> None:
             if not campaign or not getattr(campaign, "extended_backfill_completed", False):
                 return  # backfill hasn't run yet — nothing to resume
 
-            # Check for unscored articles (rescore needed)
-            unscored = db.query(SourceItem.id).filter(SourceItem.summary.is_(None)).count()
+            # Check for unscored articles (rescore needed). Must use
+            # race_relevance_score, not summary — see comment in rescore.start_rescore.
+            unscored = db.query(SourceItem.id).filter(SourceItem.race_relevance_score.is_(None)).count()
             if unscored > 0:
                 log.info(
                     "pipeline_resume: backfill done, %d unscored articles — resuming rescore+rematch",
@@ -697,15 +718,23 @@ def _run_google_trends() -> None:
 
 
 def _run_twitter_recheck() -> None:
-    """Sync: re-probe Nitter for any twitter_profile monitors without a feed."""
+    """Sync: resolve twitter_profile monitors without a feed, AND self-heal
+    already-registered Nitter feeds whose pinned instance has gone dark."""
     from app.db import SessionLocal
-    from app.services.twitter_scraper import recheck_failed_twitter_monitors
+    from app.services.twitter_scraper import (
+        recheck_failed_twitter_monitors,
+        refresh_stale_twitter_feeds,
+    )
 
     log.info("Twitter/Nitter recheck starting")
     try:
         with SessionLocal() as db:
             resolved = recheck_failed_twitter_monitors(db)
-        log.info("Twitter/Nitter recheck complete: newly_resolved=%d", resolved)
+            stats = refresh_stale_twitter_feeds(db)
+        log.info(
+            "Twitter/Nitter recheck complete: newly_resolved=%d stale_check=%s",
+            resolved, stats,
+        )
     except Exception:
         log.exception("Twitter/Nitter recheck failed")
 
@@ -723,6 +752,92 @@ def _run_journalist_discovery() -> None:
         log.info("journalist_discovery: done — %s", result)
     except Exception:
         log.exception("journalist_discovery failed")
+
+
+def _run_ingestion_health_check() -> None:
+    """Daily ingestion-quality health check.
+
+    Compares each source's trailing-24h avg raw_text length against the
+    trailing-7d baseline and writes alerts to `ingestion_health_alerts`
+    when a source's body content collapses. Catches feed-format
+    regressions like the 2026-05-26 Google News body-excerpt collapse
+    that went unnoticed for 3 days because article counts looked fine.
+
+    Also runs the silent-source detector: a source historically posting
+    ≥1 item/day but with 0 items in the last 24h.
+
+    Idempotent — alerts mutate in place. Surfaced to the dashboard via
+    `/api/health/ingestion-alerts` (read) and the notifications bell.
+    """
+    from app.db import SessionLocal
+    from app.services.ingestion_health import run_health_check
+
+    log.info("ingestion_health_check: starting")
+    try:
+        with SessionLocal() as db:
+            result = run_health_check(db)
+        log.info("ingestion_health_check: done — %s", result)
+    except Exception:
+        log.exception("ingestion_health_check failed")
+
+
+def _run_youtube_discovery() -> None:
+    """Weekly YouTube channel discovery for outlets + candidates.
+
+    Scrapes outlet homepages for YouTube links and asks the judge LLM
+    for candidate handles, verifying each before adding. Idempotent —
+    subjects with existing YouTube feeds are skipped.
+
+    Cadence: weekly. Outlets rarely add/remove their YouTube channels;
+    candidates' channels are stable across an election cycle. Weekly is
+    enough to catch newly-onboarded outlets that the daily outlet
+    rediscovery added.
+
+    Cost: pure HTTP for outlets, ~1 LLM call per candidate/opponent
+    (~$0.0005 each). Bounded — only attempts subjects without an
+    existing YouTube feed.
+    """
+    from app.db import SessionLocal
+    from app.services.youtube_discovery import run_youtube_discovery
+
+    log.info("youtube_discovery_weekly: starting")
+    try:
+        with SessionLocal() as db:
+            result = run_youtube_discovery(db)
+        log.info(
+            "youtube_discovery_weekly: done — checked=%d added=%d verify_failed=%d no_handle=%d",
+            result.get("checked", 0), result.get("added", 0),
+            result.get("verify_failed", 0), result.get("no_link_or_handle", 0),
+        )
+    except Exception:
+        log.exception("youtube_discovery_weekly failed")
+
+
+def _run_dedup_merge() -> None:
+    """Daily duplicate-merge sweep across the trailing 7 days.
+
+    Catches the long-tail of duplicates that the inline ingest-time check
+    misses — the inline path only scans candidates from the trailing 14
+    days for performance reasons. This batch pass has no candidate-age
+    limit, so stubs whose canonical was published weeks earlier still
+    get linked.
+
+    Cost: pure SQL + Python string matching, no LLM. Idempotent (rows
+    already marked `archived_as_irrelevant=True` skip in `merge_duplicates`).
+    """
+    from app.db import SessionLocal
+    from app.services.dedup_merge import run_dedup_merge
+
+    log.info("dedup_merge_daily: starting")
+    try:
+        with SessionLocal() as db:
+            # hours_back=168 (7d) is the window of items we look at as
+            # potential stubs. The canonical lookup itself has no window
+            # constraint inside find_duplicate_pairs.
+            result = run_dedup_merge(db, hours_back=168, max_stubs=2000)
+        log.info("dedup_merge_daily: done — %s", result)
+    except Exception:
+        log.exception("dedup_merge_daily failed")
 
 
 def _run_frame_momentum() -> None:
@@ -861,6 +976,35 @@ def _run_bluesky_poll() -> None:
             log.info("bluesky_poll: %s", result)
     except Exception:
         log.exception("bluesky_poll failed")
+
+
+async def _run_firehose_watchdog() -> None:
+    """Every 5 min: (re)start the Bluesky firehose if it isn't healthy.
+
+    The firehose is a long-running asyncio task, NOT an APScheduler job — so
+    if it crashes, or its socket silently wedges (connected but delivering
+    nothing), there's otherwise nothing to revive it. This job polls
+    get_health() and, whenever the firehose is supposed to be on (env gate
+    below) but reports anything other than "ok", calls restart(). That covers
+    three cases with one path: dead task, wedged socket, and a firehose that
+    failed to start at boot (state "disabled" while the env says it's on).
+
+    Async on purpose: restart() must await between cancel and re-spawn, and
+    start_firehose() needs a running loop — both satisfied by running here on
+    the scheduler's own event loop rather than in the sync thread pool.
+    """
+    if os.environ.get("BLUESKY_FIREHOSE_ENABLED", "true").lower() == "false":
+        return
+    from app.services import bluesky_firehose as fh
+
+    health = fh.get_health()
+    if health.get("state") == "ok":
+        return
+    log.warning("firehose watchdog: unhealthy — restarting. health=%s", health)
+    try:
+        await fh.restart(reason=f"watchdog:{health.get('state')}")
+    except Exception:
+        log.exception("firehose watchdog: restart failed")
 
 
 def _run_gdelt_realtime() -> None:
@@ -1004,6 +1148,46 @@ def _run_race_sentiment_forecaster_sync() -> None:
         log.exception("Scheduled race sentiment FORECASTER sync failed with an unhandled exception")
 
 
+def _run_race_sentiment_startup_catchup() -> None:
+    """Startup: sync race-sentiment sources that the interval timer would
+    otherwise leave stale.
+
+    APScheduler interval jobs schedule their first run at now+interval. In
+    dev the backend runs with --reload and restarts on every file save, so
+    the 2h market timer keeps getting reset and may never actually fire —
+    the markets sit stale. This mirrors _run_analytics_startup_catchup: on
+    boot, if the newest row of a given type is older than its sync cadence,
+    kick a one-off sync now. Idempotent and gated on freshness, so a normal
+    boot with fresh data is a no-op.
+    """
+    from datetime import timedelta
+    from sqlalchemy import func
+    from app.db import SessionLocal
+    from app.models import RaceSentiment
+
+    now = datetime.utcnow()
+    market_cutoff = now - timedelta(hours=2)        # market sync cadence
+    forecaster_cutoff = now - timedelta(hours=12)   # forecaster sync cadence
+    try:
+        with SessionLocal() as db:
+            market_latest = db.query(func.max(RaceSentiment.last_synced_at)).filter(
+                RaceSentiment.source_type == "market"
+            ).scalar()
+            forecaster_latest = db.query(func.max(RaceSentiment.last_synced_at)).filter(
+                RaceSentiment.source_type == "rating"
+            ).scalar()
+    except Exception:
+        log.exception("race sentiment startup catch-up: staleness check failed")
+        return
+
+    if market_latest is None or market_latest < market_cutoff:
+        log.info("race sentiment startup catch-up: market data stale/missing — syncing")
+        _run_race_sentiment_market_sync()
+    if forecaster_latest is None or forecaster_latest < forecaster_cutoff:
+        log.info("race sentiment startup catch-up: forecaster data stale/missing — syncing")
+        _run_race_sentiment_forecaster_sync()
+
+
 def start_scheduler() -> None:
     """Start the background scheduler.  Called once during app startup."""
     global _scheduler
@@ -1040,15 +1224,34 @@ def start_scheduler() -> None:
         coalesce=True,
         replace_existing=True,
     )
-    # Reddit: every 30 minutes. The unauthed JSON API allows ~60 req/min;
-    # our run does ~20-30 req each (subreddits × terms + site-wide + comments),
-    # well under the threshold. 30-min cadence catches local-subreddit
-    # discussion within half an hour of posting.
+    # Reddit (direct): every 30 minutes. The unauthed JSON API allows
+    # ~60 req/min; our run does ~20-30 req each (subreddits × terms +
+    # site-wide + comments), well under the threshold. 30-min cadence
+    # catches local-subreddit discussion within half an hour of posting.
     _scheduler.add_job(
         _run_reddit,
         trigger="interval",
         minutes=30,
         id="reddit_auto",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Reddit via Tavily: every 4 hours. Slower than the direct path because
+    # each query spends paid Tavily credits — at ~10 keywords/run the prior
+    # 30-min cadence was burning ~14k credits/month (well past free tier).
+    # 4h still catches local-race signal within the same day. Bump via
+    # `TAVILY_REDDIT_INTERVAL_HOURS` env if you want it more or less
+    # aggressive.
+    try:
+        tavily_reddit_hours = int(os.environ.get("TAVILY_REDDIT_INTERVAL_HOURS", "4"))
+    except ValueError:
+        tavily_reddit_hours = 4
+    _scheduler.add_job(
+        _run_reddit_via_tavily,
+        trigger="interval",
+        hours=tavily_reddit_hours,
+        id="reddit_via_tavily",
         max_instances=1,
         coalesce=True,
         replace_existing=True,
@@ -1133,6 +1336,19 @@ def start_scheduler() -> None:
         coalesce=True,
         replace_existing=True,
     )
+    # Bluesky firehose watchdog: every 5 minutes — revives the long-running
+    # jetstream task if it has died or its socket has silently wedged. The
+    # 5-min interval is what _WEDGE_STALL_S (240s) is tuned against: one flat
+    # poll is enough to trip a restart.
+    _scheduler.add_job(
+        _run_firehose_watchdog,
+        trigger="interval",
+        minutes=5,
+        id="bluesky_firehose_watchdog",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
     # Frame momentum: daily — classifies each frame's momentum signal by
     # joining article volume with Google Trends interest. Surfaces viral /
     # missing-coverage / elite-only narratives.
@@ -1141,6 +1357,44 @@ def start_scheduler() -> None:
         trigger="interval",
         hours=24,
         id="frame_momentum_daily",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Ingestion-quality health check: every 6h — flags per-source body-length
+    # collapses and gone-silent feeds. 6h cadence so a regression is caught
+    # within a working day; the underlying baseline window is 7d so the
+    # signal-to-noise stays solid even at this frequency.
+    _scheduler.add_job(
+        _run_ingestion_health_check,
+        trigger="interval",
+        hours=6,
+        id="ingestion_health_check",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # Dedup merge: every 24h — long-tail catch for duplicates the inline
+    # ingest check missed (inline scans only the trailing 14d for
+    # performance; this batch has no candidate-age limit). Pure SQL +
+    # Python, no LLM cost.
+    _scheduler.add_job(
+        _run_dedup_merge,
+        trigger="interval",
+        hours=24,
+        id="dedup_merge_daily",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    # YouTube discovery: weekly — find direct channel feeds for outlets
+    # (via homepage scrape) and candidates (LLM + verification).
+    # Catches newly-onboarded outlets that the outlet rediscovery added.
+    _scheduler.add_job(
+        _run_youtube_discovery,
+        trigger="interval",
+        days=7,
+        id="youtube_discovery_weekly",
         max_instances=1,
         coalesce=True,
         replace_existing=True,
@@ -1195,12 +1449,20 @@ def start_scheduler() -> None:
         coalesce=True,
         replace_existing=True,
     )
-    # GDELT real-time: every 15 minutes — catches articles from outlets we
+    # GDELT real-time: every 30 minutes — catches articles from outlets we
     # don't have RSS feeds for; feeds into the normal ingest pipeline.
+    #
+    # 2026-05-30: bumped from 15 → 30 min. The prior 15-min cadence with
+    # a 30-min lookback meant every poll re-fetched the same window twice
+    # and burned the GDELT per-IP rate limit on duplicates — gdelt_realtime
+    # was delivering only 11 articles in 7 days because nearly every call
+    # was being 429'd. Pairs with the wider lookback + inter-query pacing
+    # + cool-off in `gdelt_monitor.py`. Net expected effect: ~3-5× the
+    # realtime yield without changing infrastructure.
     _scheduler.add_job(
         _run_gdelt_realtime,
         trigger="interval",
-        minutes=15,
+        minutes=30,
         id="gdelt_realtime",
         max_instances=1,
         coalesce=True,
@@ -1343,6 +1605,15 @@ def start_scheduler() -> None:
         _run_analytics_startup_catchup,
         trigger="date",
         id="analytics_startup_catchup",
+        replace_existing=True,
+    )
+    # Race-sentiment catch-up: the market (2h) and forecaster (12h) interval
+    # jobs don't fire until their interval elapses, and dev --reload keeps
+    # resetting those timers — so refresh now if the data is stale/missing.
+    _scheduler.add_job(
+        _run_race_sentiment_startup_catchup,
+        trigger="date",
+        id="race_sentiment_startup_catchup",
         replace_existing=True,
     )
     _scheduler.start()

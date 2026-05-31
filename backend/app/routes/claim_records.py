@@ -170,5 +170,5 @@ def get_claim_record(record_id: int, db: Session = Depends(get_db)):
         db.query(Entity).filter(Entity.id.in_(entity_ids)).all()
         if entity_ids else []
     )
-    outlet = db.query(Outlet).get(article.outlet_id) if article and article.outlet_id else None
+    outlet = db.get(Outlet, article.outlet_id) if article and article.outlet_id else None
     return _record_payload(cr, entities, article, outlet)

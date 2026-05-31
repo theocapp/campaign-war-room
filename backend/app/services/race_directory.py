@@ -356,6 +356,7 @@ def select_directory_race(
     campaign.candidate_name = selected.candidate_name
     campaign.party = selected.party
     campaign.race = race.race_name
+    campaign.directory_race_id = race.id
     campaign.district = race.district_label
     campaign.office = race.office_name
     campaign.location = race.geography_summary or race.state

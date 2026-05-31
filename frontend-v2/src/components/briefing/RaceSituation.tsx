@@ -1,9 +1,35 @@
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, Pencil, RotateCcw, X } from 'lucide-react'
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { api } from '@/api/client'
 import type { BriefingClaim, GroundedMemo } from '@/api/types'
+import { useAuth } from '@/auth/AuthContext'
 import { formatArticleDate } from '@/lib/formatDate'
+
+// Override keys must match BRIEFING_OVERRIDE_KEYS in
+// backend/app/services/briefing_summary.py. Backend allow-lists these.
+const OVERRIDE_KEY_HEADLINE = 'briefing.memo.headline'
+const OVERRIDE_KEY_TEXT = 'briefing.memo.text'
+
+function formatRelativeShort(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  // Backend emits naive UTC ISO strings (datetime.utcnow().isoformat()) with
+  // no timezone suffix. Date.parse() interprets those as LOCAL time, which
+  // is wrong — server is UTC. Append Z when missing so the parse is correct
+  // regardless of the user's timezone.
+  const hasTZ = /Z$|[+-]\d{2}:?\d{2}$/.test(iso)
+  const t = Date.parse(hasTZ ? iso : iso + 'Z')
+  if (Number.isNaN(t)) return null
+  const ms = Date.now() - t
+  if (ms < 60_000) return 'just now'
+  const mins = Math.floor(ms / 60_000)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ago`
+}
 
 /**
  * Auto-fits a one-line heading to its container width.
@@ -111,6 +137,11 @@ function isGroundedMemo(m: unknown): m is GroundedMemo {
 
 interface Props {
   memo: GroundedMemo | string | null | undefined
+  // Called when the admin clears an override and we need the parent to
+  // refetch the briefing so the LLM-generated original comes back. Without
+  // this we'd be stuck showing the overridden value until the Dashboard's
+  // 60s timer ticks. No-op when undefined (e.g. v1 prose path).
+  onRequestRefresh?: () => void | Promise<void>
 }
 
 /**
@@ -118,18 +149,37 @@ interface Props {
  * v=2 (grounded) renders prose with [Cn] citation markers that link to the
  * cited article. v=1 (legacy string) is still accepted for backward compat
  * but the homepage always requests v=2.
+ *
+ * Admin inline editing: when the logged-in user is an admin, a pencil icon
+ * appears next to the headline and body. Click → inline editor. Save →
+ * backend stores the override pinned to the current input_hash so it
+ * auto-clears when the underlying inputs materially change. Cleared via
+ * the "Refresh from AI" button or by enough new news arriving to change
+ * the hash.
  */
-export function RaceSituation({ memo }: Props) {
-  if (!memo) return null
+export function RaceSituation({ memo, onRequestRefresh }: Props) {
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
 
-  const grounded = isGroundedMemo(memo)
+  // Local mirror of the memo prop. Edits update this immediately so the
+  // page reflects the saved override without waiting for the next briefing
+  // refetch. When a fresh briefing arrives via prop change, we resync.
+  const [localMemo, setLocalMemo] = useState(memo)
+  useEffect(() => { setLocalMemo(memo) }, [memo])
+
+  const grounded = isGroundedMemo(localMemo)
+
+  const [editingHeadline, setEditingHeadline] = useState(false)
+  const [editingBody, setEditingBody] = useState(false)
+
+  if (!localMemo) return null
 
   // V5 — "Linear headline" treatment. Tiny BRIEFING label above a punchy
   // 1-line headline (LLM-generated) that summarizes the take. The body
   // memo runs in smaller muted prose below — the headline is the focus,
   // body provides the evidence. Headline only renders if the backend
   // produced one; falls back to body-only gracefully.
-  const headline = grounded ? memo.headline : null
+  const headline = grounded ? localMemo.headline : null
   const h2Ref = useRef<HTMLHeadingElement>(null)
   // Auto-fit so the headline fills the column width — short headlines
   // scale up, long ones scale down. Max 80px is generous enough that
@@ -141,55 +191,402 @@ export function RaceSituation({ memo }: Props) {
   // blow up close to the cap — that's an accepted edge case; the prompt
   // strongly prefers ~85-char headlines anyway.
   const headlineFontSize = useAutoFitFontSize(h2Ref, headline, { minPx: 18, maxPx: 80, fill: 1.0 })
+
+  async function saveHeadline(value: string): Promise<void> {
+    if (!grounded) return
+    const updated = await api.saveTextOverride(
+      OVERRIDE_KEY_HEADLINE, value, localMemo.input_hash ?? null,
+    )
+    setLocalMemo({
+      ...localMemo,
+      headline: updated.value,
+      overridden_headline: true,
+      overridden_by: updated.created_by_name,
+      overridden_at: updated.updated_at ?? updated.created_at,
+    })
+    setEditingHeadline(false)
+  }
+
+  async function saveBody(value: string): Promise<void> {
+    if (!grounded) return
+    const updated = await api.saveTextOverride(
+      OVERRIDE_KEY_TEXT, value, localMemo.input_hash ?? null,
+    )
+    setLocalMemo({
+      ...localMemo,
+      text: updated.value,
+      overridden_text: true,
+      overridden_by: updated.created_by_name,
+      overridden_at: updated.updated_at ?? updated.created_at,
+    })
+    setEditingBody(false)
+  }
+
+  async function clearOverrides(): Promise<void> {
+    if (!grounded) return
+    const tasks: Promise<unknown>[] = []
+    if (localMemo.overridden_headline) tasks.push(api.clearTextOverride(OVERRIDE_KEY_HEADLINE))
+    if (localMemo.overridden_text) tasks.push(api.clearTextOverride(OVERRIDE_KEY_TEXT))
+    await Promise.allSettled(tasks)
+    // Optimistically drop the override flags so the indicator hides
+    // immediately; the parent refetch will replace localMemo with the
+    // fresh AI text once the briefing call resolves.
+    setLocalMemo({
+      ...localMemo,
+      overridden_headline: false,
+      overridden_text: false,
+      overridden_by: null,
+      overridden_at: null,
+    })
+    if (onRequestRefresh) await onRequestRefresh()
+  }
+
+  const isOverridden = grounded && (
+    !!localMemo.overridden_headline || !!localMemo.overridden_text
+  )
+  const overrideRelative = grounded ? formatRelativeShort(localMemo.overridden_at) : null
+
   return (
-    <section style={{ marginBottom: 32 }}>
-      <div style={{
-        fontSize: 10, fontWeight: 700, color: 'var(--text-3)',
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-      }}>
-        The read
-      </div>
-      {headline && (
+    <section style={{ marginBottom: 16 }}>
+      {editingHeadline && grounded ? (
+        <InlineHeadlineEditor
+          initial={headline ?? ''}
+          onSave={saveHeadline}
+          onCancel={() => setEditingHeadline(false)}
+        />
+      ) : headline ? (
         // Font size is auto-fit by useAutoFitFontSize above so the
         // headline always fills the line regardless of length. Single
         // line enforced by white-space: nowrap; if the headline is so
         // long the minimum size still overflows, text-overflow: ellipsis
         // truncates instead of wrapping.
-        <h2
-          ref={h2Ref}
-          style={{
-            margin: '0 0 14px 0',
-            fontSize: headlineFontSize,
-            fontWeight: 700,
-            color: 'var(--text-1)',
-            lineHeight: 1.3,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
+        <EditableRow
+          showPencil={isAdmin && grounded}
+          onPencil={() => setEditingHeadline(true)}
+          pencilLabel="Edit headline"
         >
-          {headline}
-        </h2>
-      )}
+          <h2
+            ref={h2Ref}
+            style={{
+              margin: '0 0 14px 0',
+              fontSize: headlineFontSize,
+              fontWeight: 700,
+              color: 'var(--text-1)',
+              lineHeight: 1.3,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {headline}
+          </h2>
+        </EditableRow>
+      ) : isAdmin && grounded ? (
+        // No LLM headline this cycle — surface a small add-headline action
+        // so admins can still author one rather than seeing a body-only memo.
+        <button
+          onClick={() => setEditingHeadline(true)}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: 'transparent', border: '1px dashed var(--border)',
+            borderRadius: 6, color: 'var(--text-3)', cursor: 'pointer',
+            fontSize: 12, padding: '4px 8px', marginBottom: 12,
+          }}
+          aria-label="Add headline"
+        >
+          <Pencil size={11} /> Add headline
+        </button>
+      ) : null}
       {grounded ? (
-        <GroundedMemoView
-          memo={memo}
-          pStyle={{ fontSize: 15, lineHeight: 1.65, color: 'var(--text-2)' }}
-        />
+        editingBody ? (
+          <InlineBodyEditor
+            initial={localMemo.text}
+            onSave={saveBody}
+            onCancel={() => setEditingBody(false)}
+          />
+        ) : (
+          <EditableRow
+            showPencil={isAdmin}
+            onPencil={() => setEditingBody(true)}
+            pencilLabel="Edit memo body"
+          >
+            <GroundedMemoView
+              memo={localMemo}
+              pStyle={{ fontSize: 15, lineHeight: 1.65, color: 'var(--text-2)' }}
+            />
+          </EditableRow>
+        )
       ) : (
         <p style={{
           margin: 0, fontSize: 15, lineHeight: 1.65, color: 'var(--text-2)',
         }}>
-          {memo as string}
+          {localMemo as string}
         </p>
       )}
-      {grounded && memo.sources_used.length > 0 && (
+      {grounded && isOverridden && (
+        // Override indicator — visible to everyone so the team knows the
+        // memo was hand-edited. Admin gets the "Refresh from AI" affordance
+        // to throw away the override on demand.
+        <div style={{
+          marginTop: 10,
+          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+          fontSize: 11, color: 'var(--text-3)',
+        }}>
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '2px 6px',
+            border: '1px solid var(--border)', borderRadius: 4,
+            background: 'var(--bg-2)',
+          }}>
+            <Pencil size={10} />
+            Edited{localMemo.overridden_by ? ` by ${localMemo.overridden_by}` : ''}
+            {overrideRelative ? ` · ${overrideRelative}` : ''}
+          </span>
+          {isAdmin && (
+            <button
+              onClick={clearOverrides}
+              title="Discard the override and show the AI-generated memo again"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                background: 'transparent', border: 'none',
+                color: 'var(--accent)', cursor: 'pointer',
+                fontSize: 11, padding: 0,
+              }}
+            >
+              <RotateCcw size={11} /> Refresh from AI
+            </button>
+          )}
+        </div>
+      )}
+      {grounded && localMemo.sources_used.length > 0 && (
         <SourcesUsedDisclosure
-          sources={memo.sources_used}
-          cited={new Set(memo.citations.map(c => c.claim_id))}
+          sources={localMemo.sources_used}
+          cited={new Set(localMemo.citations.map(c => c.claim_id))}
         />
       )}
     </section>
+  )
+}
+
+// Hover-reveal pencil. The button is always in the DOM (for keyboard /
+// touch access), just dim until pointer enters the row.
+function EditableRow({
+  showPencil, onPencil, pencilLabel, children,
+}: {
+  showPencil: boolean
+  onPencil: () => void
+  pencilLabel: string
+  children: React.ReactNode
+}) {
+  const [hover, setHover] = useState(false)
+  if (!showPencil) return <>{children}</>
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ position: 'relative' }}
+    >
+      {children}
+      <button
+        onClick={onPencil}
+        aria-label={pencilLabel}
+        title={pencilLabel}
+        style={{
+          position: 'absolute',
+          top: 0,
+          right: -4,
+          transform: 'translate(100%, 0)',
+          background: 'transparent', border: 'none',
+          color: 'var(--text-3)', cursor: 'pointer',
+          padding: 4, lineHeight: 0,
+          opacity: hover ? 1 : 0,
+          transition: 'opacity 120ms ease',
+        }}
+      >
+        <Pencil size={14} />
+      </button>
+    </div>
+  )
+}
+
+function InlineHeadlineEditor({
+  initial, onSave, onCancel,
+}: {
+  initial: string
+  onSave: (v: string) => Promise<void>
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState(initial)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { inputRef.current?.focus() }, [])
+  async function handleSave() {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      setError('Headline cannot be empty')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      await onSave(trimmed)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+      setSaving(false)
+    }
+  }
+  return (
+    <div style={{ margin: '0 0 14px 0' }}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') { e.preventDefault(); handleSave() }
+          if (e.key === 'Escape') { e.preventDefault(); onCancel() }
+        }}
+        disabled={saving}
+        style={{
+          width: '100%',
+          margin: 0,
+          padding: '4px 8px',
+          fontSize: 28,
+          fontWeight: 700,
+          color: 'var(--text-1)',
+          background: 'var(--bg-2)',
+          border: '1px solid var(--accent)',
+          borderRadius: 6,
+          fontFamily: 'inherit',
+          lineHeight: 1.3,
+          boxSizing: 'border-box',
+        }}
+      />
+      <EditorActions saving={saving} onSave={handleSave} onCancel={onCancel} error={error} />
+    </div>
+  )
+}
+
+function InlineBodyEditor({
+  initial, onSave, onCancel,
+}: {
+  initial: string
+  onSave: (v: string) => Promise<void>
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState(initial)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => { textareaRef.current?.focus() }, [])
+  async function handleSave() {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      setError('Body cannot be empty')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      await onSave(trimmed)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+      setSaving(false)
+    }
+  }
+  return (
+    <div>
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => {
+          // Cmd/Ctrl+Enter to save, Esc to cancel. Plain Enter inserts a
+          // newline like a normal multi-line field.
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault(); handleSave()
+          }
+          if (e.key === 'Escape') { e.preventDefault(); onCancel() }
+        }}
+        disabled={saving}
+        rows={Math.max(4, value.split('\n').length + 1)}
+        style={{
+          width: '100%',
+          margin: 0,
+          padding: '8px 10px',
+          fontSize: 15,
+          lineHeight: 1.65,
+          color: 'var(--text-1)',
+          background: 'var(--bg-2)',
+          border: '1px solid var(--accent)',
+          borderRadius: 6,
+          fontFamily: 'inherit',
+          boxSizing: 'border-box',
+          resize: 'vertical',
+        }}
+      />
+      <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+        Citation markers like <code>[C1]</code> stay live — leave them where
+        they should appear. ⌘/Ctrl+Enter saves, Esc cancels.
+      </div>
+      <EditorActions saving={saving} onSave={handleSave} onCancel={onCancel} error={error} />
+    </div>
+  )
+}
+
+function EditorActions({
+  saving, onSave, onCancel, error,
+}: {
+  saving: boolean
+  onSave: () => void
+  onCancel: () => void
+  error: string | null
+}) {
+  return (
+    <div style={{
+      marginTop: 8,
+      display: 'flex', alignItems: 'center', gap: 8,
+    }}>
+      <button
+        onClick={onSave}
+        disabled={saving}
+        style={{
+          background: 'var(--accent)',
+          color: '#1a1a1a',
+          border: 'none',
+          borderRadius: 4,
+          padding: '4px 12px',
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: saving ? 'wait' : 'pointer',
+          opacity: saving ? 0.6 : 1,
+        }}
+      >
+        {saving ? 'Saving…' : 'Save'}
+      </button>
+      <button
+        onClick={onCancel}
+        disabled={saving}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          background: 'transparent',
+          color: 'var(--text-2)',
+          border: '1px solid var(--border)',
+          borderRadius: 4,
+          padding: '4px 10px',
+          fontSize: 12,
+          cursor: 'pointer',
+        }}
+      >
+        <X size={11} /> Cancel
+      </button>
+      {error && (
+        <span style={{ fontSize: 11, color: 'var(--accent-error, #d71913)' }}>
+          {error}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -466,18 +863,18 @@ function SourcesUsedDisclosure({ sources, cited }: { sources: BriefingClaim[]; c
       </button>
       {open && (
         <div style={{
-          background: 'var(--bg-2)',
-          border: '1px solid var(--bg-3)',
+          background: 'var(--bg-3)',
+          border: '1px solid var(--border)',
           borderRadius: 8,
           padding: '4px 0',
         }}>
-          {citedSources.map(s => {
+          {citedSources.map((s, i) => {
             return (
               <div
                 key={s.claim_id}
                 style={{
                   padding: '12px 16px',
-                  borderTop: '1px solid var(--bg-3)',
+                  borderTop: i === 0 ? 'none' : '1px solid var(--border)',
                 }}
               >
                 <div style={{

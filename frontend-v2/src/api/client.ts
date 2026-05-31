@@ -2,7 +2,10 @@ import type {
   ArticleDetail,
   CampaignConfig,
   CandidateFrameCluster,
+  RaceDirectory,
+  RaceSelectResult,
   DotLandscape,
+  EntitySearchHit,
   EstablishedLandscape,
   FrameLandscapeDetail,
   HandleDiscoveryResult,
@@ -17,6 +20,9 @@ import type {
   NarrativeTriageVerdict,
   Opponent,
   OpponentActivity,
+  OutletSearchHit,
+  QuoteSearchHit,
+  SearchSuggestions,
   RaceSentiment,
   RaceSentimentUpdate,
   ReviewQueueItem,
@@ -31,9 +37,42 @@ import type {
 } from './types'
 
 const BASE = '/api'
+const ACCESS_CODE_KEY = 'cwr-access-code'
+
+export function getAccessCode(): string | null {
+  try { return localStorage.getItem(ACCESS_CODE_KEY) } catch { return null }
+}
+
+export function setAccessCode(code: string): void {
+  try { localStorage.setItem(ACCESS_CODE_KEY, code) } catch { /* ignore */ }
+}
+
+export function clearAccessCode(): void {
+  try { localStorage.removeItem(ACCESS_CODE_KEY) } catch { /* ignore */ }
+}
+
+// Subscribers that want to react to a forced logout (the AuthContext
+// registers one to clear React state). We dispatch via a custom DOM event
+// so the API client doesn't need to import React.
+function notifyUnauthorized() {
+  try { window.dispatchEvent(new CustomEvent('cwr:unauthorized')) } catch { /* ignore */ }
+}
 
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, options)
+  // Merge the access-code header into whatever the caller passed without
+  // clobbering Content-Type and friends.
+  const code = getAccessCode()
+  const headers = new Headers(options?.headers)
+  if (code) headers.set('X-Access-Code', code)
+  const res = await fetch(`${BASE}${path}`, { ...options, headers })
+  if (res.status === 401) {
+    // Server says our code is bad (or missing). Wipe local state and
+    // let the AuthContext bounce the user to /login. Don't recurse —
+    // throwing here means callers see a clean error too.
+    clearAccessCode()
+    notifyUnauthorized()
+    throw new Error(`${options?.method ?? 'GET'} ${path} → 401: unauthorized`)
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`${options?.method ?? 'GET'} ${path} → ${res.status}: ${text}`)
@@ -72,6 +111,16 @@ export const api = {
 
   // Setup status
   setupStatus: () => get<SetupStatus>('/setup/status'),
+
+  // Race directory — FEC-seeded snapshot of 2026 federal races. Powers the
+  // "Pick your race" picker in Setup. Selecting a race auto-fills party,
+  // district, office, location, election_date, geography_keywords, and
+  // creates Opponent rows for every other candidate in the race.
+  searchRaces: (q: string, limit = 25) =>
+    get<RaceDirectory[]>(`/races/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  getRace: (raceId: number) => get<RaceDirectory>(`/races/${raceId}`),
+  selectRace: (raceId: number, candidateId?: number) =>
+    post<RaceSelectResult>(`/races/${raceId}/select`, candidateId ? { candidate_id: candidateId } : {}),
 
   // Social handle discovery — ranks Instagram/Facebook handle candidates
   // via the configured search provider so the wizard can offer one-click
@@ -112,6 +161,20 @@ export const api = {
   morningBriefing: (v?: number) =>
     get<MorningBriefing>(`/briefing/morning${v && v > 1 ? `?v=${v}` : ''}`),
 
+  // Admin manual text overrides. Backend pins each override to the
+  // input_hash of the inputs the AI was working from when the admin
+  // edited; on the next briefing fetch, if the current hash matches,
+  // the override applies. If the hash differs (news has moved on), the
+  // backend auto-clears the row.
+  saveTextOverride: (key: string, value: string, input_hash?: string | null) =>
+    put<{
+      key: string; value: string; input_hash: string | null;
+      created_by_name: string | null;
+      created_at: string | null; updated_at: string | null;
+    }>(`/admin/text-overrides/${encodeURIComponent(key)}`, { value, input_hash: input_hash ?? null }),
+  clearTextOverride: (key: string) =>
+    del<{ cleared: boolean; key: string }>(`/admin/text-overrides/${encodeURIComponent(key)}`),
+
   // District geometry — drives the Geographic Overlay page.
   // Returns a GeoJSON FeatureCollection for the current campaign's district.
   // Backend fetches from US Census TIGERweb on first request and caches.
@@ -122,6 +185,11 @@ export const api = {
     id: string; name: string; lat: number; lon: number;
     state: string; lsad: string; aland: number;
   }> }>(`/race/cities?limit=${limit}`),
+
+  // Entity detail — profile + stats + recent articles + supporting quotes +
+  // top narrative frames the entity's coverage matches.
+  entity: (canonicalId: string) =>
+    get<import('./types').EntityDetail>(`/entities/${encodeURIComponent(canonicalId)}`),
 
   // Narrative frames
   narrativeFrames: () => get<NarrativeFrame[]>('/narrative-frames'),
@@ -319,9 +387,34 @@ export const api = {
   search: (q: string, limit = 100) =>
     get<SourceItem[]>(`/search?q=${encodeURIComponent(q)}&limit=${limit}`),
 
+  // Header dropdown — universal search across NOCTUA primitives.
+  // Backed by routes/global_search.py. Articles use api.search() above.
+  searchEntities: (q: string, limit = 5) =>
+    get<EntitySearchHit[]>(`/search/entities?q=${encodeURIComponent(q)}&limit=${limit}`),
+  searchQuotes: (q: string, limit = 5) =>
+    get<QuoteSearchHit[]>(`/search/quotes?q=${encodeURIComponent(q)}&limit=${limit}`),
+  searchOutlets: (q: string, limit = 5) =>
+    get<OutletSearchHit[]>(`/search/outlets?q=${encodeURIComponent(q)}&limit=${limit}`),
+  // Empty-state suggestions — the "Try searching" tour shown when the
+  // header dropdown is focused with no query. Ranked by last-7-day
+  // activity so the suggestions feel fresh on every focus.
+  searchSuggestions: (perType = 3) =>
+    get<SearchSuggestions>(`/search/suggestions?per_type=${perType}`),
+
+  // Log Featured-Narratives card appearances for the day. Idempotent on
+  // (frame_id, today) via a unique constraint on the backend. Frontend
+  // fires this once per dashboard mount; the count feeds the saturation
+  // penalty in lib/featuredFrame.ts on subsequent loads.
+  logFeaturedAppearance: (frame_ids: number[]) =>
+    post<{ recorded: number; day: string }>('/dashboard/featured-appearance', { frame_ids }),
+
   // Recent relevant articles (Dashboard right rail)
   recentArticles: (limit = 10) =>
     get<{ items: SourceItem[] }>(`/articles/recent?limit=${limit}`).then(r => r.items),
+  // Configured candidate + opponent display names — used by the Articles
+  // page sentiment filter to render dynamic labels per campaign.
+  campaignNames: () =>
+    get<{ candidate_name: string | null; opponent_name: string | null }>('/campaign/names'),
   // Full detail for one article — powers the article-detail modal.
   articleDetail: (id: number) => get<ArticleDetail>(`/articles/${id}`),
 
@@ -333,6 +426,26 @@ export const api = {
   // can spot-check what's being held back and tune if needed.
   reviewQueueFilteredOut: () => get<ReviewQueueItem[]>('/review-queue/filtered-out'),
   reviewQueueCount: () => get<{ count: number }>('/review-queue/count'),
+
+  // Ingestion-quality alerts — list of currently-firing per-source alerts
+  // (short-body collapse, gone-silent feed). Surfaced via the notifications
+  // bell so a feed regression like the 2026-05-26 Google News collapse
+  // doesn't go unnoticed for days. Backend job at
+  // services/ingestion_health.py runs every 6h.
+  ingestionAlerts: () =>
+    get<{
+      alerts: Array<{
+        id: number
+        source_name: string
+        kind: 'short_body' | 'silent'
+        detected_at: string | null
+        baseline_avg_len: number | null
+        current_avg_len: number | null
+        sample_count_24h: number | null
+        sample_count_7d: number | null
+        last_checked_at: string | null
+      }>
+    }>('/health/ingestion-alerts'),
   reviewItem: (id: number, note?: string) =>
     post<unknown>(`/review-queue/${id}/review`, note ? { review_note: note } : undefined),
   dismissItem: (id: number) => post<unknown>(`/review-queue/${id}/dismiss`),
@@ -649,4 +762,14 @@ export const api = {
     get<import('./types').NarrativeLifecycleEvent[]>(
       `/race-sentiment/narrative-lifecycle?stale_days=${staleDays}`,
     ),
+
+  // Friend-share access codes (see backend/app/services/access_codes.py).
+  // verifyAccessCode validates a code from the login page before we
+  // commit it to localStorage. getCurrentUser is what AuthContext calls
+  // on mount to restore session — it sends the saved code via the
+  // X-Access-Code header (added automatically in req()).
+  verifyAccessCode: (code: string) =>
+    post<{ name: string; initials: string; color: string; is_admin?: boolean }>('/auth/verify', { code }),
+  getCurrentUser: () =>
+    get<{ name: string; initials: string; color: string; is_admin?: boolean }>('/auth/me'),
 }

@@ -61,9 +61,13 @@ function usePipelineStatus(): PipelineStatus {
         const rs = p.rescore ?? { running: false, done: false }
         const rm = p.rematch ?? { running: false, done: false }
 
-        const anyRunning = bf.running || fd.running || rs.running || rm.running
-        const midStream = bf.done && (!rs.done || !rm.done)
-        const active = anyRunning || midStream
+        // Only show the banner when something is actively running. The old
+        // `midStream` heuristic (backfill done but rescore/rematch not "done")
+        // stayed true forever on settled campaigns, because rescore/rematch
+        // `done` flags live in in-memory state that resets on every backend
+        // reload. The campaign-setup checklist belongs on the Setup page,
+        // not as a persistent header banner.
+        const active = bf.running || fd.running || rs.running || rm.running
 
         const bfDetail = bf.running
           ? (bf.progress_total ?? 0) > 0
@@ -220,6 +224,8 @@ function ProfileMenu() {
 
 
 export function Layout({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
   const [queueCount, setQueueCount] = useState(0)
   const [lastSync, setLastSync] = useState<string | null>(null)
   const [district, setDistrict] = useState('PA-08')
@@ -269,7 +275,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           the collapsed sidebar (60px wide) and reads as part of the
           content area, not the sidebar. */}
       <header style={{
-        height: 48,
+        height: 50,
         flexShrink: 0,
         background: 'var(--bg-nav)',
         borderBottom: '1px solid var(--border)',
@@ -401,7 +407,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </header>
 
       {/* LLM mock warning */}
-      {mockActive && (
+      {mockActive && isAdmin && (
         <div style={{
           background: '#7f1d1d', color: '#fef2f2',
           padding: '8px 24px', fontSize: 12, fontWeight: 600,
@@ -414,8 +420,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      {/* Pipeline status banner — only during active backfill / rescore / rematch jobs */}
-      {pipeline.active && (
+      {/* Pipeline status banner — only during active backfill / rescore / rematch jobs.
+          Admin-only: non-admin viewers don't need to see internal pipeline churn. */}
+      {pipeline.active && isAdmin && (
         <div style={{
           background: '#0f2744', color: '#bfdbfe',
           borderBottom: '1px solid #1d4ed8',

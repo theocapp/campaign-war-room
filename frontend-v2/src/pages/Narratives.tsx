@@ -1,12 +1,11 @@
-import { Check, ChevronDown, ChevronRight, Edit2, Plus, RefreshCw, Search, Sparkles, X, Zap } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Check, ChevronDown, ChevronRight, Edit2, Plus, RefreshCw, Search, X, Zap } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '@/api/client'
 import { invalidateDashboard } from '@/api/dashboardCache'
 import { useAuth } from '@/auth/AuthContext'
 import type { CandidateFrameCluster, NarrativeFrame, OwnerType } from '@/api/types'
-import { InfoTooltip } from '@/components/InfoTooltip'
 import { QuadrantSelector, quadrantToTypes } from '@/components/QuadrantSelector'
 import { QuadrantPalette, quadrantKey, quadrantNamedLabel } from '@/lib/quadrantColor'
 import type { QuadrantKey } from '@/lib/quadrantColor'
@@ -591,11 +590,7 @@ function PendingSuggestionsSection({
   }
 
   return (
-    <div style={{
-      padding: '16px 28px',
-      borderBottom: `1px solid ${C.border}`,
-      background: 'linear-gradient(to bottom, rgba(255,191,0,0.06), rgba(255,191,0,0))',
-    }}>
+    <div style={{ padding: '16px 28px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <Zap size={14} color={C.accent} />
         <span style={{
@@ -735,7 +730,6 @@ function CollapsibleQuadrantCard({
       borderLeft: `3px solid ${quadrant.color}`,
       borderRadius: 8,
       marginBottom: 10,
-      overflow: 'hidden',
       transition: 'border-color 0.12s ease',
     }}>
       {/* Header — clickable, always visible */}
@@ -761,7 +755,6 @@ function CollapsibleQuadrantCard({
           display: 'inline-flex', alignItems: 'center',
         }}>
           {quadrant.title}
-          <InfoTooltip text={quadrant.description} />
         </span>
         <span style={{ flex: 1 }} />
         <span style={{
@@ -802,6 +795,166 @@ function CollapsibleQuadrantCard({
   )
 }
 
+/**
+ * Themed replacement for the native <select> quadrant filter. Native
+ * <option>s can't be styled, so the OS renders them generically (and the
+ * 🟦/🟩/🟥/🟧 emoji squares were a hack to telegraph color). This component
+ * uses real color dots from QuadrantPalette and the same bg-2/border tokens
+ * as the rest of the toolbar.
+ */
+function QuadrantFilterDropdown({
+  value,
+  onChange,
+  quadrants,
+  totalCounts,
+}: {
+  value: QuadrantFilter
+  onChange: (v: QuadrantFilter) => void
+  quadrants: QuadrantMeta[]
+  totalCounts: Record<QuadrantKey, number>
+}) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const options: Array<{ key: QuadrantFilter; label: string; color?: string; count?: number }> = [
+    { key: 'all', label: 'All quadrants' },
+    { key: 'our_defense',   label: quadrants[0].title, color: QuadrantPalette.our_defense,   count: totalCounts.our_defense },
+    { key: 'our_offense',   label: quadrants[1].title, color: QuadrantPalette.our_offense,   count: totalCounts.our_offense },
+    { key: 'their_defense', label: quadrants[2].title, color: QuadrantPalette.their_defense, count: totalCounts.their_defense },
+    { key: 'their_offense', label: quadrants[3].title, color: QuadrantPalette.their_offense, count: totalCounts.their_offense },
+  ]
+  if (totalCounts.media > 0) {
+    options.push({ key: 'media', label: 'Neutral', color: QuadrantPalette.media, count: totalCounts.media })
+  }
+
+  const active = options.find(o => o.key === value) ?? options[0]
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', width: 220 }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        title="Filter by strategic quadrant"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        style={{
+          width: '100%',
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: C.bg2,
+          border: `1px solid ${open ? C.accent : C.border}`,
+          borderRadius: '0.625rem',
+          padding: '8px 32px 8px 12px',
+          color: C.text1,
+          fontFamily: 'Inter, sans-serif',
+          fontSize: 14,
+          cursor: 'pointer',
+          position: 'relative',
+          textAlign: 'left',
+          transition: 'border-color 0.15s ease',
+        }}
+      >
+        {active.color && (
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%',
+            background: active.color, flexShrink: 0,
+          }} />
+        )}
+        <span style={{
+          flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {active.label}
+        </span>
+        <ChevronDown
+          size={12}
+          style={{
+            position: 'absolute', right: 10, top: '50%',
+            color: C.text3,
+            transition: 'transform 0.15s ease',
+            transform: open ? 'translateY(-50%) rotate(180deg)' : 'translateY(-50%)',
+          }}
+        />
+      </button>
+
+      {open && (
+        <div
+          role="listbox"
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+            background: C.bg2,
+            border: `1px solid ${C.border}`,
+            borderRadius: 8,
+            padding: 4,
+            boxShadow: 'var(--shadow-elev)',
+            zIndex: 50,
+            display: 'flex', flexDirection: 'column', gap: 1,
+            maxHeight: 320, overflowY: 'auto',
+          }}
+        >
+          {options.map(opt => {
+            const selected = opt.key === value
+            return (
+              <button
+                key={opt.key}
+                role="option"
+                aria-selected={selected}
+                onClick={() => { onChange(opt.key); setOpen(false) }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 10px',
+                  borderRadius: 5,
+                  background: selected ? C.bg3 : 'transparent',
+                  border: 'none',
+                  color: selected ? C.text1 : C.text2,
+                  fontWeight: selected ? 600 : 400,
+                  fontSize: 13, textAlign: 'left',
+                  cursor: 'pointer', fontFamily: 'inherit',
+                  transition: 'background 0.1s ease',
+                  width: '100%',
+                }}
+                onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'var(--bg-3)' }}
+                onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent' }}
+              >
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: opt.color ?? 'transparent',
+                  border: opt.color ? 'none' : `1px dashed ${C.border}`,
+                  flexShrink: 0,
+                }} />
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {opt.label}
+                </span>
+                {opt.count != null && opt.count > 0 && (
+                  <span style={{ fontSize: 11, color: C.text3, fontVariantNumeric: 'tabular-nums' }}>
+                    {opt.count}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function Narratives() {
   const [frames, setFrames] = useState<NarrativeFrame[]>([])
   const [loading, setLoading] = useState(true)
@@ -809,7 +962,6 @@ export function Narratives() {
   const [search, setSearch] = useState('')
   const [filterQuadrant, setFilterQuadrant] = useState<QuadrantFilter>('all')
   const [filterStage, setFilterStage] = useState<string>('all')
-  const [sortBy, setSortBy] = useState<'relevance' | 'volume' | 'newest'>('relevance')
   const [showAdd, setShowAdd] = useState(false)
   const [editFrame, setEditFrame] = useState<NarrativeFrame | null>(null)
   const [candidateName, setCandidateName] = useState('')
@@ -849,14 +1001,11 @@ export function Narratives() {
       return true
     })
     .sort((a, b) => {
-      if (sortBy === 'volume') return b.mentions_total - a.mentions_total
-      if (sortBy === 'newest') {
-        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      }
-      // relevance: most recent activity first, then total volume
-      if (b.mentions_this_week !== a.mentions_this_week) {
-        return b.mentions_this_week - a.mentions_this_week
-      }
+      // Push emerging frames to the bottom of each quadrant; established
+      // frames (mainstream/spreading/fading/dormant/etc.) sort by volume.
+      const aE = a.stage === 'emerging' ? 1 : 0
+      const bE = b.stage === 'emerging' ? 1 : 0
+      if (aE !== bE) return aE - bE
       return b.mentions_total - a.mentions_total
     })
 
@@ -891,13 +1040,6 @@ export function Narratives() {
 
   return (
     <div style={{ minHeight: '100%', background: C.bg1 }}>
-      {/* AI-noticed pending suggestions banner. Renders nothing when empty. */}
-      <PendingSuggestionsSection
-        onPromoted={reloadFrames}
-        candidateName={candidateName}
-        opponentName={opponentName}
-      />
-
       {/* Filter + action toolbar */}
       <div style={{
         padding: '16px 28px', borderBottom: `1px solid ${C.border}`,
@@ -915,22 +1057,12 @@ export function Narratives() {
               style={{ paddingLeft: 30, fontSize: 13 }}
             />
           </div>
-          <select
-            className="input"
+          <QuadrantFilterDropdown
             value={filterQuadrant}
-            onChange={e => setFilterQuadrant(e.target.value as QuadrantFilter)}
-            style={{ width: 220 }}
-            title="Filter by strategic quadrant"
-          >
-            <option value="all">All quadrants</option>
-            <option value="our_defense">🟦 {quadrants[0].title} · {totalCounts.our_defense}</option>
-            <option value="our_offense">🟩 {quadrants[1].title} · {totalCounts.our_offense}</option>
-            <option value="their_defense">🟥 {quadrants[2].title} · {totalCounts.their_defense}</option>
-            <option value="their_offense">🟧 {quadrants[3].title} · {totalCounts.their_offense}</option>
-            {totalCounts.media > 0 && (
-              <option value="media">⚪️ Neutral · {totalCounts.media}</option>
-            )}
-          </select>
+            onChange={setFilterQuadrant}
+            quadrants={quadrants}
+            totalCounts={totalCounts}
+          />
           <select className="input" value={filterStage} onChange={e => setFilterStage(e.target.value)} style={{ width: 140 }}>
             <option value="all">All stages</option>
             <option value="mainstream">Mainstream</option>
@@ -939,14 +1071,9 @@ export function Narratives() {
             <option value="fading">Fading</option>
             <option value="dormant">Dormant</option>
           </select>
-          <select className="input" value={sortBy} onChange={e => setSortBy(e.target.value as 'relevance' | 'volume' | 'newest')} style={{ width: 150 }}>
-            <option value="relevance">Sort: Relevance</option>
-            <option value="volume">Sort: Volume</option>
-            <option value="newest">Sort: Newest</option>
-          </select>
-          {(filterQuadrant !== 'all' || filterStage !== 'all' || search || sortBy !== 'relevance') && (
+          {(filterQuadrant !== 'all' || filterStage !== 'all' || search) && (
             <button
-              onClick={() => { setFilterQuadrant('all'); setFilterStage('all'); setSearch(''); setSortBy('relevance') }}
+              onClick={() => { setFilterQuadrant('all'); setFilterStage('all'); setSearch('') }}
               style={{ background: 'none', border: 'none', color: C.text2, cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}
             >
               <RefreshCw size={12} /> Clear
@@ -1069,7 +1196,6 @@ export function Narratives() {
                 <span style={{ width: 11, height: 11, borderRadius: '50%', background: color, display: 'inline-block' }} />
                 <span style={{ fontSize: 16, fontWeight: 800, color: C.text1, display: 'inline-flex', alignItems: 'center' }}>
                   {title}
-                  <InfoTooltip text={description} />
                 </span>
                 <span style={{ fontSize: 12, color: C.text3 }}>· {subtitle}</span>
                 <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700, color: C.text3 }}>
@@ -1085,6 +1211,15 @@ export function Narratives() {
           )
         })()}
       </div>
+
+      {/* AI-noticed pending suggestions section — shown BELOW the established
+          narratives so the established corpus reads first. Renders nothing
+          when there are no pending suggestions. */}
+      <PendingSuggestionsSection
+        onPromoted={reloadFrames}
+        candidateName={candidateName}
+        opponentName={opponentName}
+      />
 
       {showAdd && (
         <AddFrameModal

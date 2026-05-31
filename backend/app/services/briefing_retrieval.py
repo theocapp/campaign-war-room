@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -105,6 +105,31 @@ CONTEXT_ENTITY_ALLOWLIST: tuple[str, ...] = (
     "bill:medicaid-cuts",
     "bill:tax-cuts",
     "bill:aca-subsidies",
+)
+
+# Race-context predicate: an article is "race-context" if it (a) has an
+# EntityMention pointing to a candidate (ALWAYS_SHOW_ENTITIES, with aliases)
+# OR (b) its title/summary matches one of these patterns. Used to gate
+# context-allowlist entity counts so the card matches its claim of showing
+# race-adjacent activity, not raw national mention volume.
+#
+# Keep patterns tight — geo references alone (Scranton, Wilkes-Barre,
+# city names) are too noisy because local outlets cover non-race news too.
+# "NEPA" (Northeast Pennsylvania) is the exception: it's shorthand the
+# NRCC, DCCC, and local political press use specifically for the PA-08
+# region, and national writers don't use it. Candidate surnames were
+# tried as fallback patterns (Layer 1) but caused ~25% false positives
+# because our LLM-generated summaries routinely stretch to mention
+# candidates by name even when articles are about unrelated topics —
+# substring ILIKE can't distinguish "this article is about Cognetti"
+# from "the summary tacked on a Cognetti reference." Removed.
+RACE_CONTEXT_PATTERNS: tuple[str, ...] = (
+    "PA-08",
+    "8th District",
+    "8th congressional",
+    "Pennsylvania's 8th",
+    "Eighth District",
+    "NEPA",
 )
 
 
@@ -246,57 +271,106 @@ def top_entities_for_briefing(
     this_start = now - timedelta(days=days)
     prev_start = now - timedelta(days=2 * days)
 
-    def _data_for(canonical_id: str) -> dict | None:
+    # Pre-compute the race-context entity ID set once. Cognetti +
+    # Bresnahan + their aliases.
+    race_entity_ids: list[int] = []
+    for cid in ALWAYS_SHOW_ENTITIES:
+        race_entity_ids.extend(_entity_ids_for_canonical(db, cid))
+    race_entity_ids = list(set(race_entity_ids))
+
+    def _race_context_filter():
+        """SQL clause: article has a candidate EntityMention OR title/summary
+        matches a race-naming pattern. Applied universally to every entity
+        in CONTEXT_ENTITY_ALLOWLIST so the card's count matches its claim."""
+        candidate_subq = (
+            db.query(EntityMention.article_id)
+            .filter(EntityMention.entity_id.in_(race_entity_ids))
+            .subquery()
+        )
+        clauses = [SourceItem.id.in_(candidate_subq.select())]
+        for p in RACE_CONTEXT_PATTERNS:
+            clauses.append(SourceItem.title.ilike(f"%{p}%"))
+            clauses.append(SourceItem.summary.ilike(f"%{p}%"))
+        return or_(*clauses)
+
+    gate = _race_context_filter() if race_entity_ids else None
+
+    def _data_for(canonical_id: str, apply_gate: bool) -> dict | None:
+        """Compute one card. When `apply_gate` is True (context entities),
+        `mentions_*` reflect race-context-only articles, and `race_share`
+        is the gated/raw ratio. When False (always-show candidates), the
+        gate is meaningless — they ARE the race — so `race_share` is None.
+        """
         ent_ids = _entity_ids_for_canonical(db, canonical_id)
         if not ent_ids:
             return None
         seed = db.query(Entity).filter(Entity.canonical_id == canonical_id).one_or_none()
         if not seed:
             return None
-        this_n = (
-            db.query(func.count(func.distinct(EntityMention.article_id)))
-            .join(SourceItem, SourceItem.id == EntityMention.article_id)
-            .filter(EntityMention.entity_id.in_(ent_ids))
-            .filter(SourceItem.published_at >= this_start)
-            .scalar()
-        ) or 0
-        prev_n = (
-            db.query(func.count(func.distinct(EntityMention.article_id)))
-            .join(SourceItem, SourceItem.id == EntityMention.article_id)
-            .filter(EntityMention.entity_id.in_(ent_ids))
-            .filter(SourceItem.published_at >= prev_start)
-            .filter(SourceItem.published_at < this_start)
-            .scalar()
-        ) or 0
-        title_rows = (
+
+        def _count(start, end, gated: bool) -> int:
+            q = (
+                db.query(func.count(func.distinct(EntityMention.article_id)))
+                .join(SourceItem, SourceItem.id == EntityMention.article_id)
+                .filter(EntityMention.entity_id.in_(ent_ids))
+                .filter(SourceItem.published_at >= start)
+            )
+            if end is not None:
+                q = q.filter(SourceItem.published_at < end)
+            if gated and gate is not None:
+                q = q.filter(gate)
+            return q.scalar() or 0
+
+        # Always compute raw counts so we can report race_share for context
+        # entities. For context entities, the headline number is the gated
+        # count; raw is the denominator for race_share.
+        raw_this = _count(this_start, None, gated=False)
+        if apply_gate and gate is not None:
+            gated_this = _count(this_start, None, gated=True)
+            gated_prev = _count(prev_start, this_start, gated=True)
+            mentions_this = gated_this
+            mentions_prev = gated_prev
+            race_share = (gated_this / raw_this) if raw_this else None
+        else:
+            mentions_this = raw_this
+            mentions_prev = _count(prev_start, this_start, gated=False)
+            race_share = None
+
+        # Sample titles: pull from whatever stream we're reporting (gated
+        # for context entities, raw for always-show), so the card's count
+        # and its visible sample agree.
+        title_q = (
             db.query(SourceItem.title)
             .join(EntityMention, EntityMention.article_id == SourceItem.id)
             .filter(EntityMention.entity_id.in_(ent_ids))
             .filter(SourceItem.published_at >= this_start)
             .filter(SourceItem.title.isnot(None))
-            .order_by(SourceItem.published_at.desc())
-            .limit(3)
-            .all()
         )
+        if apply_gate and gate is not None:
+            title_q = title_q.filter(gate)
+        title_rows = title_q.order_by(SourceItem.published_at.desc()).limit(3).all()
+
         return {
             "id": seed.canonical_id,
             "name": seed.name,
             "type": seed.type,
             "affiliation": seed.affiliation,
-            "mentions_this_week": this_n,
-            "mentions_last_week": prev_n,
-            "delta": this_n - prev_n,
+            "mentions_this_week": mentions_this,
+            "mentions_last_week": mentions_prev,
+            "delta": mentions_this - mentions_prev,
+            "race_share": race_share,
             "sample_recent_titles": [r[0] for r in title_rows],
         }
 
     out: list[dict] = []
     for cid in ALWAYS_SHOW_ENTITIES:
-        d = _data_for(cid)
+        d = _data_for(cid, apply_gate=False)
         if d:
             out.append(d)
 
-    context_rows = [_data_for(cid) for cid in CONTEXT_ENTITY_ALLOWLIST]
+    context_rows = [_data_for(cid, apply_gate=True) for cid in CONTEXT_ENTITY_ALLOWLIST]
     context_rows = [r for r in context_rows if r]
+    # Rank context entities by race-context activity, not raw volume.
     context_rows.sort(key=lambda r: -r["mentions_this_week"])
     out.extend(context_rows[:4])
 

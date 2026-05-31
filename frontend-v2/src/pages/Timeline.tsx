@@ -20,10 +20,20 @@ import {
   Calendar, ChevronRight, FileText, Filter, Sparkles,
   TrendingDown, TrendingUp, X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/api/client'
-import { QuadrantPalette, quadrantKey, quadrantLabel } from '@/lib/quadrantColor'
+import { QuadrantPalette, quadrantKey, quadrantNamedLabel } from '@/lib/quadrantColor'
 import type { OwnerType, QuadrantKey } from '@/lib/quadrantColor'
+
+/** Surname extraction shared with Landscape.tsx — see lastName() there.
+ *  Used to swap "Pro-us" → "Pro-Cognetti" / "Anti-them" → "Anti-Bresnahan"
+ *  in impact-row metadata and the side-panel header. */
+function lastName(raw?: string): string {
+  if (!raw) return ''
+  const t = raw.trim()
+  const last = (t.includes(',') ? t.split(',')[0] : t.split(/\s+/).pop() || '').trim()
+  return last ? last[0].toUpperCase() + last.slice(1).toLowerCase() : ''
+}
 import type {
   NarrativeLifecycleEvent,
   RaceSentimentSnapshot,
@@ -71,9 +81,10 @@ interface TimelineEvent {
 }
 
 const TIME_RANGES = [
+  { key: '7',   label: '7d',   days: 7   },
+  { key: '30',  label: '30d',  days: 30  },
   { key: '60',  label: '60d',  days: 60 },
   { key: '90',  label: '90d',  days: 90 },
-  { key: '180', label: '6 mo', days: 180 },
   { key: '365', label: '1 y',  days: 365 },
 ] as const
 
@@ -165,11 +176,18 @@ export function Timeline() {
   const [lifecycle, setLifecycle] = useState<NarrativeLifecycleEvent[]>([])
   const [polySnaps, setPolySnaps] = useState<RaceSentimentSnapshot[]>([])
   const [kalshiSnaps, setKalshiSnaps] = useState<RaceSentimentSnapshot[]>([])
+  // Surnames for quadrantNamedLabel ("Pro-Cognetti" / "Anti-Bresnahan"
+  // instead of "Pro-us" / "Anti-them"). Fire-and-forget; if either fetch
+  // fails the label falls back to the generic form so nothing breaks.
+  const [candidateName, setCandidateName] = useState('')
+  const [opponentName, setOpponentName] = useState('')
 
   const range = TIME_RANGES.find(r => r.key === rangeKey)!
 
   useEffect(() => {
     api.narrativeLifecycle(30).then(setLifecycle).catch(() => setLifecycle([]))
+    api.campaign().then(c => setCandidateName(lastName(c.candidate_name))).catch(() => {})
+    api.opponents().then(o => { if (o[0]) setOpponentName(lastName(o[0].name)) }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -261,16 +279,25 @@ export function Timeline() {
         // same ballpark as narrative mention counts (typical scores 70-95
         // become weight ~18-24).
         const score = e.score ?? 50
+        // Quadrant comes from the backend's per-article cascade (highest-
+        // confidence frame match → source_owner_type → perspective →
+        // media). See backend/app/services/article_quadrant.py. A Cognetti
+        // tweet attacking Bresnahan lands in `our_offense` because its
+        // top frame match is "Bresnahan's Stock Trades" (owner=candidate,
+        // subject=opponent) — not as gray "Neutral".
+        const quadrant = quadrantKey(
+          (e.owner_type ?? null) as OwnerType | null,
+          (e.subject_type ?? null) as OwnerType | null,
+        )
         out.push({
           id: `art-${e.article_id}-${e.timestamp}`,
           category: 'top_articles',
           date,
           title: e.label,
-          detail: `Top relevance · score ${score}${e.source_name ? ` · ${e.source_name}` : ''}`,
+          detail: `Top relevance${e.source_name ? ` · ${e.source_name}` : ''}`,
           weight: Math.max(1, Math.round(score / 4)),
           navigateUrl: e.article_id ? `/articles/${e.article_id}` : undefined,
-          // Top articles aren't owned by either side — they're media coverage.
-          quadrant: 'media',
+          quadrant,
         })
       })
     }
@@ -343,12 +370,19 @@ export function Timeline() {
               kalshiSnaps={kalshiSnaps}
               selectedId={selectedId}
               setSelectedId={setSelectedId}
+              candidateName={candidateName}
+              opponentName={opponentName}
             />
           </div>
         </div>
 
         {selected && (
-          <SidePanel event={selected} onClose={() => setSelectedId(null)} />
+          <SidePanel
+            event={selected}
+            onClose={() => setSelectedId(null)}
+            candidateName={candidateName}
+            opponentName={opponentName}
+          />
         )}
       </div>
     </div>
@@ -515,23 +549,35 @@ function SentimentChart({
   setSelectedId: (id: string | null) => void
   setHoveredId: (id: string | null) => void
 }) {
-  const [width, setWidth] = useState(1200)
-  const [height, setHeight] = useState(300)
+  // Match the SVG to the actual container box. The previous code derived
+  // width/height from `window.innerWidth` and `window.innerHeight * 0.34`,
+  // which drifted from the parent's real flex-allotted size — the chart
+  // ended up shorter/narrower than its container and left blank gutters
+  // below and to the right. ResizeObserver on a wrapping div keeps the
+  // SVG flush with whatever space the layout actually gives it.
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  const [height, setHeight] = useState(0)
 
   useEffect(() => {
-    function measure() {
-      const sidePanelW = 360
-      // Side panel only shows when an event is selected — approximate
-      const containerW = window.innerWidth - 240 - (selectedId ? sidePanelW : 0)
-      setWidth(Math.max(700, containerW - 40))
-      setHeight(Math.max(260, Math.round(window.innerHeight * 0.34)))
-    }
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [selectedId])
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(entries => {
+      const r = entries[0].contentRect
+      setWidth(r.width)
+      setHeight(r.height)
+    })
+    ro.observe(el)
+    const r = el.getBoundingClientRect()
+    setWidth(r.width)
+    setHeight(r.height)
+    return () => ro.disconnect()
+  }, [])
 
-  const LEFT_PAD = 12
+  // LEFT_PAD must clear half the first tick label's width (e.g. "Mar 30" is
+  // ~37px wide, centered → needs ~20px of padding so the label doesn't get
+  // clipped at the left edge of the SVG).
+  const LEFT_PAD = 24
   const RIGHT_PAD = 56   // room for Y-axis labels on the right
   const TOP_PAD = 20
   const BOTTOM_PAD = 36
@@ -614,6 +660,7 @@ function SentimentChart({
   }
 
   return (
+    <div ref={containerRef} style={{ width: '100%', height: '100%' }}>
     <svg
       width={width} height={height}
       style={{ display: 'block' }}
@@ -755,18 +802,21 @@ function SentimentChart({
         </text>
       )}
     </svg>
+    </div>
   )
 }
 
 // ── Impact-ranked list ────────────────────────────────────────────────────
 
 function ImpactList({
-  events, kalshiSnaps, selectedId, setSelectedId,
+  events, kalshiSnaps, selectedId, setSelectedId, candidateName, opponentName,
 }: {
   events: TimelineEvent[]
   kalshiSnaps: RaceSentimentSnapshot[]
   selectedId: string | null
   setSelectedId: (id: string | null) => void
+  candidateName: string
+  opponentName: string
 }) {
   if (events.length === 0) {
     return (
@@ -795,6 +845,8 @@ function ImpactList({
           kalshiSnaps={kalshiSnaps}
           selected={selectedId === e.id}
           onSelect={() => setSelectedId(e.id)}
+          candidateName={candidateName}
+          opponentName={opponentName}
         />
       ))}
     </div>
@@ -802,15 +854,15 @@ function ImpactList({
 }
 
 function ImpactRow({
-  event, kalshiSnaps, selected, onSelect,
+  event, kalshiSnaps, selected, onSelect, candidateName, opponentName,
 }: {
   event: TimelineEvent
   kalshiSnaps: RaceSentimentSnapshot[]
   selected: boolean
   onSelect: () => void
+  candidateName: string
+  opponentName: string
 }) {
-  const Icon = CATEGORY_ICON[event.category]
-  const qColor = QuadrantPalette[event.quadrant]
   const delta = event.delta48h
   const dColor = deltaColor(delta)
   const dateStr = event.date.toLocaleDateString('en', { month: 'short', day: 'numeric' })
@@ -819,7 +871,7 @@ function ImpactRow({
       onClick={onSelect}
       style={{
         display: 'grid',
-        gridTemplateColumns: '28px 1fr 110px 96px 16px',
+        gridTemplateColumns: '1fr 110px 96px 16px',
         gap: 12, alignItems: 'center',
         padding: '10px 20px',
         cursor: 'pointer',
@@ -829,13 +881,6 @@ function ImpactRow({
       onMouseEnter={e => { if (!selected) e.currentTarget.style.background = 'rgba(255,255,255,0.02)' }}
       onMouseLeave={e => { if (!selected) e.currentTarget.style.background = 'transparent' }}
     >
-      <div style={{
-        width: 24, height: 24, borderRadius: 6,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: `${qColor}1f`, border: `1px solid ${qColor}55`,
-      }}>
-        <Icon size={13} color={qColor} />
-      </div>
       <div style={{ minWidth: 0 }}>
         <div style={{
           fontSize: 13, color: 'var(--text-1)', fontWeight: 500,
@@ -844,7 +889,7 @@ function ImpactRow({
           {event.title}
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
-          {quadrantLabel(event.quadrant)} · {CATEGORY_LABEL[event.category]} · {dateStr}
+          {quadrantNamedLabel(event.quadrant, candidateName, opponentName)} · {CATEGORY_LABEL[event.category]} · {dateStr}
         </div>
       </div>
       <Sparkline event={event} kalshiSnaps={kalshiSnaps} />
@@ -922,10 +967,12 @@ function Sparkline({
 // ── Side panel for selected event ────────────────────────────────────────
 
 function SidePanel({
-  event, onClose,
+  event, onClose, candidateName, opponentName,
 }: {
   event: TimelineEvent
   onClose: () => void
+  candidateName: string
+  opponentName: string
 }) {
   const dateStr = event.date.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })
   const Icon = CATEGORY_ICON[event.category]
@@ -943,7 +990,7 @@ function SidePanel({
             fontSize: 10, color: 'var(--text-2)', textTransform: 'uppercase',
             fontWeight: 700, letterSpacing: '0.08em',
           }}>
-            {quadrantLabel(event.quadrant)} · {CATEGORY_LABEL[event.category]}
+            {quadrantNamedLabel(event.quadrant, candidateName, opponentName)} · {CATEGORY_LABEL[event.category]}
           </span>
           <button
             onClick={onClose}

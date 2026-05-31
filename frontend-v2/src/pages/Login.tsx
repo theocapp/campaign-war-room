@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthContext'
+import wordmark from '@/assets/theosintel-wordmark.png'
 
 interface LocationState { from?: string }
 
@@ -44,10 +45,18 @@ export function Login() {
     <div style={{
       minHeight: '100vh',
       background: 'var(--bg-1)',
+      backgroundImage: `
+        radial-gradient(ellipse 60% 50% at 20% 25%, rgba(255, 191, 0, 0.10), transparent 70%),
+        radial-gradient(ellipse 55% 45% at 80% 75%, rgba(0, 89, 194, 0.12), transparent 70%),
+        radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.04) 1px, transparent 0)
+      `,
+      backgroundSize: 'auto, auto, 28px 28px',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
       padding: 24,
+      position: 'relative',
+      overflow: 'hidden',
     }}>
       <div style={{
         width: '100%',
@@ -62,14 +71,14 @@ export function Login() {
         gap: 20,
       }}>
         <img
-          src="/theosintel-wordmark.png"
+          src={wordmark}
           alt="theosintel"
           className="brand-logo"
           style={{ height: 36, width: 'auto' }}
         />
         <div style={{ textAlign: 'center' }}>
           <h1 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-1)', margin: 0 }}>
-            Private preview
+            Preview
           </h1>
           <p style={{ fontSize: 13, color: 'var(--text-3)', margin: '6px 0 0' }}>
             Enter your access code to continue.

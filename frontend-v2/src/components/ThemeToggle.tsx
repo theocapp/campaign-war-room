@@ -33,9 +33,11 @@ function readInitialTheme(): Theme {
     const stored = localStorage.getItem(THEME_KEY)
     if (stored === 'light' || stored === 'dark') return stored
   } catch { /* ignore */ }
-  // Default is dark (matches the campaign tool's classified-document aesthetic).
-  // We don't auto-pick from prefers-color-scheme — explicit choice is safer.
-  return 'dark'
+  // Default is light so first-time visitors land on a softer surface; the
+  // user can flip via the header toggle and that choice persists in
+  // localStorage. We don't auto-pick from prefers-color-scheme — explicit
+  // choice is safer.
+  return 'light'
 }
 
 /**

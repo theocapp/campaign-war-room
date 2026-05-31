@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import type { BriefingEntity } from '@/api/types'
 import { InfoTooltip } from '@/components/InfoTooltip'
 
@@ -22,7 +23,7 @@ export function ActivityThisWeek({ entities }: Props) {
       }}>
         Activity This Week
         <InfoTooltip
-          text="Who's getting coverage this week vs last week. Restricted to your candidate, opponent, and a short allowlist of high-impact race-adjacent figures and bills — so this doesn't drift into trending-names noise."
+          text="Coverage volume this week vs last. Restricted to your candidate, opponent, and a short allowlist of high-impact race-adjacent figures and bills. Counts for non-candidate entities are filtered to race-context coverage only (article also mentions a candidate or names the race) — the % shown is how much of that entity's total coverage was race-focused this week."
           color="var(--text-2)"
         />
         <span style={{ flex: 1, height: 1, background: 'var(--bg-3)', display: 'block' }} />
@@ -43,33 +44,33 @@ export function ActivityThisWeek({ entities }: Props) {
             : e.affiliation === 'R' ? 'var(--opponent)'
             : 'var(--text-2)'
           return (
-            <div key={e.id} className="card" style={{
-              padding: '14px 16px',
-              minWidth: 0,
-              overflow: 'hidden',
-            }}>
-              <div style={{
-                display: 'flex', justifyContent: 'space-between',
-                alignItems: 'baseline', marginBottom: 8, gap: 6,
-              }}>
+            <Link
+              key={e.id}
+              to={`/entities/${encodeURIComponent(e.id)}`}
+              className="card"
+              title={`See ${e.name}'s coverage, quotes, and narrative frames`}
+              style={{
+                display: 'block',
+                padding: '14px 16px',
+                minWidth: 0,
+                overflow: 'hidden',
+                textDecoration: 'none',
+                color: 'inherit',
+              }}
+            >
+              <div style={{ marginBottom: 8 }}>
                 <span style={{
                   color, fontSize: 14, fontWeight: 700,
+                  display: 'block',
                   overflow: 'hidden', textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap', minWidth: 0,
                 }}>
                   {e.name}
                 </span>
-                <span style={{
-                  fontSize: 10, color: 'var(--text-3)',
-                  textTransform: 'uppercase', letterSpacing: '0.06em',
-                  flexShrink: 0,
-                }}>
-                  {e.type}
-                </span>
               </div>
               <div style={{
                 display: 'flex', alignItems: 'baseline', gap: 8,
-                marginBottom: 8,
+                marginBottom: e.race_share !== null ? 4 : 8,
               }}>
                 <span style={{
                   fontSize: 22, fontWeight: 700, color: 'var(--text-1)',
@@ -89,6 +90,17 @@ export function ActivityThisWeek({ entities }: Props) {
                   {arrow}{Math.abs(delta)} vs {e.mentions_last_week}
                 </span>
               </div>
+              {e.race_share !== null && (
+                <div style={{
+                  fontSize: 10,
+                  color: 'var(--text-3)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.06em',
+                  marginBottom: 8,
+                }}>
+                  {Math.round(e.race_share * 100)}% race-focused
+                </div>
+              )}
               {e.sample_recent_titles.length > 0 && (
                 <ul style={{
                   margin: 0, padding: 0, listStyle: 'none',
@@ -104,7 +116,7 @@ export function ActivityThisWeek({ entities }: Props) {
                   ))}
                 </ul>
               )}
-            </div>
+            </Link>
           )
         })}
       </div>

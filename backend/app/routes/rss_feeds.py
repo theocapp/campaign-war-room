@@ -7,10 +7,16 @@ from app.db import get_db
 from app.models import RssFeed
 from app.schemas import RssFeedOut, RssFeedCreate, RssFeedUpdate, RssFeedIngestResult, SourceItemOut
 from app.services import ingestion
+from app.services.access_codes import require_admin
 from app.services.rss_ingestion import ingest_lock
 from app.services.snapshots import source_out
 
 router = APIRouter()
+
+# Gate the two ingest triggers — each crawls feeds and fires LLM scoring per
+# article (real budget). Feed CRUD (create / update / delete) is cheap
+# curation and stays open.
+_admin_only = [Depends(require_admin)]
 
 
 @router.get("/rss-feeds", response_model=list[RssFeedOut])
@@ -40,7 +46,7 @@ def create_feed(body: RssFeedCreate, db: Session = Depends(get_db)):
     return feed
 
 
-@router.post("/rss-feeds/ingest-all")
+@router.post("/rss-feeds/ingest-all", dependencies=_admin_only)
 def ingest_all_feeds(db: Session = Depends(get_db)):
     if not ingest_lock.acquire(blocking=False):
         raise HTTPException(
@@ -106,7 +112,7 @@ def delete_feed(feed_id: int, db: Session = Depends(get_db)):
     db.commit()
 
 
-@router.post("/rss-feeds/{feed_id}/ingest", response_model=RssFeedIngestResult)
+@router.post("/rss-feeds/{feed_id}/ingest", response_model=RssFeedIngestResult, dependencies=_admin_only)
 def ingest_feed(feed_id: int, db: Session = Depends(get_db)):
     feed = db.get(RssFeed, feed_id)
     if not feed:

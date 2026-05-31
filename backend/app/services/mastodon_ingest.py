@@ -197,6 +197,8 @@ def _status_to_fields(status: dict, instance: str, tag: str) -> Optional[dict]:
         title = title.rstrip() + "…"
     if not title:
         title = f"Mastodon post by {display}"
+    from app.services.ingestion import clean_title as _clean_title
+    title = _clean_title(title) or f"Mastodon post by {display}"
 
     return {
         "title": title,

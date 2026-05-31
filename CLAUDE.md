@@ -28,6 +28,23 @@ The goal is consensus through written exchange, not just parallel building. If t
 
 ---
 
+## Recurring tasks
+
+**Memory audit due: 2026-06-13** (last run: 2026-05-30).
+
+On session start ON OR AFTER the due date, proactively offer to re-run the audit before doing other work. **Methodology** (grep-driven, ~5k tokens, very cheap):
+1. `cd /Users/theo/.claude/projects/-Users-theo-noctua/` — the local Claude Code project transcript directory
+2. Python-grep all `*.jsonl` files for user-message correction signals: `lmao|lmfao|lol`, `huh\?|wait what`, `^no[,.\s]`, `that'?s not|that'?s wrong`, `why (did|would|are) you`, `how (could|did) you`, `i think you|i'?m not sure`, `i'?m not criticizing`, `^actually|^wait`, `stop (doing|writing)`, `you shouldn'?t`, `^don'?t`
+3. Filter to `"operation":"enqueue"` lines (raw user typing); skip content starting with `<task-notification>`, `<system-reminder>`, `<command-`
+4. Cluster hits by theme, drop one-offs and situation-specific corrections
+5. Cross-reference against existing feedback memories in `/Users/theo/.claude/projects/-Users-theo-noctua/memory/`
+6. Propose 3-8 new or refined memory entries WITH evidence trails (dated quotes from transcripts)
+7. **Present for user approval — write nothing without sign-off.** Update this date line afterwards.
+
+The previous audit found these patterns (already saved): arbitrary-constants-need-grounding, chatgpt-second-opinion-workflow, sanity-check-metric-directions, simulate-human-state-in-procedures.
+
+---
+
 ## What this project is
 
 A political campaign intelligence tool originally built for Paige Cognetti's congressional race (PA-08). It monitors news, RSS feeds, Reddit, Bluesky, and Mastodon; scores articles with AI; tracks narrative frames; and surfaces a daily briefing.
@@ -40,17 +57,29 @@ It is also being productized as a SaaS platform called **NOCTUA** — a sellable
 
 ## Running the app
 
+The user starts both servers manually in their terminal using `nohup … & disown` so they survive terminal closure and Claude session teardown. A long-running `cloudflared` tunnel is pointed at port 5174, so killing Vite causes 502 Bad Gateway errors in the user's live browser. **Hands off the dev servers** — see the rule below the commands.
+
 **Frontend** (React/Vite — port 5174):
 ```bash
-cd frontend-v2 && npm run dev
+cd /Users/theo/noctua/frontend-v2 && nohup npm run dev > /tmp/vite.log 2>&1 & disown
 ```
-The Claude Preview tool uses `.claude/launch.json` — server name is `frontend`.
+The Claude Preview tool uses `.claude/launch.json` — server name is `frontend`. `preview_start` will reuse the already-listening port instead of spawning a duplicate.
 
 **Backend** (FastAPI/Python — port 8000):
 ```bash
-cd backend && .venv/bin/uvicorn app.main:app --reload
+kill $(lsof -ti:8000) 2>/dev/null; sleep 2; cd /Users/theo/noctua/backend && nohup .venv/bin/uvicorn app.main:app --reload > /tmp/uvicorn.log 2>&1 & disown
 ```
 Must use the project venv — bare `uvicorn` will fail with import errors. The frontend proxies `/api/*` → `http://localhost:8000` via Vite config.
+
+**Logs**: `tail -f /tmp/vite.log` or `tail -f /tmp/uvicorn.log`.
+
+**Do not stop the user's dev servers from a Claude session.** Concretely:
+- Do NOT call the Claude Preview tool's `preview_stop` on the `frontend` server.
+- Do NOT run `kill` against ports 5174 or 8000 from Bash, even "just to restart."
+- If a dev server is genuinely broken and needs a restart, ASK FIRST — the user may be mid-test, and the cloudflared tunnel returns 502s the moment Vite goes down.
+- `preview_start`, `preview_eval`, `preview_console_logs`, `preview_snapshot`, etc. are fine — they don't kill the process.
+
+This rule exists because previous sessions killed Vite (via session teardown or explicit stop calls), and the user only finds out when their tunnel URL returns 502. See INTER_SESSION.md 2026-05-29 for the diagnosis.
 
 **Database**: Postgres 15 — local on `postgresql://theo@localhost:5432/noctua` (cutover from SQLite on 2026-05-29 — see INTER_SESSION.md). The `DATABASE_URL` is read from `.env` by `app/db.py`. The pre-cutover SQLite backup (`backend/war_room.db.cutover-20260529-050401`) and `.env.bak-PRE-CUTOVER` are the rollback artifacts — keep them until ~2026-06-26 (Phase 5 cleanup). Never reset the DB without asking first.
 
@@ -177,7 +206,7 @@ Social ingestion: `ingestion_reddit.py`, `mastodon_ingest.py`, `twitter_scraper.
 - `entities`: 4,389 canonical entities (v15.0 quote-anchored claim corpus, see KG policy below)
 - `narrative_frames`: 39 active frames being tracked
 - Search index: Postgres `tsvector` GIN index on `source_items.search_tsv`, maintained by a `BEFORE INSERT/UPDATE` trigger — powers `/api/search`. SQLite `source_items_fts` (FTS5) is retired; the dialect-aware code path stays in `services/search_index.py` until Phase 5 cleanup.
-- Alembic head: `6e2b8c4a9d1f`. New schema changes go in a new Alembic version file (`cd backend && .venv/bin/alembic revision -m "..."`), NOT in any imperative migration block.
+- Alembic head: `2df994cdd1f9` (add_platform_column_to_source_items). New schema changes go in a new Alembic version file (`cd backend && .venv/bin/alembic revision -m "..."`), NOT in any imperative migration block.
 
 ---
 

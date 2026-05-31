@@ -559,7 +559,10 @@ def start_rescore(
         SourceItem.raw_text.isnot(None), SourceItem.raw_text != ""
     )
     if only_unscored:
-        q = q.filter(SourceItem.summary.is_(None))
+        # "Scored" means race_relevance_score is set — NOT summary. The LLM
+        # only writes summary for relevant items, so summary IS NULL would
+        # re-queue every irrelevant article on every restart.
+        q = q.filter(SourceItem.race_relevance_score.is_(None))
 
     # Oldest first — backfill articles are oldest, so they get priority.
     # Parallelism means strict order isn't preserved at completion, but the

@@ -5,15 +5,22 @@ from app.db import get_db
 from app.models import IssueMention, NarrativeFrame, NarrativeFrameMention, SourceItem
 from app.schemas import FrameMentionOut, IssueOut, SourceItemOut, SourceItemDetail, RSSFeedIn, TextSourceIn, URLSourceIn
 from app.services import ingestion
+from app.services.access_codes import require_admin
 from app.services.search_index import search_articles
 from app.services.snapshots import build_source_snapshot, source_out
 
 router = APIRouter()
 
+# Adding a source (RSS feed / pasted text / URL) fetches + LLM-scores the
+# content, so each of these POSTs spends budget. Gate them. The read
+# endpoints (list / search / detail) stay open.
+_admin_only = [Depends(require_admin)]
+
 
 @router.get("/sources", response_model=list[SourceItemOut])
 def list_sources(
     source_type: str | None = None,
+    platform: str | None = None,
     urgency: str | None = None,
     source_filter: str = "all",
     limit: int = 50,
@@ -22,6 +29,14 @@ def list_sources(
     q = db.query(SourceItem).order_by(SourceItem.published_at.desc())
     if source_type:
         q = q.filter(SourceItem.source_type == source_type)
+    if platform:
+        # "none" means plain news/web (platform IS NULL); a platform name
+        # filters to that platform. Orthogonal to source_type — social items
+        # are scattered across news/reference/opponent_statement source_types.
+        if platform == "none":
+            q = q.filter(SourceItem.platform.is_(None))
+        else:
+            q = q.filter(SourceItem.platform == platform)
     if urgency:
         q = q.filter(SourceItem.urgency == urgency)
     if source_filter == "relevant":
@@ -98,13 +113,13 @@ def get_source(source_id: int, db: Session = Depends(get_db)):
     return detail
 
 
-@router.post("/sources/rss", response_model=list[SourceItemOut])
+@router.post("/sources/rss", response_model=list[SourceItemOut], dependencies=_admin_only)
 def add_rss_feed(body: RSSFeedIn, db: Session = Depends(get_db)):
     result = ingestion.ingest_rss(db, body.url, body.label)
     return [source_out(item) for item in result.items]
 
 
-@router.post("/sources/text", response_model=SourceItemOut)
+@router.post("/sources/text", response_model=SourceItemOut, dependencies=_admin_only)
 def add_text_source(body: TextSourceIn, db: Session = Depends(get_db)):
     item = ingestion.ingest_text(
         db,
@@ -118,7 +133,7 @@ def add_text_source(body: TextSourceIn, db: Session = Depends(get_db)):
     return source_out(item)
 
 
-@router.post("/sources/url", response_model=SourceItemOut)
+@router.post("/sources/url", response_model=SourceItemOut, dependencies=_admin_only)
 def add_url_source(body: URLSourceIn, db: Session = Depends(get_db)):
     item = ingestion.ingest_url(db, body.url, body.source_type)
     if not item:

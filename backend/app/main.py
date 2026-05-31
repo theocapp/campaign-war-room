@@ -1,17 +1,21 @@
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.db import init_db
 from app.routes import (
+    auth,
     dashboard, sources, opponents,
     campaign, setup, rss_feeds, review_queue, source_templates,
     admin, source_packs, source_reminders, race_import,
     races, narrative_frames, outlets, ingest, source_monitors,
     analytics, topic_regions, narrative_triage, entity_network, entity_review,
     extractor_drift, claims, claim_records, race_sentiment,
+    global_search, text_overrides, entities, health,
 )
+from app.services.access_codes import is_auth_configured, lookup_code
 
 
 @asynccontextmanager
@@ -65,7 +69,20 @@ async def lifespan(app: FastAPI):
         stop_scheduler()
 
 
-app = FastAPI(title="Campaign War Room AI", version="0.3.0", lifespan=lifespan)
+# Interactive API docs (Swagger / ReDoc / openapi.json) are off by default.
+# They enumerate every endpoint + schema, which is recon surface we don't want
+# exposed through the public tunnel. Set EXPOSE_API_DOCS=true to turn them on
+# (e.g. for local debugging).
+_EXPOSE_DOCS = os.environ.get("EXPOSE_API_DOCS", "").lower() in ("1", "true", "yes")
+
+app = FastAPI(
+    title="Campaign War Room AI",
+    version="0.3.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _EXPOSE_DOCS else None,
+    redoc_url="/redoc" if _EXPOSE_DOCS else None,
+    openapi_url="/openapi.json" if _EXPOSE_DOCS else None,
+)
 
 _CORS_ORIGINS = [
     o.strip() for o in os.environ.get(
@@ -81,7 +98,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Paths that bypass the access-code check. Login + status need to be
+# callable without a code (otherwise the login page can't function), and
+# the health probe should always work for ops. The docs paths stay listed
+# so that *when* EXPOSE_API_DOCS=true they're reachable without a code;
+# when docs are disabled (the default) these simply 404, which is harmless.
+_AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/api/auth/verify",
+    "/api/auth/me",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+}
+
+
+@app.middleware("http")
+async def access_code_guard(request: Request, call_next):
+    """Block /api/* requests that don't carry a valid access code.
+
+    Fails open when no ACCESS_CODES are configured (dev mode) — the moment
+    the user adds any code, the gate snaps shut for everything except the
+    exempt paths. Non-/api paths (the Vite dev server, future static
+    assets, etc.) are never gated by this middleware; the frontend handles
+    its own routing-level redirect to /login.
+    """
+    if not is_auth_configured():
+        return await call_next(request)
+
+    path = request.url.path
+    if (
+        path in _AUTH_EXEMPT_PATHS
+        or not path.startswith("/api/")
+        or request.method == "OPTIONS"
+    ):
+        return await call_next(request)
+
+    # Localhost bypass: when the request originated on the user's own
+    # machine (someone typed http://localhost:5174 in the browser, not the
+    # public tunnel URL), skip the gate so the user and Claude Code's
+    # preview can iterate without juggling codes. Vite's proxy rewrites
+    # the Host header to localhost:8000, so we rely on X-Forwarded-Host
+    # which Vite sets to the browser-visible hostname. Nothing else on
+    # this backend writes that header, so trusting it is safe.
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").lower()
+    if forwarded_host.startswith("localhost") or forwarded_host.startswith("127.0.0.1"):
+        return await call_next(request)
+
+    code = request.headers.get("x-access-code") or request.query_params.get(
+        "access_code"
+    )
+    user = lookup_code(code)
+    if user is None:
+        return JSONResponse(
+            status_code=401, content={"detail": "invalid or missing access code"}
+        )
+    request.state.user = user
+    return await call_next(request)
+
+
 for router in [
+    auth.router,
     dashboard.router,
     sources.router,
     opponents.router,
@@ -104,10 +182,14 @@ for router in [
     narrative_triage.router,
     entity_network.router,
     entity_review.router,
+    entities.router,
     extractor_drift.router,
     claims.router,
     claim_records.router,
     race_sentiment.router,
+    global_search.router,
+    text_overrides.router,
+    health.router,
 ]:
     app.include_router(router, prefix="/api")
 

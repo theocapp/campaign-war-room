@@ -10,6 +10,7 @@ Falls back to the keyword scorer if the LLM call fails or is unavailable.
 """
 import json
 import logging
+import re
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -124,28 +125,148 @@ def _mentions_race(item: SourceItem, tokens: set[str]) -> bool:
     return any(t in blob for t in tokens if t)
 
 
-def _count_name_mentions(item: SourceItem, ctx: dict) -> tuple[int, int]:
-    """Return (title_mentions, body_mentions) of candidate/opponent names.
+def _name_match_tokens(ctx: dict) -> list[str]:
+    """Lowercase candidate/opponent tokens for substring matching.
 
-    Used by the finer-grained scoring. Counts distinct names in title vs.
-    body — not occurrences (so an article that says "Cognetti" 20 times
-    counts the same as one that says it 3 times).
+    Drops first-name-only tokens with < 5 chars (e.g. "Rob", "Paige") — they
+    match too aggressively inside unrelated words ("problems" contains "rob",
+    "page" contains "paige" partially). Full names and surnames stay.
     """
     names = [ctx.get("candidate")] + list(ctx.get("opponents", []))
-    name_tokens: list[str] = []
+    tokens: list[str] = []
     for n in names:
         if not n or n == "Unknown":
             continue
-        for t in _name_tokens(n):
-            if t and len(t) >= 3:
-                name_tokens.append(t.lower())
+        parts = n.strip().split()
+        if not parts:
+            continue
+        # Always include the full name.
+        tokens.append(n.strip().lower())
+        if len(parts) > 1:
+            # Surname — strongest unique signal.
+            tokens.append(parts[-1].lower())
+            # First name only if it's distinctive enough.
+            if len(parts[0]) >= 5:
+                tokens.append(parts[0].lower())
+    return tokens
 
-    title = (item.title or "").lower()
-    body = ((item.summary or "") + " " + (item.raw_text or "")[:3000]).lower()
 
-    title_hits = sum(1 for t in set(name_tokens) if t in title)
-    body_hits = sum(1 for t in set(name_tokens) if t in body)
-    return title_hits, body_hits
+def _count_token_hits(text: str, tokens: list[str]) -> int:
+    """Word-boundary count of distinct tokens in text.
+
+    Word-boundary matching defeats substring false positives like "Rob"
+    matching "problems" or "paige" matching "page". One distinct token can
+    only contribute one hit regardless of repetition.
+    """
+    if not text or not tokens:
+        return 0
+    text_lower = text.lower()
+    hits = 0
+    for t in set(tokens):
+        if not t:
+            continue
+        # Tokens that contain only word characters get \b…\b; tokens with
+        # spaces or punctuation need escaped literal match.
+        pattern = rf"\b{re.escape(t)}\b"
+        if re.search(pattern, text_lower):
+            hits += 1
+    return hits
+
+
+def _count_name_mentions(item: SourceItem, ctx: dict) -> tuple[int, int]:
+    """Return (title_mentions, body_mentions) of candidate/opponent names.
+
+    Word-boundary matched against full names + surnames (and first names
+    when they're distinctive — see _name_match_tokens).
+    """
+    tokens = _name_match_tokens(ctx)
+    title = item.title or ""
+    body = (item.summary or "") + " " + (item.raw_text or "")[:3000]
+    return _count_token_hits(title, tokens), _count_token_hits(body, tokens)
+
+
+def _count_name_mentions_uncontaminated(
+    item: SourceItem, ctx: dict
+) -> tuple[int, int]:
+    """Like _count_name_mentions but reads title + raw_text only, NOT summary.
+
+    Used by the hallucination cap, where letting LLM-generated text
+    (summary) serve as evidence defeats the cap's purpose. The summary
+    generator is known to stretch boilerplate phrases like 'COGNETTI, PAIGE'
+    and 'PA-08 federal candidate filings…' onto unrelated articles — see
+    INTER_SESSION.md 2026-05-30 for the diagnosis.
+    """
+    tokens = _name_match_tokens(ctx)
+    title = item.title or ""
+    body = (item.raw_text or "")[:3000]
+    return _count_token_hits(title, tokens), _count_token_hits(body, tokens)
+
+
+# Markers that indicate the source is a candidate-anchored feed (not a
+# generic news outlet). Used together with a surname match in the source
+# string to decide source-attribution as a cap-bypass signal.
+_CANDIDATE_FEED_MARKERS = (
+    "x/twitter",
+    "(@",
+    "twitter (",
+    "youtube:",
+    "youtube —",
+    "youtube -",
+    "google news:",
+    "google news —",
+    "google news -",
+    "rss: ",
+)
+
+# Source prefixes excluded from attribution — broad backfill searches that
+# can match unrelated surnames (an obituary of a different "Bresnahan", etc.).
+_ATTRIBUTION_EXCLUDE_PREFIXES = ("backfill:",)
+
+
+def _source_attributed_to_candidate(item: SourceItem, ctx: dict) -> bool:
+    """Cap-bypass signal: does source_name structurally attribute the article
+    to a candidate (their account, their feed, a per-candidate news query)?
+
+    Requires BOTH a candidate surname (≥5 chars) in the source AND one of
+    the recognized feed markers. Surname-alone matches false-positive on
+    unrelated-person obituaries; feed-marker-alone matches generic outlet feeds.
+    """
+    src = (item.source_name or "").lower()
+    if not src:
+        return False
+    if any(src.startswith(p) for p in _ATTRIBUTION_EXCLUDE_PREFIXES):
+        return False
+    if not any(m in src for m in _CANDIDATE_FEED_MARKERS):
+        return False
+    names = [ctx.get("candidate")] + list(ctx.get("opponents", []) or [])
+    for name in names:
+        if not name or name == "Unknown":
+            continue
+        parts = name.strip().split()
+        if len(parts) < 2:
+            continue
+        surname = parts[-1].lower()
+        if len(surname) >= 5 and surname in src:
+            return True
+    return False
+
+
+def _has_district_mention(item: SourceItem, ctx: dict) -> bool:
+    """Cap-bypass signal: district code (e.g. 'PA-08') in title or raw_text.
+
+    Reads title + raw_text only — NOT summary, which is LLM-generated and
+    known to paste 'PA-08' onto unrelated articles. Uses the district code
+    only, not the broader geography_keywords set (those let too much noise
+    through — 'Scranton' matches every local crime and real-estate story).
+    """
+    district = (ctx.get("district") or "").strip().lower()
+    if not district or len(district) < 4:
+        return False
+    blob = " ".join([
+        (item.title or ""),
+        (item.raw_text or "")[:3000],
+    ]).lower()
+    return district in blob
 
 
 def _article_text(item: SourceItem, max_words: int = 8000) -> tuple[str, bool]:
@@ -549,12 +670,33 @@ def _compute_relevance_score(
 
     score = base + title_bonus + body_bonus + claim_bonus + cred_bonus
 
-    # Hallucination cap: if the LLM said relevant/critical but neither
-    # candidate nor opponent is named anywhere in the article, the verdict
-    # is suspect. Cap at 40 (medium-low) so the article still surfaces if a
-    # human wants to review it, but doesn't get featured as headline-relevant.
-    if verdict in ("relevant", "critical") and title_hits == 0 and body_hits == 0:
-        score = min(score, 40)
+    # Hallucination cap: if the LLM said relevant/critical but the article
+    # has NO race-identifying signal in its raw content, the verdict is
+    # suspect. Cap at 40 so it doesn't surface as headline-relevant.
+    #
+    # Three signals count as "yes this is about the race":
+    #   1. candidate/opponent name in title or raw_text (uncontaminated —
+    #      ignores summary, which is LLM-generated and contains stretch
+    #      boilerplate that pastes 'COGNETTI, PAIGE' onto unrelated articles)
+    #   2. district code (e.g. "PA-08") in title or raw_text
+    #   3. source-attribution: the feed itself is candidate-anchored
+    #      (e.g. "Paige Cognetti X/Twitter (@PaigeGCognetti)",
+    #      "YouTube: Cognetti", "Google News: Rob Bresnahan")
+    #
+    # Geography keywords (Scranton, NEPA, Luzerne, …) are deliberately NOT
+    # used here — too broad, they let local crime / real estate / utility
+    # pages through. They remain in use for the pre-LLM gate, which is
+    # appropriate as a cost-saving filter.
+    if verdict in ("relevant", "critical"):
+        strict_title, strict_body = _count_name_mentions_uncontaminated(item, ctx)
+        has_race_signal = (
+            strict_title > 0
+            or strict_body > 0
+            or _has_district_mention(item, ctx)
+            or _source_attributed_to_candidate(item, ctx)
+        )
+        if not has_race_signal:
+            score = min(score, 40)
 
     return max(0, min(100, score))
 

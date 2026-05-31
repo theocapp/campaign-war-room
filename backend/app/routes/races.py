@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.schemas import CampaignInitializeResult, RaceDirectoryOut, RaceSelectRequest, RaceSelectResult
+from app.services.access_codes import require_admin
 from app.services.campaign_setup import initialize_campaign
 from app.services.race_directory import (
     get_directory_race,
@@ -11,6 +12,10 @@ from app.services.race_directory import (
 )
 
 router = APIRouter()
+
+# Selecting a race runs the LLM-heavy initialize_campaign chain — gate it.
+# The read endpoints (list / search / detail) stay open.
+_admin_only = [Depends(require_admin)]
 
 
 @router.get("/races", response_model=list[RaceDirectoryOut])
@@ -40,7 +45,7 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
     return get_directory_race(db, race_id)
 
 
-@router.post("/races/{race_id}/select", response_model=RaceSelectResult)
+@router.post("/races/{race_id}/select", response_model=RaceSelectResult, dependencies=_admin_only)
 def select_race(
     race_id: int,
     body: RaceSelectRequest | None = None,

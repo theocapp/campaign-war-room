@@ -9,12 +9,18 @@ from app.models import CampaignConfig
 from app.schemas import CampaignProfileOut, CampaignProfileIn, CampaignInitializeResult
 from app.services.monitors import auto_setup_monitors, run_historical_backfill
 from app.services.gdelt_backfill import run_gdelt_backfill
+from app.services.access_codes import require_admin
 from app.services.campaign_setup import infer_election_date, initialize_campaign
 from app.services.district_geojson import get_district_geojson
 from app.services.race_cities import get_race_cities
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Gates the LLM- and backfill-heavy operations: campaign initialize, historical
+# backfill, journalist auto-discovery, monitor prune, Google Trends collect.
+# Reading the campaign profile and polling status stays open.
+_admin_only = [Depends(require_admin)]
 
 
 def _config_to_profile(config: CampaignConfig) -> CampaignProfileOut:
@@ -30,7 +36,7 @@ def _config_to_profile(config: CampaignConfig) -> CampaignProfileOut:
     return profile.model_copy(update={"election_date_inferred": inferred_flag})
 
 
-@router.post("/campaign/initialize", response_model=CampaignInitializeResult)
+@router.post("/campaign/initialize", response_model=CampaignInitializeResult, dependencies=_admin_only)
 def campaign_initialize(
     days_back: int = 365,
     source: str | None = None,
@@ -177,7 +183,7 @@ def _run_backfill_then_rescore_then_rematch(days_back: int, source: str = "api")
         _backfill_status["finished_at"] = datetime.utcnow().isoformat()
 
 
-@router.post("/campaign/backfill-historical")
+@router.post("/campaign/backfill-historical", dependencies=_admin_only)
 def campaign_backfill_historical(
     days_back: int = 180,
     force: bool = False,
@@ -303,7 +309,7 @@ def get_trends_keywords(db: Session = Depends(get_db)):
     return {"terms": all_terms, "custom_terms": custom}
 
 
-@router.post("/campaign/discover-journalists")
+@router.post("/campaign/discover-journalists", dependencies=_admin_only)
 def trigger_journalist_discovery(
     days_back: int = 30,
     min_articles: int = 2,
@@ -326,7 +332,7 @@ def trigger_journalist_discovery(
     return result
 
 
-@router.post("/campaign/prune-monitors")
+@router.post("/campaign/prune-monitors", dependencies=_admin_only)
 def trigger_monitor_prune(
     dry_run: bool = True,
     min_age_days: int = 30,
@@ -351,7 +357,7 @@ def trigger_monitor_prune(
     )
 
 
-@router.post("/campaign/trends-collect")
+@router.post("/campaign/trends-collect", dependencies=_admin_only)
 def trigger_trends_collect(db: Session = Depends(get_db)):
     """Manually trigger a Google Trends data collection run."""
     import threading
@@ -397,7 +403,7 @@ def _state_from_location(location: str | None) -> str | None:
     return None
 
 
-@router.put("/campaign", response_model=CampaignProfileOut)
+@router.put("/campaign", response_model=CampaignProfileOut, dependencies=_admin_only)
 def update_campaign(body: CampaignProfileIn, db: Session = Depends(get_db)):
     config = db.query(CampaignConfig).first()
     if not config:

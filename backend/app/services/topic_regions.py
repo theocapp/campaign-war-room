@@ -723,7 +723,7 @@ def update_label(db: Session, persisted_row_id: int, new_label: str) -> Optional
     landscape cache (which composes the labels into its response and
     caches the whole thing).
     """
-    row = db.query(TopicRegionLabel).get(persisted_row_id)
+    row = db.get(TopicRegionLabel, persisted_row_id)
     if not row:
         return None
     row.label = _clean_label(new_label) or row.label

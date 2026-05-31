@@ -73,25 +73,36 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        # `app/db.py` attaches a connect listener that sets a 60s
-        # `statement_timeout` and a 30min `idle_in_transaction_session_timeout`
-        # on every new Postgres session. Today Alembic builds its own engine
-        # so that listener does not fire here — but if init_db() ever shares
-        # the app engine, or if the listener is moved to a class-level hook,
-        # those defaults would kill any migration that rewrites or backfills
-        # a large table. Clearing both at the connection level keeps
-        # migrations unbounded regardless of how the engine was constructed.
-        if connection.dialect.name == "postgresql":
-            connection.exec_driver_sql("SET statement_timeout = 0")
-            connection.exec_driver_sql(
-                "SET idle_in_transaction_session_timeout = 0"
-            )
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
             render_as_batch=_is_sqlite(),
         )
         with context.begin_transaction():
+            # `app/db.py` attaches a connect listener that sets a 60s
+            # `statement_timeout` and a 30min `idle_in_transaction_session_timeout`
+            # on every new Postgres session. Today Alembic builds its own
+            # engine so that listener doesn't fire here — but if init_db()
+            # ever shares the app engine, or the listener is moved to a
+            # class-level hook, those defaults would kill any migration
+            # that rewrites or backfills a large table.
+            #
+            # SET LOCAL applies for the duration of this transaction only,
+            # which is exactly the scope we want for migration safety. It
+            # also has to live INSIDE context.begin_transaction() — putting
+            # the SETs before it triggers SQLAlchemy 2.x's autobegin on a
+            # bare statement, which then conflicts with Alembic's
+            # transaction wrapper and causes the entire migration tx to
+            # ROLLBACK silently on connection exit (the migration appears
+            # to succeed in the log but no DDL persists). Diagnosed
+            # 2026-05-29 after the featured_appearances migration kept
+            # rolling back; the alembic_version UPDATE was visible in the
+            # SQL trace immediately before the ROLLBACK.
+            if connection.dialect.name == "postgresql":
+                connection.exec_driver_sql("SET LOCAL statement_timeout = 0")
+                connection.exec_driver_sql(
+                    "SET LOCAL idle_in_transaction_session_timeout = 0"
+                )
             context.run_migrations()
 
 

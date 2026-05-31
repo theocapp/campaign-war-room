@@ -2,6 +2,7 @@ import { Plus, Radio, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '@/api/client'
 import type { MonitorType, SourceMonitor } from '@/api/types'
+import { useAuth } from '@/auth/AuthContext'
 import { describeError, useToast } from '@/components/Toast'
 import { formatArticleDate } from '@/lib/formatDate'
 
@@ -126,6 +127,11 @@ function AddMonitorModal({ onClose, onCreated }: { onClose: () => void; onCreate
 }
 
 export function Monitors() {
+  // Crawl + URL-discovery buttons hit endpoints that spend money (LLM
+  // scoring on whatever the crawl ingests, paid web search on discovery).
+  // Hidden for non-admin users; backend also enforces.
+  const { user } = useAuth()
+  const isAdmin = !!user?.isAdmin
   const [monitors, setMonitors] = useState<SourceMonitor[]>([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
@@ -240,23 +246,27 @@ export function Monitors() {
         justifyContent: 'flex-end',
       }}>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={discoverUrls}
-            disabled={discovering}
-            className="btn btn-ghost"
-            title="Try to find URLs for any manual website monitors and convert them to webpage monitors."
-          >
-            <Search size={13} style={discovering ? { animation: 'spin 1s linear infinite' } : {}} />
-            {discovering ? 'Discovering...' : 'Discover URLs'}
-          </button>
-          <button
-            onClick={triggerCrawl}
-            disabled={crawling}
-            className="btn btn-ghost"
-          >
-            <RefreshCw size={13} style={crawling ? { animation: 'spin 1s linear infinite' } : {}} />
-            {crawling ? 'Crawling...' : 'Run Crawl'}
-          </button>
+          {isAdmin && (
+            <>
+              <button
+                onClick={discoverUrls}
+                disabled={discovering}
+                className="btn btn-ghost"
+                title="Try to find URLs for any manual website monitors and convert them to webpage monitors."
+              >
+                <Search size={13} style={discovering ? { animation: 'spin 1s linear infinite' } : {}} />
+                {discovering ? 'Discovering...' : 'Discover URLs'}
+              </button>
+              <button
+                onClick={triggerCrawl}
+                disabled={crawling}
+                className="btn btn-ghost"
+              >
+                <RefreshCw size={13} style={crawling ? { animation: 'spin 1s linear infinite' } : {}} />
+                {crawling ? 'Crawling...' : 'Run Crawl'}
+              </button>
+            </>
+          )}
           <button onClick={() => setShowAdd(true)} className="btn btn-primary">
             <Plus size={13} />
             Add Monitor

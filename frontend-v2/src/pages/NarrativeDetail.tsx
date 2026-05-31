@@ -1,4 +1,4 @@
-import { ArrowLeft, Copy, ExternalLink, MessageSquareQuote, Edit2, X } from 'lucide-react'
+import { ArrowLeft, ChevronDown, Copy, ExternalLink, MessageSquareQuote, Edit2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -8,21 +8,33 @@ import { InfoTooltip } from '@/components/InfoTooltip'
 import { formatArticleDate } from '@/lib/formatDate'
 
 const OUTLET_TIER_HELP =
-  'Where the story is showing up:\n• National — big outlets (NYT, WaPo, AP, cable news)\n• Regional — state-level papers and TV\n• Local — district-level outlets (very high signal for us)\n• Blog — opinion sites and small publishers\n• Social — Reddit, Bluesky, etc.\n\nLocal + regional means it\'s real on the ground; national means it\'s broken through.'
+  'Where the story is showing up:\n• National — big outlets (NYT, WaPo, AP, cable news)\n• Regional — state-level papers and TV\n• Local — district-level outlets (very high signal for us)\n• Blog — opinion sites and small publishers\n• Social — Reddit, Bluesky, etc.\n\nLocal + regional means it\'s real on the ground; national means it\'s broken through.\n\nNote: bars count individual articles, so a wire story picked up by 5 outlets adds 5 to the height. The STORIES stat at the top is wire-deduped — compare the two to see how much is real spread vs wire echo.'
 
 type TierKey = 'national' | 'regional' | 'local' | 'blog' | 'social' | 'unknown'
 const TIER_ORDER: readonly TierKey[] = ['national', 'regional', 'local', 'blog', 'social', 'unknown']
-// Cool gradient palette — distinct from the candidate-blue / opponent-red
-// owner colors so tier ≠ "side". Each hue chosen to read clearly in dark mode
-// and against the bg-2 panel. Local and Blog are pulled out of the
-// pee-yellow / poo-gray hole the prior palette was in.
-const TIER_COLORS: Record<TierKey, string> = {
+// Tier palette tracks the frame's *side*. Candidate-favoring frames (and
+// media frames as a neutral default) get a cool gradient; opponent-
+// favoring frames get a hot gradient. Reading order stays the same:
+// national is the most saturated/loud tier, social/unknown the softest.
+// Both palettes are tuned to read in dark mode against bg-2.
+const COOL_TIER_COLORS: Record<TierKey, string> = {
   national: '#a855f7',  // purple — biggest media
   regional: '#6366f1',  // indigo
   local:    '#06b6d4',  // cyan — high signal, distinct
   blog:     '#14b8a6',  // teal
   social:   '#22c55e',  // emerald — organic / people
   unknown:  '#64748b',  // slate — proper neutral gray
+}
+const HOT_TIER_COLORS: Record<TierKey, string> = {
+  national: '#dc2626',  // crimson — biggest media
+  regional: '#ea580c',  // red-orange
+  local:    '#f59e0b',  // amber — high signal, distinct
+  blog:     '#eab308',  // gold
+  social:   '#ec4899',  // pink — organic / people (stays on the warm side)
+  unknown:  '#64748b',  // slate — same neutral both palettes share
+}
+function tierColorsFor(ownerType?: OwnerType): Record<TierKey, string> {
+  return ownerType === 'opponent' ? HOT_TIER_COLORS : COOL_TIER_COLORS
 }
 const TIER_LABELS: Record<TierKey, string> = {
   national: 'National', regional: 'Regional', local: 'Local',
@@ -113,13 +125,160 @@ function formatDate(iso?: string): string {
 // Articles list. Module-level so the ArticleList helper component can
 // type-check against it.
 type ArticleFilter =
-  | { kind: 'tier'; tier: TierKey; tierLabel: string; date: string }
+  | { kind: 'tier'; tier: TierKey; tierLabel: string; tierColor: string; date: string }
   | {
       kind: 'variant'; variantId: number; variantName: string;
       variantColor: string; date: string;
       articles: DetailArticle[] | null;  // null while loading
       loading: boolean;
     }
+
+// ─────────────────────────────────────────────────────────────────────
+// Toolbar primitives shared by Supporting Quotes and Article List.
+//
+// Chip-styled dropdown that matches the rest of the page's button
+// aesthetic (the label-filter buttons, copy button, etc.): 3px×8px
+// padding, 4px radius, 11px uppercase weight-600 text. When the
+// dropdown's value is non-default, the chip takes the accent
+// border/background — same active-state pattern as a single chip.
+// The popover is a small floating menu of options, not a native
+// <select>. Click-outside or Escape closes it.
+// ─────────────────────────────────────────────────────────────────────
+function ToolbarDropdown({
+  label, value, options, onChange, minWidth,
+}: {
+  label: string
+  value: string
+  // The FIRST option is treated as the "default" (no-filter) state —
+  // when value matches it, the chip renders without accent styling.
+  options: ReadonlyArray<{ value: string; label: string }>
+  onChange: (v: string) => void
+  minWidth?: number
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const current = options.find(o => o.value === value) ?? options[0]
+  const isDefault = value === options[0]?.value
+
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          padding: '3px 6px 3px 8px', borderRadius: 4,
+          fontSize: 11, fontWeight: 600,
+          border: `1px solid ${isDefault ? C.bg3 : C.accent}`,
+          background: isDefault ? 'transparent' : C.accentSoft,
+          color: isDefault ? C.text2 : C.accent,
+          cursor: 'pointer',
+          display: 'inline-flex', alignItems: 'center', gap: 5,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <span style={{
+          textTransform: 'uppercase', letterSpacing: '0.05em',
+          color: isDefault ? C.text3 : C.accent,
+        }}>
+          {label}:
+        </span>
+        <span style={{ textTransform: 'capitalize' }}>{current.label}</span>
+        <ChevronDown size={12} style={{
+          transform: open ? 'rotate(180deg)' : 'rotate(0)',
+          transition: 'transform 0.12s ease',
+        }} />
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0,
+          minWidth: minWidth ?? 160,
+          background: C.bg2, border: `1px solid ${C.border}`,
+          borderRadius: 4, padding: 4,
+          zIndex: 30,
+          boxShadow: '0 6px 16px rgba(0,0,0,0.35)',
+          maxHeight: 320, overflowY: 'auto',
+        }}>
+          {options.map(opt => {
+            const selected = opt.value === value
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => { onChange(opt.value); setOpen(false) }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  padding: '5px 8px', borderRadius: 3,
+                  border: 'none',
+                  background: selected ? C.accentSoft : 'transparent',
+                  color: selected ? C.accent : C.text1,
+                  fontSize: 12, fontWeight: selected ? 600 : 500,
+                  cursor: 'pointer', whiteSpace: 'nowrap',
+                  textTransform: 'capitalize',
+                }}
+                onMouseEnter={e => {
+                  if (!selected) e.currentTarget.style.background = C.bg3
+                }}
+                onMouseLeave={e => {
+                  if (!selected) e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                {opt.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LoadMoreButton({
+  visible, total, onLoadMore, label = 'Load more',
+}: {
+  visible: number
+  total: number
+  onLoadMore: () => void
+  label?: string
+}) {
+  if (visible >= total) return null
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'center',
+      padding: '14px 0 4px',
+    }}>
+      <button
+        type="button"
+        onClick={onLoadMore}
+        style={{
+          padding: '6px 14px', borderRadius: 4,
+          border: `1px solid ${C.bg3}`,
+          background: 'transparent', color: C.text2,
+          fontSize: 12, fontWeight: 600, cursor: 'pointer',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.color = C.text1 }}
+        onMouseLeave={e => { e.currentTarget.style.borderColor = C.bg3; e.currentTarget.style.color = C.text2 }}
+      >
+        {label} ({visible}/{total})
+      </button>
+    </div>
+  )
+}
 
 export function NarrativeDetail() {
   const { id } = useParams<{ id: string }>()
@@ -149,6 +308,11 @@ export function NarrativeDetail() {
   const [detail, setDetail] = useState<NarrativeFrameDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [timeframe, setTimeframe] = useState<Timeframe>('30')
+  // Track whether the user has manually picked a timeframe. If they have,
+  // we never auto-snap again (even if detail data refetches). Without this
+  // guard, the snap-to-data effect below would fight a user who explicitly
+  // zoomed in to 7D on a frame whose last activity is older.
+  const timeframeUserPickedRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [candidateName, setCandidateName] = useState('')
   const [opponentName, setOpponentName] = useState('')
@@ -183,9 +347,9 @@ export function NarrativeDetail() {
     })
   }
 
-  function handleTierBarClick(tier: TierKey, date: string) {
+  function handleTierBarClick(tier: TierKey, date: string, tierColor: string) {
     setArticleFilter({
-      kind: 'tier', tier, tierLabel: TIER_LABELS[tier], date,
+      kind: 'tier', tier, tierLabel: TIER_LABELS[tier], tierColor, date,
     })
     scrollToArticles()
   }
@@ -214,6 +378,12 @@ export function NarrativeDetail() {
     if (!frameId) return
     setLoading(true)
     setError(null)
+    // Navigating to a different frame resets the "user-picked timeframe"
+    // intent — otherwise jumping from a frame where the user manually
+    // zoomed to 7D leaves the next frame stuck on 7D even when it would
+    // render an empty chart there.
+    timeframeUserPickedRef.current = false
+    setTimeframe('30')
     api.narrativeFrameDetail(frameId)
       .then(setDetail)
       .catch(e => setError(String(e)))
@@ -223,6 +393,24 @@ export function NarrativeDetail() {
     api.frameGraph(frameId, 25).then(setFrameGraph).catch(() => setFrameGraph(null))
     api.frameQuoteEvidence(frameId, 200).then(setQuoteEvidence).catch(() => setQuoteEvidence(null))
   }, [frameId])
+
+  // Auto-snap default timeframe to the smallest window that actually
+  // contains data. Cascade: 30D → 90D → ALL. Never auto-selects 7D —
+  // 7D is a manual zoom-in only, because most frames don't have enough
+  // article density to render a useful 7-day picture. Runs once per
+  // frame, only when the user hasn't manually picked a window.
+  useEffect(() => {
+    if (!detail || timeframeUserPickedRef.current) return
+    const all = detail.activity ?? []
+    const nonzero = all.filter(p => (p.count ?? 0) > 0)
+    if (nonzero.length === 0) return  // empty frame — 30D default is fine
+    const lastDate = new Date(nonzero[nonzero.length - 1].date)
+    const daysSince = (Date.now() - lastDate.getTime()) / 86400000
+    let pick: Timeframe = '30'
+    if (daysSince > 90) pick = 'all'
+    else if (daysSince > 30) pick = '90'
+    setTimeframe(pick)
+  }, [detail])
 
   // Fetch the variant timeline whenever the frame or the requested window
   // changes. Failures are silent — the section just disappears (lets the page
@@ -240,13 +428,83 @@ export function NarrativeDetail() {
   // both useMemo — they have to run on every render in the same order, even
   // before `detail` arrives. Use empty fallbacks so they're safe to compute
   // pre-fetch.
+  //
+  // The chart series is densified (gap-filled with zero bars on quiet days)
+  // so the x-axis represents continuous time. Without densification, recharts
+  // treats date as a categorical key and packs sparse non-zero days side-by-
+  // side, hiding long quiet stretches. The list endpoint's sparkline series
+  // is densified server-side; the detail endpoint returns sparse rows, so we
+  // densify here.
   const filteredActivity: ActivityPoint[] = useMemo(() => {
     const all = detail?.activity ?? []
-    if (timeframe === 'all') return all
-    const days = parseInt(timeframe, 10)
-    const cutoffISO = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
-    return all.filter(p => p.date >= cutoffISO)
+    if (all.length === 0) return []
+    const todayISO = new Date().toISOString().slice(0, 10)
+    let startISO: string
+    let endISO: string
+    if (timeframe === 'all') {
+      startISO = all[0].date
+      endISO = todayISO > all[all.length - 1].date ? todayISO : all[all.length - 1].date
+    } else {
+      const days = parseInt(timeframe, 10)
+      startISO = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
+      endISO = todayISO
+    }
+    const byDate = new Map(
+      all.filter(p => p.date >= startISO && p.date <= endISO).map(p => [p.date, p]),
+    )
+    const empty = (date: string): ActivityPoint => ({
+      date, count: 0, total: 0,
+      national: 0, regional: 0, local: 0, blog: 0, social: 0, unknown: 0,
+    })
+    const result: ActivityPoint[] = []
+    const cursor = new Date(startISO + 'T00:00:00Z')
+    const stop = new Date(endISO + 'T00:00:00Z')
+    while (cursor <= stop) {
+      const iso = cursor.toISOString().slice(0, 10)
+      result.push(byDate.get(iso) ?? empty(iso))
+      cursor.setUTCDate(cursor.getUTCDate() + 1)
+    }
+    return result
   }, [detail, timeframe])
+
+  // After densification filteredActivity is almost never empty (it's just
+  // full of zero bars), so the empty-state check moves to "does any day
+  // have non-zero activity in this window?"
+  const filteredHasActivity = useMemo(
+    () => filteredActivity.some(p => (p.count ?? 0) > 0),
+    [filteredActivity],
+  )
+
+  // Hide timeframe buttons whose window doesn't add visible data beyond
+  // the next-smaller window. A frame whose entire history fits in 7 days
+  // doesn't need 30D/90D/ALL toggles — they'd all show the same data
+  // with progressively more empty x-axis. When the resulting button list
+  // is too small to be a meaningful toggle (<2), we hide the whole row.
+  //
+  // Rule per button: shown if there's at least one non-zero day strictly
+  // older than the previous button's window edge AND within this button's
+  // window. So 30D shows up only if some activity sits in (7, 30] days
+  // old, 90D only if some activity is in (30, 90], ALL only if anything
+  // is older than 90 days.
+  const availableTimeframes = useMemo<Timeframe[]>(() => {
+    const all = detail?.activity ?? []
+    const nonzero = all.filter(p => (p.count ?? 0) > 0)
+    if (nonzero.length === 0) return []
+    const now = Date.now()
+    const ageDays = (iso: string) =>
+      (now - new Date(iso + 'T00:00:00Z').getTime()) / 86400000
+    const inRange = (minD: number, maxD: number) =>
+      nonzero.some(p => {
+        const a = ageDays(p.date)
+        return a >= minD && a < maxD
+      })
+    const tf: Timeframe[] = []
+    if (inRange(0, 7)) tf.push('7')
+    if (inRange(7, 30)) tf.push('30')
+    if (inRange(30, 90)) tf.push('90')
+    if (nonzero.some(p => ageDays(p.date) >= 90)) tf.push('all')
+    return tf
+  }, [detail])
 
   const tiersInUse = useMemo(
     () => TIER_ORDER.filter(t => filteredActivity.some(p => (p[t] ?? 0) > 0)),
@@ -340,7 +598,7 @@ export function NarrativeDetail() {
 
   if (loading) {
     return (
-      <div style={{ padding: '24px 28px', maxWidth: 1100, margin: '0 auto' }}>
+      <div style={{ padding: '24px 28px' }}>
         <div className="skeleton" style={{ height: 28, width: 200, marginBottom: 16, borderRadius: 4 }} />
         <div className="skeleton" style={{ height: 80, marginBottom: 16, borderRadius: 6 }} />
         <div className="skeleton" style={{ height: 220, marginBottom: 16, borderRadius: 6 }} />
@@ -351,7 +609,7 @@ export function NarrativeDetail() {
 
   if (error || !detail) {
     return (
-      <div style={{ padding: '24px 28px', maxWidth: 1100, margin: '0 auto' }}>
+      <div style={{ padding: '24px 28px' }}>
         <button onClick={handleBack} style={backButtonStyle}>
           <ArrowLeft size={14} /> {backLabel}
         </button>
@@ -363,13 +621,16 @@ export function NarrativeDetail() {
   }
 
   const oc = frameColor(detail)
+  // Tier palette tracks frame side: opponent-favoring frames get the hot
+  // gradient, everything else cool. See tierColorsFor() at top of file.
+  const tc = tierColorsFor(detail.owner_type)
   const tiers = detail.outlet_tiers
   const tierEntries = (['national', 'regional', 'local', 'blog', 'social'] as const)
     .map(k => [k, tiers[k]] as const)
     .filter(([, n]) => n > 0)
 
   return (
-    <div style={{ padding: '20px 28px 40px', maxWidth: 1100, margin: '0 auto' }}>
+    <div style={{ padding: '20px 28px 40px' }}>
       {/* Back link */}
       <button onClick={handleBack} style={backButtonStyle}>
         <ArrowLeft size={14} /> {backLabel}
@@ -395,8 +656,8 @@ export function NarrativeDetail() {
 
       {/* Stat row */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 24 }}>
-        <Stat label="ARTICLES TOTAL" value={detail.articles_total} color={oc} />
-        <Stat label="THIS WEEK" value={detail.articles_this_week} color={C.text1} />
+        <Stat label="STORIES" value={detail.articles_total} color={oc} />
+        <Stat label="STORIES THIS WEEK" value={detail.articles_this_week} color={C.text1} />
         <Stat label="FIRST SEEN" value={formatDate(detail.first_seen_at)} valueSize={15} color={C.text2} />
         <Stat label="LAST SEEN" value={formatDate(detail.last_seen_at)} valueSize={15} color={C.text2} />
       </div>
@@ -408,16 +669,20 @@ export function NarrativeDetail() {
           marginBottom: 10, gap: 8, flexWrap: 'wrap',
         }}>
           <div className="section-label" style={{ display: 'inline-flex', alignItems: 'center' }}>
-            Activity — by outlet tier
+            Articles — by outlet tier
             <InfoTooltip text={OUTLET_TIER_HELP} />
           </div>
+          {availableTimeframes.length >= 2 && (
           <div style={{ display: 'flex', gap: 4 }}>
-            {TIMEFRAMES.map(([val, label]) => {
+            {TIMEFRAMES.filter(([val]) => availableTimeframes.includes(val)).map(([val, label]) => {
               const active = timeframe === val
               return (
                 <button
                   key={val}
-                  onClick={() => setTimeframe(val)}
+                  onClick={() => {
+                    timeframeUserPickedRef.current = true
+                    setTimeframe(val)
+                  }}
                   style={{
                     fontSize: 10, letterSpacing: '0.05em',
                     padding: '4px 10px', borderRadius: 3, cursor: 'pointer',
@@ -431,12 +696,13 @@ export function NarrativeDetail() {
               )
             })}
           </div>
+          )}
         </div>
         <div style={{
           background: C.bg2, border: `1px solid ${C.bg3}`,
           borderRadius: 6, padding: '14px 16px',
         }}>
-          {filteredActivity.length === 0 ? (
+          {!filteredHasActivity ? (
             <EmptyBlock label="No activity in this window." />
           ) : (
             <>
@@ -458,28 +724,66 @@ export function NarrativeDetail() {
                     allowDecimals={false}
                   />
                   <Tooltip
-                    contentStyle={{
-                      background: 'var(--bg-3)', border: `1px solid ${C.border}`,
-                      borderRadius: 3, fontSize: 12, color: C.text1,
-                    }}
-                    labelStyle={{ color: C.text3 }}
                     cursor={{ fill: 'rgba(255,255,255,0.05)' }}
-                    formatter={(value: number, name: string) => [
-                      value, TIER_LABELS[name as TierKey] ?? name,
-                    ]}
+                    // Custom content so we can filter out tiers with zero
+                    // value on the hovered day. The default tooltip lists
+                    // every stacked Bar (so all six tiers, even the ones
+                    // at 0), which makes a single-outlet day read as a
+                    // wall of "0"s. Filtering to non-zero entries keeps
+                    // the tooltip tight and truthful.
+                    content={(props) => {
+                      const { active, payload, label } = props as {
+                        active?: boolean
+                        payload?: Array<{ dataKey: string; value: number; color: string }>
+                        label?: string
+                      }
+                      if (!active || !payload?.length) return null
+                      const rows = payload.filter(p => (p.value ?? 0) > 0)
+                      if (rows.length === 0) return null
+                      return (
+                        <div style={{
+                          background: 'var(--bg-3)',
+                          border: `1px solid ${C.border}`,
+                          borderRadius: 3,
+                          padding: '6px 10px',
+                          fontSize: 12,
+                          color: C.text1,
+                          minWidth: 110,
+                        }}>
+                          <div style={{ color: C.text3, marginBottom: 4 }}>{label}</div>
+                          {rows.map(r => (
+                            <div key={r.dataKey} style={{
+                              display: 'flex', justifyContent: 'space-between', gap: 12,
+                              alignItems: 'center', lineHeight: 1.5,
+                            }}>
+                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                <span style={{
+                                  width: 8, height: 8, borderRadius: 2,
+                                  background: r.color, display: 'inline-block',
+                                }} />
+                                {TIER_LABELS[r.dataKey as TierKey] ?? r.dataKey}
+                              </span>
+                              <span style={{ color: C.text1, fontVariantNumeric: 'tabular-nums' }}>
+                                {r.value}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )
+                    }}
                   />
                   {TIER_ORDER.map(tier => (
                     <Bar
                       key={tier}
                       dataKey={tier}
                       stackId="a"
-                      fill={TIER_COLORS[tier]}
+                      fill={tc[tier]}
                       cursor="pointer"
                       onClick={(entry) => {
                         // Recharts passes the row datum + index. We close over `tier`.
                         const row = (entry?.payload ?? entry) as ActivityPoint | undefined
                         const count = (row?.[tier] ?? 0) as number
-                        if (row && count > 0) handleTierBarClick(tier, row.date)
+                        if (row && count > 0) handleTierBarClick(tier, row.date, tc[tier])
                       }}
                     />
                   ))}
@@ -496,7 +800,7 @@ export function NarrativeDetail() {
                     <div key={tier} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <span style={{
                         width: 10, height: 10, borderRadius: 2,
-                        background: TIER_COLORS[tier], display: 'inline-block',
+                        background: tc[tier], display: 'inline-block',
                       }} />
                       <span style={{ color: C.text2 }}>{TIER_LABELS[tier]}</span>
                     </div>
@@ -869,9 +1173,49 @@ function SupportingQuotes({
   onLabelChange: (label: string | null) => void
 }) {
   const labels = Object.entries(data.by_label).sort((a, b) => b[1] - a[1])
-  const visible = activeLabel
-    ? data.quotes.filter(q => (q.label ?? 'unlabeled') === activeLabel)
-    : data.quotes
+
+  // Sort + outlet filter + paging (independent of the existing label-chip
+  // filter, which is already applied via `activeLabel`). Reset paging when
+  // any of the filter/sort knobs change.
+  const [sortMode, setSortMode] = useState<'newest' | 'oldest'>('newest')
+  const [outletFilter, setOutletFilter] = useState<string>('all')
+  const [visibleLimit, setVisibleLimit] = useState<number>(15)
+  const QUOTES_PAGE = 15
+
+  // Outlet options derived from the data — alphabetical, deduplicated.
+  // "Unknown outlet" stays as a real entry so filtering still works for
+  // quotes whose article has no outlet_name.
+  const outletOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const q of data.quotes) {
+      set.add(q.article.outlet_name ?? 'Unknown outlet')
+    }
+    const sorted = Array.from(set).sort((a, b) => a.localeCompare(b))
+    return [{ value: 'all', label: `All outlets (${set.size})` }, ...sorted.map(s => ({ value: s, label: s }))]
+  }, [data.quotes])
+
+  const filteredSorted = useMemo(() => {
+    let arr = data.quotes
+    if (activeLabel) {
+      arr = arr.filter(q => (q.label ?? 'unlabeled') === activeLabel)
+    }
+    if (outletFilter !== 'all') {
+      arr = arr.filter(q => (q.article.outlet_name ?? 'Unknown outlet') === outletFilter)
+    }
+    arr = [...arr].sort((a, b) => {
+      const ta = a.article.published_at ? new Date(a.article.published_at).getTime() : 0
+      const tb = b.article.published_at ? new Date(b.article.published_at).getTime() : 0
+      return sortMode === 'newest' ? tb - ta : ta - tb
+    })
+    return arr
+  }, [data.quotes, activeLabel, outletFilter, sortMode])
+
+  // Reset paging whenever the resulting list changes shape.
+  useEffect(() => {
+    setVisibleLimit(QUOTES_PAGE)
+  }, [activeLabel, outletFilter, sortMode])
+
+  const visible = filteredSorted.slice(0, visibleLimit)
   const [copiedId, setCopiedId] = useState<number | null>(null)
 
   function copy(text: string, id: number) {
@@ -881,49 +1225,67 @@ function SupportingQuotes({
     }).catch(() => {})
   }
 
+  // Label dropdown options — pulled from data.by_label (the same counts
+  // the chip-bar showed) with an "All" leading entry. The chip-style
+  // dropdown collapses what was previously 7-9 inline chips into one
+  // chip that opens a popover.
+  const labelOptions = useMemo(() => {
+    const opts: Array<{ value: string; label: string }> = [
+      { value: '__all', label: `All (${data.total})` },
+    ]
+    for (const [name, count] of labels) {
+      opts.push({
+        value: name,
+        label: `${name.replace(/_/g, ' ')} (${count})`,
+      })
+    }
+    return opts
+  }, [labels, data.total])
+
   return (
     <Section
       title={`Supporting quotes (${data.total})`}
       icon={<MessageSquareQuote size={14} />}
-      tooltip="Verbatim quote spans from articles matched to this frame. Each quote is grounded in a single article — no paraphrase. Use the label chips to filter; one-click copy for press release / rapid-response."
-      action={
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button
-            onClick={() => onLabelChange(null)}
-            style={{
-              padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-              border: `1px solid ${activeLabel === null ? C.accent : C.bg3}`,
-              background: activeLabel === null ? C.accentSoft : 'transparent',
-              color: activeLabel === null ? C.accent : C.text2,
-              cursor: 'pointer',
-            }}
-          >
-            All
-          </button>
-          {labels.map(([label, count]) => {
-            const isActive = activeLabel === label
-            const color = QUOTE_LABEL_COLOR[label] ?? C.text3
-            return (
-              <button
-                key={label}
-                onClick={() => onLabelChange(isActive ? null : label)}
-                style={{
-                  padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600,
-                  border: `1px solid ${isActive ? color : C.bg3}`,
-                  background: isActive ? `${color}22` : 'transparent',
-                  color: isActive ? color : C.text2,
-                  cursor: 'pointer', textTransform: 'capitalize',
-                }}
-              >
-                {label.replace(/_/g, ' ')} {count}
-              </button>
-            )
-          })}
-        </div>
-      }
+      tooltip="Verbatim quote spans from articles matched to this frame. Each quote is grounded in a single article — no paraphrase. Use the Label dropdown to filter; one-click copy for press release / rapid-response."
     >
-      {visible.length === 0 && (
-        <EmptyBlock label="No quotes match this filter." />
+      {/* Filter toolbar — sort, label, outlet. The Label dropdown
+          replaces the previous row of 7-9 inline chips. Resets paging
+          when any value changes. */}
+      <div style={{
+        display: 'flex', flexWrap: 'wrap', gap: 8,
+        alignItems: 'center', marginBottom: 12,
+        paddingBottom: 10, borderBottom: `1px solid ${C.bg3}`,
+      }}>
+        <ToolbarDropdown
+          label="Sort"
+          value={sortMode}
+          onChange={v => setSortMode(v as 'newest' | 'oldest')}
+          options={[
+            { value: 'newest', label: 'Newest first' },
+            { value: 'oldest', label: 'Oldest first' },
+          ]}
+          minWidth={160}
+        />
+        <ToolbarDropdown
+          label="Label"
+          value={activeLabel ?? '__all'}
+          onChange={v => onLabelChange(v === '__all' ? null : v)}
+          options={labelOptions}
+          minWidth={200}
+        />
+        <ToolbarDropdown
+          label="Outlet"
+          value={outletFilter}
+          onChange={setOutletFilter}
+          options={outletOptions}
+          minWidth={220}
+        />
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: C.text3 }}>
+          Showing {Math.min(visibleLimit, filteredSorted.length)} of {filteredSorted.length}
+        </span>
+      </div>
+      {filteredSorted.length === 0 && (
+        <EmptyBlock label="No quotes match these filters." />
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {visible.map(q => {
@@ -969,12 +1331,6 @@ function SupportingQuotes({
                         Source <ExternalLink size={10} />
                       </a>
                     )}
-                    {q.entities.length > 0 && (
-                      <>
-                        <span>·</span>
-                        <span>Entities: {q.entities.map(e => e.name).join(', ')}</span>
-                      </>
-                    )}
                   </div>
                 </div>
                 <button
@@ -998,6 +1354,12 @@ function SupportingQuotes({
           )
         })}
       </div>
+      <LoadMoreButton
+        visible={visible.length}
+        total={filteredSorted.length}
+        onLoadMore={() => setVisibleLimit(n => n + QUOTES_PAGE)}
+        label="Load more quotes"
+      />
     </Section>
   )
 }
@@ -1023,22 +1385,75 @@ function ArticleList({
   articleFilter: ArticleFilter | null
   onClearFilter: () => void
 }) {
-  let visible: DetailArticle[] = articles
-  let titleSuffix = `(${articles.length})`
+  // ── Filtered set produced by the existing chip mechanism (tier from
+  // bar-chart click, variant from variant-evolution click). Then sort,
+  // sentiment, and outlet filters layer on top.
+  let base: DetailArticle[] = articles
   let isLoading = false
 
   if (articleFilter?.kind === 'tier') {
-    visible = articles.filter(a => {
+    base = articles.filter(a => {
       if (outletTypeToTier(a.outlet_type) !== articleFilter.tier) return false
       if (a.published_at && a.published_at.slice(0, 10) !== articleFilter.date) return false
       return true
     })
-    titleSuffix = `(${visible.length})`
   } else if (articleFilter?.kind === 'variant') {
     isLoading = articleFilter.loading
-    visible = articleFilter.articles ?? []
-    titleSuffix = isLoading ? '(loading…)' : `(${visible.length})`
+    base = articleFilter.articles ?? []
   }
+
+  // Sort + filter state. Reset paging whenever any of these change so
+  // the user always sees the new "page 1."
+  const [sortMode, setSortMode] = useState<'newest' | 'oldest' | 'relevance'>('newest')
+  const [sentimentFilter, setSentimentFilter] = useState<string>('all')
+  const [outletFilter, setOutletFilter] = useState<string>('all')
+  const [visibleLimit, setVisibleLimit] = useState<number>(20)
+  const ARTICLES_PAGE = 20
+
+  // Outlet options derived from the chip-filtered base — limited to what
+  // the user could actually pick. "Unknown outlet" stays so articles with
+  // no outlet_name remain reachable.
+  const outletOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const a of base) {
+      set.add(a.outlet_name || a.source_name || 'Unknown outlet')
+    }
+    const sorted = Array.from(set).sort((a, b) => a.localeCompare(b))
+    return [
+      { value: 'all', label: `All outlets (${set.size})` },
+      ...sorted.map(s => ({ value: s, label: s })),
+    ]
+  }, [base])
+
+  const filteredSorted = useMemo(() => {
+    let arr = base
+    if (sentimentFilter !== 'all') {
+      arr = arr.filter(a => (a.sentiment ?? 'neutral') === sentimentFilter)
+    }
+    if (outletFilter !== 'all') {
+      arr = arr.filter(a => (a.outlet_name || a.source_name || 'Unknown outlet') === outletFilter)
+    }
+    arr = [...arr].sort((a, b) => {
+      if (sortMode === 'relevance') {
+        return (b.race_relevance_score ?? 0) - (a.race_relevance_score ?? 0)
+      }
+      const ta = a.published_at ? new Date(a.published_at).getTime() : 0
+      const tb = b.published_at ? new Date(b.published_at).getTime() : 0
+      return sortMode === 'newest' ? tb - ta : ta - tb
+    })
+    return arr
+  }, [base, sentimentFilter, outletFilter, sortMode])
+
+  // Reset paging when the chip filter, sort, or filters change. Includes
+  // `articleFilter` so toggling a tier/variant chip on/off restarts paging.
+  useEffect(() => {
+    setVisibleLimit(ARTICLES_PAGE)
+  }, [articleFilter, sortMode, sentimentFilter, outletFilter])
+
+  const visible = filteredSorted.slice(0, visibleLimit)
+  const titleSuffix = isLoading
+    ? '(loading…)'
+    : `(${filteredSorted.length})`
 
   const chip = articleFilter && (
     <FilterChip filter={articleFilter} onClear={onClearFilter} />
@@ -1046,63 +1461,116 @@ function ArticleList({
 
   return (
     <Section title={`All articles ${titleSuffix}`} action={chip}>
+      {/* Sort + sentiment + outlet toolbar. Sits above the article list.
+          Hidden during variant-load to avoid showing stale controls. */}
+      {!isLoading && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 8,
+          alignItems: 'center', marginBottom: 10,
+          paddingBottom: 10, borderBottom: `1px solid ${C.bg3}`,
+        }}>
+          <ToolbarDropdown
+            label="Sort"
+            value={sortMode}
+            onChange={v => setSortMode(v as 'newest' | 'oldest' | 'relevance')}
+            options={[
+              { value: 'newest', label: 'Newest first' },
+              { value: 'oldest', label: 'Oldest first' },
+              { value: 'relevance', label: 'Relevance score' },
+            ]}
+            minWidth={180}
+          />
+          <ToolbarDropdown
+            label="Sentiment"
+            value={sentimentFilter}
+            onChange={setSentimentFilter}
+            options={[
+              { value: 'all',      label: 'All' },
+              { value: 'positive', label: 'Positive' },
+              { value: 'negative', label: 'Negative' },
+              { value: 'neutral',  label: 'Neutral'  },
+              { value: 'mixed',    label: 'Mixed'    },
+            ]}
+            minWidth={140}
+          />
+          <ToolbarDropdown
+            label="Outlet"
+            value={outletFilter}
+            onChange={setOutletFilter}
+            options={outletOptions}
+            minWidth={220}
+          />
+          <span style={{ marginLeft: 'auto', fontSize: 11, color: C.text3 }}>
+            Showing {Math.min(visibleLimit, filteredSorted.length)} of {filteredSorted.length}
+          </span>
+        </div>
+      )}
+
       {isLoading ? (
         <div style={{ padding: '20px 0', textAlign: 'center', color: C.text3, fontSize: 12 }}>
           Loading articles for this variant…
         </div>
-      ) : visible.length === 0 ? (
+      ) : filteredSorted.length === 0 ? (
         <EmptyBlock
           label={
-            articleFilter
-              ? 'No articles match this filter.'
+            articleFilter || sentimentFilter !== 'all' || outletFilter !== 'all'
+              ? 'No articles match these filters.'
               : 'No articles linked yet.'
           }
         />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column' }}>
-          {visible.map((a, i) => (
-            <a
-              key={a.id}
-              href={a.source_url || '#'}
-              target={a.source_url ? '_blank' : undefined}
-              rel="noreferrer"
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '80px 1fr 140px',
-                gap: 12,
-                alignItems: 'center',
-                padding: '10px 4px',
-                borderTop: i === 0 ? 'none' : `1px solid ${C.bg3}`,
-                color: 'inherit', textDecoration: 'none',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = C.bg2)}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <div style={{ fontSize: 11, color: C.text3 }}>
-                {a.published_at ? formatDate(a.published_at) : '—'}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{
-                  fontSize: 13, color: C.text1, fontWeight: 500,
-                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                }}>
-                  {a.title}
+        <>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {visible.map((a, i) => (
+              <a
+                key={a.id}
+                href={a.source_url || '#'}
+                target={a.source_url ? '_blank' : undefined}
+                rel="noreferrer"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '80px 1fr 140px',
+                  gap: 12,
+                  alignItems: 'center',
+                  padding: '10px 4px',
+                  borderTop: i === 0 ? 'none' : `1px solid ${C.bg3}`,
+                  color: 'inherit', textDecoration: 'none',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = C.bg2)}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <div style={{ fontSize: 11, color: C.text3 }}>
+                  {a.published_at ? formatDate(a.published_at) : '—'}
                 </div>
-                {a.summary && (
+                <div style={{ minWidth: 0 }}>
                   <div style={{
-                    fontSize: 12, color: C.text3, marginTop: 2,
+                    fontSize: 13, color: C.text1, fontWeight: 500,
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>
-                    {a.summary}
+                    {a.title}
                   </div>
-                )}
-              </div>
-              <div style={{ fontSize: 11, color: C.text2, textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {a.outlet_name || a.source_name || '—'}
-              </div>
-            </a>
-          ))}
-        </div>
+                  {a.summary && (
+                    <div style={{
+                      fontSize: 12, color: C.text3, marginTop: 2,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {a.summary}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: C.text2, textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.outlet_name || a.source_name || '—'}
+                </div>
+              </a>
+            ))}
+          </div>
+          <LoadMoreButton
+            visible={visible.length}
+            total={filteredSorted.length}
+            onLoadMore={() => setVisibleLimit(n => n + ARTICLES_PAGE)}
+            label="Load more articles"
+          />
+        </>
       )}
     </Section>
   )
@@ -1112,7 +1580,7 @@ function FilterChip({ filter, onClear }: { filter: ArticleFilter; onClear: () =>
   const dateLabel = new Date(filter.date + 'T00:00:00').toLocaleDateString(
     'en-US', { month: 'short', day: 'numeric', year: 'numeric' },
   )
-  const swatch = filter.kind === 'tier' ? TIER_COLORS[filter.tier] : filter.variantColor
+  const swatch = filter.kind === 'tier' ? filter.tierColor : filter.variantColor
   const label = filter.kind === 'tier'
     ? `${filter.tierLabel} outlets · ${dateLabel}`
     : `${filter.variantName} · ${dateLabel}`

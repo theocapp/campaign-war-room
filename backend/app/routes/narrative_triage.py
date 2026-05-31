@@ -23,9 +23,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import CandidateFrame, NarrativeFrame, ProposedClusterTriage
+from app.services.access_codes import require_admin
 from app.services.narrative_triage import list_triage_verdicts, run_triage_pass
 
 router = APIRouter(prefix="/narrative-triage", tags=["narrative-triage"])
+
+# Only /run is LLM-cost (~$0.40 per pass). Dismiss/apply/execute-merge are
+# pure DB state operations and intentionally stay open.
+_admin_only = [Depends(require_admin)]
 
 
 class TriageRunRequest(BaseModel):
@@ -51,7 +56,7 @@ def list_verdicts(
     }
 
 
-@router.post("/run")
+@router.post("/run", dependencies=_admin_only)
 def trigger_run(
     req: TriageRunRequest = TriageRunRequest(),
     db: Session = Depends(get_db),

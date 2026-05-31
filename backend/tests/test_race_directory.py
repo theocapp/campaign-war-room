@@ -77,7 +77,7 @@ def test_seed_race_directory_imports_real_fec_federal_snapshot(db):
     assert len(races) > 400
     assert all(r.race_level == "federal" for r in races)
     assert all(r.data_source == "fec" for r in races)
-    assert db.query(RaceCandidate).filter_by(candidate_name="FIGURES, SHOMARI C.").first() is not None
+    assert db.query(RaceCandidate).filter_by(candidate_name="Shomari C. Figures").first() is not None
     assert db.query(RaceCandidate).filter_by(candidate_name="Alex Rivera").first() is None
 
 
@@ -130,11 +130,11 @@ def test_race_routes_search_and_select(db):
 
     result = select_race(
         race_id=race.id,
-        body=RaceSelectRequest(candidate_name="FIGURES, SHOMARI C."),
+        body=RaceSelectRequest(candidate_name="Shomari C. Figures"),
         db=db,
     )
     assert result.race.id == race.id
-    assert result.campaign.candidate_name == "FIGURES, SHOMARI C."
+    assert result.campaign.candidate_name == "Shomari C. Figures"
     assert result.opponents_created == 1
 
 
@@ -142,11 +142,11 @@ def test_select_race_updates_campaign_context_and_creates_opponent(db):
     from app.services.race_directory import select_directory_race
 
     race = _race(db)
-    shomari = next(c for c in race.candidates if c.candidate_name == "FIGURES, SHOMARI C.")
+    shomari = next(c for c in race.candidates if c.candidate_name == "Shomari C. Figures")
     _, campaign, selected, created, updated = select_directory_race(db, race.id, candidate_id=shomari.id)
 
-    assert selected.candidate_name == "FIGURES, SHOMARI C."
-    assert campaign.candidate_name == "FIGURES, SHOMARI C."
+    assert selected.candidate_name == "Shomari C. Figures"
+    assert campaign.candidate_name == "Shomari C. Figures"
     assert campaign.party == "Democrat"
     assert campaign.race == "AL-02 U.S. House 2026 Candidate Filings"
     assert campaign.office == "U.S. Representative"
@@ -158,7 +158,7 @@ def test_select_race_updates_campaign_context_and_creates_opponent(db):
     assert created == 1
     assert updated == 0
 
-    opponent = db.query(Opponent).filter_by(name="HARRIS, HAMPTON").first()
+    opponent = db.query(Opponent).filter_by(name="Hampton Harris").first()
     assert opponent is not None
     assert opponent.party == "Republican"
     assert opponent.office == "U.S. Representative (AL-02)"
@@ -173,8 +173,8 @@ def test_select_race_can_use_explicit_candidate_and_updates_other_candidates(db)
     from app.services.race_directory import select_directory_race
 
     race = _race(db)
-    figures = next(c for c in race.candidates if c.candidate_name == "FIGURES, SHOMARI C.")
-    harris = next(c for c in race.candidates if c.candidate_name == "HARRIS, HAMPTON")
+    figures = next(c for c in race.candidates if c.candidate_name == "Shomari C. Figures")
+    harris = next(c for c in race.candidates if c.candidate_name == "Hampton Harris")
 
     _, campaign, selected, created, updated = select_directory_race(
         db,
@@ -182,11 +182,11 @@ def test_select_race_can_use_explicit_candidate_and_updates_other_candidates(db)
         candidate_id=harris.id,
     )
 
-    assert selected.candidate_name == "HARRIS, HAMPTON"
-    assert campaign.candidate_name == "HARRIS, HAMPTON"
+    assert selected.candidate_name == "Hampton Harris"
+    assert campaign.candidate_name == "Hampton Harris"
     assert created == 1
     assert updated == 0
-    assert db.query(Opponent).filter_by(name="FIGURES, SHOMARI C.").first() is not None
+    assert db.query(Opponent).filter_by(name="Shomari C. Figures").first() is not None
 
     _, _, _, created_again, updated_again = select_directory_race(
         db,

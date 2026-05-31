@@ -14,15 +14,24 @@ monitor_type="twitter_profile" stores the Twitter handle in the `query` field.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Known Nitter instances, ordered by historical reliability.
-# The list is probed top-to-bottom; the first instance that responds with
-# a valid RSS feed for the /username/rss path is used.
-NITTER_INSTANCES = [
+# Known Nitter instances, ordered by historical reliability. Probed
+# top-to-bottom; the first that serves a valid RSS feed for /username/rss wins.
+#
+# IMPORTANT: public Nitter instances are volatile — Twitter's 2023 guest-API
+# shutdown killed most of them, and survivors come and go weekly. This default
+# list is a *starting point*, not ground truth. Override it (e.g. to point at a
+# self-hosted instance, or to drop dead hosts) via the NITTER_INSTANCES env var
+# — a comma-separated host list — without a code change:
+#     NITTER_INSTANCES=nitter.example.org,nitter.poast.org
+# The refresh job below self-heals already-registered feeds when their pinned
+# instance dies, but it can only migrate to a host in THIS list.
+_DEFAULT_NITTER_INSTANCES = [
     "nitter.poast.org",
     "nitter.privacydev.net",
     "nitter.1d4.us",
@@ -33,6 +42,18 @@ NITTER_INSTANCES = [
     "twiiit.com",
     "nitter.mint.lgbt",
 ]
+
+
+def _load_instances() -> list[str]:
+    raw = os.getenv("NITTER_INSTANCES", "").strip()
+    if raw:
+        hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
+        if hosts:
+            return hosts
+    return list(_DEFAULT_NITTER_INSTANCES)
+
+
+NITTER_INSTANCES = _load_instances()
 
 _PROBE_TIMEOUT = 6  # seconds per instance
 
@@ -160,3 +181,78 @@ def recheck_failed_twitter_monitors(db) -> int:
             resolved += 1
 
     return resolved
+
+
+def _is_nitter_feed_url(url: str | None) -> bool:
+    """True if `url` looks like a Nitter RSS feed this module manages.
+
+    Matches any host containing "nitter", the twiiit.com aggregator, or any
+    host currently in NITTER_INSTANCES — so it still recognizes a feed pinned
+    to an instance that has since been removed from the list (exactly the
+    stale-feed case we want to heal)."""
+    if not url:
+        return False
+    host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+    if not host:
+        return False
+    return "nitter" in host or host == "twiiit.com" or host in set(NITTER_INSTANCES)
+
+
+def _username_from_nitter_url(url: str) -> str | None:
+    """Pull the handle out of a `https://<instance>/<username>/rss` URL."""
+    m = re.search(r"https?://[^/]+/([A-Za-z0-9_]{1,50})/rss\b", url, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def refresh_stale_twitter_feeds(db) -> dict:
+    """Self-heal registered Nitter feeds whose instance has gone dark.
+
+    The failure mode this fixes: ensure_twitter_feed() pins a feed to whichever
+    instance resolved first (e.g. https://nitter.net/<user>/rss) and never
+    revisits it. When that single instance dies, the feed silently stops
+    delivering — invisible because no error is raised; the feed just goes quiet.
+
+    For each managed Nitter feed we re-probe its *current* instance. If it still
+    serves the handle, leave it. If it's dead, re-resolve the handle against the
+    full instance list and rewrite RssFeed.url in place to the new working host.
+    If nothing resolves, leave the URL untouched so it can recover on a later
+    run rather than being dropped.
+
+    Returns counts: {checked, healthy, migrated, dead}.
+    """
+    from app.models import RssFeed
+
+    feeds = [f for f in db.query(RssFeed).all() if _is_nitter_feed_url(f.url)]
+    checked = healthy = migrated = dead = 0
+
+    for feed in feeds:
+        username = _username_from_nitter_url(feed.url)
+        if not username:
+            continue
+        checked += 1
+        host = urlparse(feed.url).netloc.lower().split("@")[-1].split(":")[0]
+
+        # Still alive on its current instance? Nothing to do.
+        if _probe_nitter_instance(host, username):
+            healthy += 1
+            continue
+
+        # Current instance is dark — try to migrate to a working one.
+        new_url = resolve_nitter_rss(username)
+        if new_url and new_url != feed.url:
+            logger.info(
+                "twitter_scraper: migrating @%s feed %s → %s (old instance dark)",
+                username, feed.url, new_url,
+            )
+            feed.url = new_url
+            migrated += 1
+        elif not new_url:
+            logger.warning(
+                "twitter_scraper: @%s feed stale and no instance resolved (left as-is)",
+                username,
+            )
+            dead += 1
+
+    if migrated:
+        db.commit()
+    return {"checked": checked, "healthy": healthy, "migrated": migrated, "dead": dead}

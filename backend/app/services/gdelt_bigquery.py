@@ -360,6 +360,8 @@ def run_gdelt_bigquery_backfill(db, *, force: bool = False, days_back: int = 365
             tone_blob = row.get("tone")
             tone_json = _json.dumps(tone_blob) if tone_blob else None
 
+            from app.services.ingestion import clean_title as _clean_title
+            title = _clean_title(title) or ""
             item = SourceItem(
                 title=title[:200],
                 raw_text=body_text,

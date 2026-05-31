@@ -39,9 +39,37 @@ def week_window(now: Optional[datetime] = None) -> tuple[datetime, datetime, dat
 
     "this week" = published_at >= cutoff_7d.
     "last week" = cutoff_14d <= published_at < cutoff_7d.
-    UTC. Rolling 7-day windows, not calendar-week ISO boundaries.
+    UTC.
+
+    DAY-ALIGNED ROLLING WINDOWS. "now" is pinned to the start of the
+    current UTC day, not the literal moment of the call. This means:
+      - Within a single day, the cutoff never moves — every consumer
+        called between 00:00 and 23:59 UTC sees the SAME this_week and
+        last_week boundaries. So `this_week` is monotonically non-
+        decreasing within a day: new articles only ADD to it, never
+        remove. An article published 6d, 22h ago at 10am stays in
+        "this week" all day even though it's literally past 7 days
+        old by 5pm. It crosses the boundary at the next midnight,
+        not mid-afternoon.
+      - At 00:00 UTC the window shifts forward by exactly one day,
+        and one day's worth of articles cross from this_week into
+        last_week (and one day's worth ages out of last_week
+        entirely). That's predictable, not surprising.
+
+    Previously this used the literal moment of the call, which
+    produced confusing within-day decreases as articles slid out of
+    the window mid-afternoon — see Sessions G/H in INTER_SESSION.md.
+
+    FUTURE WORK (heavier): snapshot the (frame_id, this_week, last_week,
+    total) tuples to a DB table at a fixed daily cron (e.g. 05:00 UTC).
+    Briefing + frame cards + landscape sidebar all read the snapshot
+    instead of computing on the fly. Absolutely stable counts for every
+    consumer on a given day, regardless of when the data is fetched.
+    Skipped for now — day-aligned window addresses the worst of the
+    surprise without the storage + cron overhead.
     """
-    now = now or datetime.utcnow()
+    if now is None:
+        now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     return now - timedelta(days=7), now - timedelta(days=14), now
 
 

@@ -1,6 +1,11 @@
 import { Bell } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { getUnreadNotificationCount } from '@/lib/notifications'
+import {
+  fetchNotifications,
+  getReadIds,
+  getUnreadNotificationCount,
+  setBadgeCount,
+} from '@/lib/notifications'
 import { NotificationsList } from './NotificationsList'
 
 /**
@@ -21,6 +26,30 @@ export function NotificationsBell() {
   void badgeNonce
   const unread = getUnreadNotificationCount()
   const wrapRef = useRef<HTMLDivElement | null>(null)
+
+  // Refresh the unread count on mount and every 60s, even when the panel
+  // is closed. Without this, the badge would be frozen at whatever the
+  // panel last computed — typically the *previous* session's value, so
+  // the badge appears stale (or missing entirely) until the user opens
+  // the panel. NotificationsList still re-fetches when opened, which is
+  // a duplicate call but keeps the panel's own read/dismiss state in sync.
+  useEffect(() => {
+    let cancelled = false
+    async function refresh() {
+      try {
+        const n = await fetchNotifications()
+        if (cancelled) return
+        const readIds = getReadIds()
+        setBadgeCount(n.filter(x => !readIds.has(x.id)).length)
+        setBadgeNonce(v => v + 1)
+      } catch {
+        // Leave the cached count alone on fetch failure.
+      }
+    }
+    refresh()
+    const t = setInterval(refresh, 60_000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [])
 
   // Close on outside click or Escape.
   useEffect(() => {

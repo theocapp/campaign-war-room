@@ -12,8 +12,18 @@ from app.models import (
     NarrativeFrame, NarrativeFrameMention, Outlet, SourceItem,
 )
 from app.services import narrative_frames as svc
+from app.services.access_codes import require_admin
 
 router = APIRouter(prefix="/narrative-frames", tags=["narrative-frames"])
+
+# Gated by this dependency: endpoints that fire LLM calls (suggest / audit /
+# promote / rematch / snapshot refresh) AND the frame-mutation writes
+# (create / update / delete / remove-mention). The mutations either schedule a
+# rematch (compute) or cascade-delete frame data — deleting a frame or removing
+# a mention drops the FrameClusterMatch for the whole story cluster (a single
+# untag can drop the match for tens of articles). Read-only listing and detail
+# endpoints stay open to non-admin users.
+_admin_only = [Depends(require_admin)]
 
 
 class FrameCreate(BaseModel):
@@ -226,7 +236,7 @@ def _schedule_rematch_after_edit() -> None:
         pass
 
 
-@router.post("")
+@router.post("", dependencies=_admin_only)
 def create_frame(body: FrameCreate, db: Session = Depends(get_db)):
     owner = body.owner_type if body.owner_type in ("candidate", "opponent", "media") else "candidate"
     subject = body.subject_type if body.subject_type in ("candidate", "opponent", "media") else None
@@ -249,9 +259,9 @@ def create_frame(body: FrameCreate, db: Session = Depends(get_db)):
     }
 
 
-@router.put("/{frame_id}")
+@router.put("/{frame_id}", dependencies=_admin_only)
 def update_frame(frame_id: int, body: FrameUpdate, db: Session = Depends(get_db)):
-    frame = db.query(NarrativeFrame).get(frame_id)
+    frame = db.get(NarrativeFrame, frame_id)
     if not frame:
         raise HTTPException(status_code=404, detail="Frame not found")
     name_or_desc_changed = False
@@ -286,7 +296,7 @@ def update_frame(frame_id: int, body: FrameUpdate, db: Session = Depends(get_db)
     return {"ok": True}
 
 
-@router.delete("/{frame_id}")
+@router.delete("/{frame_id}", dependencies=_admin_only)
 def delete_frame(
     frame_id: int,
     confirm: str = "",
@@ -311,7 +321,7 @@ def delete_frame(
         A frame can carry hundreds of FrameClusterMatch rows and tens of
         variants — a misclick here is meaningful data loss.
     """
-    frame = db.query(NarrativeFrame).get(frame_id)
+    frame = db.get(NarrativeFrame, frame_id)
     if not frame:
         raise HTTPException(status_code=404, detail="Frame not found")
 
@@ -372,7 +382,7 @@ def delete_frame(
     return {"ok": True, "deleted": counts}
 
 
-@router.post("/suggest")
+@router.post("/suggest", dependencies=_admin_only)
 def suggest_frames(days_back: int = 14, db: Session = Depends(get_db)):
     """Ask the LLM to suggest narrative frames from recent article summaries."""
     frames = svc.suggest_frames(db, days_back=days_back)
@@ -445,7 +455,7 @@ def candidate_frames_snapshot(db: Session = Depends(get_db)):
     return get_open_snapshots(db)
 
 
-@router.post("/candidate-frames/snapshot/refresh")
+@router.post("/candidate-frames/snapshot/refresh", dependencies=_admin_only)
 def candidate_frames_snapshot_refresh(days_back: int = 21, db: Session = Depends(get_db)):
     """Re-run HDBSCAN and persist new clusters into the snapshot table.
 
@@ -529,14 +539,14 @@ def frame_landscape_detail(frame_id: int, db: Session = Depends(get_db)):
     every page load). Only the bubble the user opens pays the cost.
     """
     from app.services.narrative_landscape_established import get_frame_member_articles
-    frame = db.query(NarrativeFrame).get(frame_id)
+    frame = db.get(NarrativeFrame, frame_id)
     if not frame:
         raise HTTPException(status_code=404, detail="frame not found")
     articles = get_frame_member_articles(db, frame_id, limit=40)
     return {"frame_id": frame_id, "articles": articles}
 
 
-@router.post("/candidate-frames/promote")
+@router.post("/candidate-frames/promote", dependencies=_admin_only)
 def promote_candidate_cluster(req: PromoteCandidateRequest, db: Session = Depends(get_db)):
     """Promote a candidate_frame cluster into a real NarrativeFrame.
 
@@ -575,14 +585,14 @@ def promote_candidate_cluster(req: PromoteCandidateRequest, db: Session = Depend
     }
 
 
-@router.post("/audit-duplicates")
+@router.post("/audit-duplicates", dependencies=_admin_only)
 def audit_duplicates(db: Session = Depends(get_db)):
     """Ask the LLM to find and merge semantic duplicate frames."""
     result = svc.audit_duplicates(db)
     return result
 
 
-@router.post("/rematch")
+@router.post("/rematch", dependencies=_admin_only)
 def rematch_articles(days_back: int = 365, db: Session = Depends(get_db)):
     """Enqueue a rematch job and return immediately (<1 s)."""
     from app.services.scheduler import enqueue_rematch
@@ -596,7 +606,7 @@ def rematch_progress():
     return svc.get_rematch_progress()
 
 
-@router.delete("/{frame_id}/mentions/{source_item_id}")
+@router.delete("/{frame_id}/mentions/{source_item_id}", dependencies=_admin_only)
 def remove_mention(frame_id: int, source_item_id: int, db: Session = Depends(get_db)):
     """Remove a frame mention.
 

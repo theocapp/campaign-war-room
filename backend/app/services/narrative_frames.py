@@ -1866,30 +1866,83 @@ def get_frames_with_counts(db: Session) -> list[dict]:
         [(tot, tw) for tw, _, tot, _ in articles_by_frame.values()]
     )
 
-    # ---- Query 4c: 30-day per-day article counts per frame, used for the
-    # always-visible sparkline on each Narratives card.
+    # ---- Query 4c: 30-day per-day article counts per frame, broken down by
+    # outlet tier. Powers the always-visible sparkline AND the cross-tier
+    # transition detectors in lib/featuredFrame.ts (Phase 2.3) — e.g.
+    # "Crossed into national coverage" requires knowing that national
+    # counts spiked in the last 3 days while being zero before. The
+    # backwards-compat `count` field is kept equal to `total` so existing
+    # consumers don't break.
     sparkline_cutoff = now - timedelta(days=30)
     sparkline_rows = (
         db.query(
             FrameClusterMatch.frame_id,
             func.date(SourceItem.published_at).label("d"),
+            Outlet.outlet_type,
             func.count(func.distinct(SourceItem.id)),
         )
         .select_from(FrameClusterMatch)
         .join(StoryCluster, StoryCluster.id == FrameClusterMatch.story_cluster_id)
         .join(SourceItem, SourceItem.story_cluster_id == StoryCluster.id)
+        # Outerjoin so articles whose outlet_id is NULL still contribute to
+        # the `total` and `unknown` buckets — losing them would skew the
+        # sparkline downward for frames that ingest from non-outlet sources.
+        .outerjoin(Outlet, Outlet.id == SourceItem.outlet_id)
         .filter(
             SourceItem.published_at >= sparkline_cutoff,
             SourceItem.published_at.isnot(None),
         )
-        .group_by(FrameClusterMatch.frame_id, "d")
+        .group_by(FrameClusterMatch.frame_id, "d", Outlet.outlet_type)
         .all()
     )
-    sparkline_by_frame: dict = defaultdict(list)
-    for fid, d, c in sparkline_rows:
-        sparkline_by_frame[fid].append({"date": str(d), "count": c})
-    for fid in sparkline_by_frame:
-        sparkline_by_frame[fid].sort(key=lambda x: x["date"])
+
+    def _empty_bucket() -> dict:
+        return {
+            "total": 0,
+            "national": 0,
+            "regional": 0,
+            "local": 0,
+            "blog": 0,
+            "social": 0,
+            "unknown": 0,
+        }
+
+    _by_frame_date: dict = defaultdict(lambda: defaultdict(_empty_bucket))
+    for fid, d, outlet_type, c in sparkline_rows:
+        b = _by_frame_date[fid][str(d)]
+        c_int = int(c or 0)
+        b["total"] += c_int
+        if outlet_type in ("national", "broadcast"):
+            b["national"] += c_int
+        elif outlet_type == "regional_news":
+            b["regional"] += c_int
+        elif outlet_type == "local_news":
+            b["local"] += c_int
+        elif outlet_type == "blog":
+            b["blog"] += c_int
+        elif outlet_type == "social":
+            b["social"] += c_int
+        else:
+            b["unknown"] += c_int
+
+    # Densify into a 30-day window with zero-filled gaps. The frontend's
+    # cross-tier detectors (lib/featuredFrame.ts) rely on
+    # `activity.slice(-3)` meaning "last 3 calendar days" — a sparse array
+    # would give them "last 3 days that happened to have articles," which
+    # could span weeks. Densifying also gives the sparkline an honest
+    # shape: a frame with a one-day spike then silence reads as a spike,
+    # not as a flat line of 1 evenly-spaced point.
+    sparkline_window_start = (now - timedelta(days=29)).date()
+    sparkline_window: list = [
+        (sparkline_window_start + timedelta(days=i)) for i in range(30)
+    ]
+    sparkline_by_frame: dict = {}
+    for fid, by_date in _by_frame_date.items():
+        rows = []
+        for d in sparkline_window:
+            bucket = by_date.get(str(d)) or _empty_bucket()
+            rows.append({"date": str(d), "count": bucket["total"], **bucket})
+        sparkline_by_frame[fid] = rows
 
     # ---- Query 5: outlet-tier breakdown per frame.
     tier_rows = (
@@ -1919,6 +1972,25 @@ def get_frames_with_counts(db: Session) -> list[dict]:
             tiers["blog"] += count
         elif outlet_type == "social":
             tiers["social"] += count
+
+    # ---- Query 5b: dashboard featured-card appearances in last 7 days.
+    # Feeds the saturation-penalty term in the frontend's multi-objective
+    # score (lib/featuredFrame.ts). Frames that have been featured 3+ days
+    # running get demoted unless their urgency stays high — prevents the
+    # panel from becoming wallpaper.
+    from app.models import FeaturedAppearance
+    from datetime import date as _date, timedelta as _timedelta
+    _seven_days_ago = _date.today() - _timedelta(days=6)
+    featured_rows = (
+        db.query(
+            FeaturedAppearance.frame_id,
+            func.count(FeaturedAppearance.id),
+        )
+        .filter(FeaturedAppearance.appeared_on >= _seven_days_ago)
+        .group_by(FeaturedAppearance.frame_id)
+        .all()
+    )
+    featured_by_frame: dict = {fid: int(c) for fid, c in featured_rows}
 
     # ---- Group the FCM rows per frame and resolve the first/peak/latest
     # "key" clusters in Python (one pass, no per-frame queries).
@@ -2097,6 +2169,10 @@ def get_frames_with_counts(db: Session) -> list[dict]:
             "first_seen_at": first_seen.isoformat() if first_seen else None,
             "last_seen_at": last_seen.isoformat() if last_seen else None,
             "key_articles": key_articles,
+            # Saturation signal — how many of the last 7 days this frame
+            # has been featured on the dashboard. Drives the homepage-
+            # decay penalty in lib/featuredFrame.ts.
+            "days_featured_last_7": featured_by_frame.get(frame.id, 0),
             # Momentum signal from services/frame_momentum.py. One of
             # viral / missing_coverage / elite_only / stable / no_trend_signal,
             # or None for frames below MIN_ACTIVE_ARTICLES. momentum_data is

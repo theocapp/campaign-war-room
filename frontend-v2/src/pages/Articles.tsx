@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '@/api/client'
@@ -13,8 +13,9 @@ const C = {
   accent: 'var(--accent)',
 }
 
-// Relevance is shown as a coarse bucket badge (critical/high/medium/low),
-// not a 0–100 number — see comment in Dashboard.tsx for rationale.
+// Admin row badge shows the raw 0–100 race_relevance_score. The bucket label
+// (critical/high/medium/low/irrelevant) is only used here to pick the badge
+// color so the score still reads at a glance.
 const REL_BADGE_STYLE: Record<string, { color: string; bg: string; border: string }> = {
   critical: { color: '#f87171', bg: 'rgba(215,25,19,0.08)', border: 'rgba(215,25,19,0.25)' },
   high: { color: '#fb923c', bg: 'rgba(234,88,12,0.08)', border: 'rgba(234,88,12,0.25)' },
@@ -31,27 +32,108 @@ type SortKey =
   | 'newest'
   | 'oldest'
   | 'most_relevant'
-  | 'source_az'
   | 'most_duplicated'
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: 'newest', label: 'Newest first' },
   { value: 'oldest', label: 'Oldest first' },
   { value: 'most_relevant', label: 'Most relevant' },
-  { value: 'source_az', label: 'Source A → Z' },
   { value: 'most_duplicated', label: 'Most duplicated' },
 ]
 
-type DateRange = 'all' | 'today' | '3d' | '7d'
-
-const DATE_OPTIONS: { value: DateRange; label: string; days: number | null }[] = [
-  { value: 'all', label: 'Last 7 days', days: null },
-  { value: 'today', label: 'Today', days: 1 },
-  { value: '3d', label: 'Last 3 days', days: 3 },
-  { value: '7d', label: 'Last 7 days', days: 7 },
+// Display labels for the source_category field returned by the backend
+// (see backend/app/services/source_category.py). Kept in sync there.
+const SOURCE_CATEGORY_LABELS: Record<string, string> = {
+  local_news: 'Local news',
+  national_news: 'National news',
+  social_media: 'Social media',
+  campaign_source: 'Campaign source',
+  other: 'Other',
+}
+const SOURCE_CATEGORY_ORDER = [
+  'local_news',
+  'national_news',
+  'social_media',
+  'campaign_source',
+  'other',
 ]
 
-const SENTIMENT_OPTIONS = ['positive', 'neutral', 'negative', 'mixed']
+// Display labels for the `platform` field (backend platform_classify.py).
+// Orthogonal to both source_category and source_type: a Twitter post ingested
+// via Nitter RSS carries source_type 'news', so the Type filter can't find it,
+// but its platform is 'twitter'. This filter is the reliable way to slice by
+// where a post actually lives. Only platforms present in the loaded set get a
+// dropdown option.
+const PLATFORM_LABELS: Record<string, string> = {
+  twitter: 'Twitter / X',
+  bluesky: 'Bluesky',
+  reddit: 'Reddit',
+  youtube: 'YouTube',
+  mastodon: 'Mastodon',
+  facebook: 'Facebook',
+  instagram: 'Instagram',
+}
+const PLATFORM_ORDER = [
+  'twitter', 'bluesky', 'reddit', 'youtube', 'mastodon', 'facebook', 'instagram',
+]
+
+// 5-bucket candidate-aware sentiment derived from the backend's
+// (perspective × sentiment) pair. `perspective` is "whose side does the
+// article benefit?" and `sentiment` is the article's emotional tone:
+//
+//   pro_candidate + positive/neutral/null  → pro-candidate  (praise/lean)
+//   pro_candidate + negative               → anti-opponent  (attack on opponent helps candidate)
+//   pro_opponent  + positive/neutral/null  → pro-opponent
+//   pro_opponent  + negative               → anti-candidate
+//   neutral / null / anything else         → neutral
+type CandidateSentiment =
+  | 'pro_candidate'
+  | 'anti_opponent'
+  | 'pro_opponent'
+  | 'anti_candidate'
+  | 'neutral'
+
+const CANDIDATE_SENTIMENT_ORDER: CandidateSentiment[] = [
+  'pro_candidate',
+  'anti_opponent',
+  'pro_opponent',
+  'anti_candidate',
+  'neutral',
+]
+
+function deriveCandidateSentiment(item: SourceItem): CandidateSentiment {
+  const p = item.perspective
+  const s = item.sentiment
+  if (p === 'pro_candidate') {
+    return s === 'negative' ? 'anti_opponent' : 'pro_candidate'
+  }
+  if (p === 'pro_opponent') {
+    return s === 'negative' ? 'anti_candidate' : 'pro_opponent'
+  }
+  return 'neutral'
+}
+
+function firstName(full: string | null | undefined): string {
+  if (!full) return ''
+  const parts = full.trim().split(/\s+/)
+  return parts[0] ?? ''
+}
+
+function candidateSentimentLabel(
+  bucket: CandidateSentiment,
+  candidate: string | null,
+  opponent: string | null,
+): string {
+  const cn = firstName(candidate) || 'Candidate'
+  const on = firstName(opponent) || 'Opponent'
+  switch (bucket) {
+    case 'pro_candidate': return `Pro-${cn}`
+    case 'anti_candidate': return `Anti-${cn}`
+    case 'pro_opponent': return `Pro-${on}`
+    case 'anti_opponent': return `Anti-${on}`
+    case 'neutral': return 'Neutral'
+  }
+}
 
 function ArticleListRow({ item, isAdmin }: { item: SourceItem; isAdmin: boolean }) {
   // Non-admins see no relevance bucket — the column is dropped from the
@@ -121,14 +203,16 @@ function ArticleListRow({ item, isAdmin }: { item: SourceItem; isAdmin: boolean 
         </div>
         {isAdmin && (
           <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-            {relStyle && item.race_relevance_label ? (
+            {item.race_relevance_score != null ? (
               <span style={{
-                fontSize: 10, fontWeight: 700, letterSpacing: '0.07em',
-                color: relStyle.color, background: relStyle.bg,
-                border: `1px solid ${relStyle.border}`,
+                fontSize: 11, fontWeight: 700,
+                color: relStyle?.color ?? C.text2,
+                background: relStyle?.bg ?? 'transparent',
+                border: `1px solid ${relStyle?.border ?? C.border}`,
                 padding: '2px 7px', borderRadius: 4,
+                fontVariantNumeric: 'tabular-nums',
               }}>
-                {item.race_relevance_label.toUpperCase()}
+                {item.race_relevance_score}
               </span>
             ) : (
               <span style={{ fontSize: 10, color: C.text3 }}>—</span>
@@ -197,6 +281,9 @@ function FilterDropdown({
   formatLabel?: (value: string) => string
 }) {
   const [open, setOpen] = useState(false)
+  // Whether the popover should anchor to the right edge of the button
+  // because left-anchored would overflow the viewport. Recomputed on open.
+  const [alignRight, setAlignRight] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -206,6 +293,16 @@ function FilterDropdown({
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open || !ref.current) return
+    const btn = ref.current.querySelector('button')
+    if (!btn) return
+    const rect = btn.getBoundingClientRect()
+    // Match the popover's minWidth (220) plus a small viewport buffer.
+    const popoverWidth = 240
+    setAlignRight(rect.left + popoverWidth > window.innerWidth - 12)
   }, [open])
 
   const toggle = (value: string) => {
@@ -243,7 +340,9 @@ function FilterDropdown({
       </button>
       {open && (
         <div style={{
-          position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 20,
+          position: 'absolute', top: 'calc(100% + 4px)',
+          ...(alignRight ? { right: 0 } : { left: 0 }),
+          zIndex: 20,
           background: C.bg2, border: `1px solid ${C.borderBright}`,
           borderRadius: 8, padding: 4, minWidth: 200, maxHeight: 320,
           overflowY: 'auto',
@@ -300,6 +399,7 @@ function SingleSelect<T extends string>({
   onChange: (value: T) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [alignRight, setAlignRight] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const current = options.find(o => o.value === value)
 
@@ -310,6 +410,15 @@ function SingleSelect<T extends string>({
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open || !ref.current) return
+    const btn = ref.current.querySelector('button')
+    if (!btn) return
+    const rect = btn.getBoundingClientRect()
+    const popoverWidth = 220
+    setAlignRight(rect.left + popoverWidth > window.innerWidth - 12)
   }, [open])
 
   return (
@@ -332,7 +441,9 @@ function SingleSelect<T extends string>({
       </button>
       {open && (
         <div style={{
-          position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 20,
+          position: 'absolute', top: 'calc(100% + 4px)',
+          ...(alignRight ? { right: 0 } : { left: 0 }),
+          zIndex: 20,
           background: C.bg2, border: `1px solid ${C.borderBright}`,
           borderRadius: 8, padding: 4, minWidth: 180,
           boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
@@ -399,12 +510,14 @@ export function Articles() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [limit, setLimit] = useState(200)
+  const [candidateName, setCandidateName] = useState<string | null>(null)
+  const [opponentName, setOpponentName] = useState<string | null>(null)
 
   // Filter + sort state
   const [sort, setSort] = useState<SortKey>('newest')
-  const [dateRange, setDateRange] = useState<DateRange>('all')
   const [search, setSearch] = useState('')
   const [sources, setSources] = useState<Set<string>>(new Set())
+  const [platforms, setPlatforms] = useState<Set<string>>(new Set())
   const [relevance, setRelevance] = useState<Set<string>>(new Set())
   const [sentiments, setSentiments] = useState<Set<string>>(new Set())
   const [sourceTypes, setSourceTypes] = useState<Set<string>>(new Set())
@@ -420,12 +533,35 @@ export function Articles() {
     return () => { cancelled = true }
   }, [limit])
 
+  // Fetch campaign names once for the sentiment-filter labels.
+  useEffect(() => {
+    let cancelled = false
+    api.campaignNames()
+      .then(d => {
+        if (cancelled) return
+        setCandidateName(d.candidate_name)
+        setOpponentName(d.opponent_name)
+      })
+      .catch(() => { /* leave labels as generic fallback */ })
+    return () => { cancelled = true }
+  }, [])
+
   // Derive filter dropdown options from what we actually have, so we don't
   // show a "Reddit" filter when there are no Reddit articles in scope.
-  const sourceOptions = useMemo(() => {
+  const sourceCategoryOptions = useMemo(() => {
     const set = new Set<string>()
-    for (const it of items) if (it.source_name) set.add(it.source_name)
-    return Array.from(set).sort((a, b) => a.localeCompare(b))
+    for (const it of items) if (it.source_category) set.add(it.source_category)
+    return SOURCE_CATEGORY_ORDER.filter(c => set.has(c))
+  }, [items])
+
+  const platformOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const it of items) if (it.platform) set.add(it.platform)
+    // Known platforms first (in canonical order), then any unrecognized
+    // value alphabetically so a new platform_classify tag still shows up.
+    const known = PLATFORM_ORDER.filter(p => set.has(p))
+    const extra = Array.from(set).filter(p => !PLATFORM_ORDER.includes(p)).sort()
+    return [...known, ...extra]
   }, [items])
 
   const sourceTypeOptions = useMemo(() => {
@@ -435,10 +571,9 @@ export function Articles() {
   }, [items])
 
   const sentimentOptions = useMemo(() => {
-    const set = new Set<string>()
-    for (const it of items) if (it.sentiment) set.add(it.sentiment)
-    // Always offer the canonical four — but only if we have data backing them.
-    return SENTIMENT_OPTIONS.filter(s => set.has(s))
+    const set = new Set<CandidateSentiment>()
+    for (const it of items) set.add(deriveCandidateSentiment(it))
+    return CANDIDATE_SENTIMENT_ORDER.filter(s => set.has(s))
   }, [items])
 
   const relevanceOptions = useMemo(() => {
@@ -455,25 +590,17 @@ export function Articles() {
   }, [items])
 
   const filtered = useMemo(() => {
-    const dateOption = DATE_OPTIONS.find(d => d.value === dateRange)
-    const cutoffMs = dateOption?.days != null
-      ? Date.now() - dateOption.days * 24 * 60 * 60 * 1000
-      : null
     const q = search.trim().toLowerCase()
 
     const out = items.filter(it => {
-      if (sources.size > 0 && !(it.source_name && sources.has(it.source_name))) return false
+      if (sources.size > 0 && !(it.source_category && sources.has(it.source_category))) return false
+      if (platforms.size > 0 && !(it.platform && platforms.has(it.platform))) return false
       if (sourceTypes.size > 0 && !(it.source_type && sourceTypes.has(it.source_type))) return false
-      if (sentiments.size > 0 && !(it.sentiment && sentiments.has(it.sentiment))) return false
+      if (sentiments.size > 0 && !sentiments.has(deriveCandidateSentiment(it))) return false
       if (relevance.size > 0 && !(it.race_relevance_label && relevance.has(it.race_relevance_label))) return false
       if (frames.size > 0) {
         const names = it.frames?.map(f => f.name) ?? []
         if (!names.some(n => frames.has(n))) return false
-      }
-      if (cutoffMs != null) {
-        const ts = it.published_at ?? it.created_at
-        const t = ts ? new Date(ts).getTime() : 0
-        if (!t || t < cutoffMs) return false
       }
       if (q) {
         const hay = `${it.title ?? ''} ${it.summary ?? ''}`.toLowerCase()
@@ -498,15 +625,12 @@ export function Articles() {
           return ts(b) - ts(a)
         })
         break
-      case 'source_az':
-        out.sort((a, b) => (a.source_name ?? '').localeCompare(b.source_name ?? '') || ts(b) - ts(a))
-        break
       case 'most_duplicated':
         out.sort((a, b) => (b.duplicates?.length ?? 0) - (a.duplicates?.length ?? 0) || ts(b) - ts(a))
         break
     }
     return out
-  }, [items, sources, sourceTypes, sentiments, relevance, frames, dateRange, search, sort])
+  }, [items, sources, platforms, sourceTypes, sentiments, relevance, frames, search, sort])
 
   const removeFromSet = (set: Set<string>, setter: (s: Set<string>) => void, value: string) => {
     const next = new Set(set)
@@ -515,15 +639,15 @@ export function Articles() {
   }
 
   const clearAll = () => {
-    setSources(new Set()); setRelevance(new Set())
+    setSources(new Set()); setPlatforms(new Set()); setRelevance(new Set())
     setSentiments(new Set()); setSourceTypes(new Set())
     setFrames(new Set())
-    setDateRange('all'); setSearch('')
+    setSearch('')
   }
 
   const activeFilterCount =
-    sources.size + relevance.size + sentiments.size + sourceTypes.size + frames.size
-    + (dateRange !== 'all' ? 1 : 0) + (search.trim() ? 1 : 0)
+    sources.size + platforms.size + relevance.size + sentiments.size + sourceTypes.size + frames.size
+    + (search.trim() ? 1 : 0)
 
   return (
     <div style={{ padding: '24px 28px' }}>
@@ -535,13 +659,11 @@ export function Articles() {
         }}>
           Articles
         </h1>
-        <div style={{ fontSize: 12, color: C.text3, marginTop: 4 }}>
-          {loading
-            ? 'Loading…'
-            : activeFilterCount > 0
-              ? `${filtered.length} of ${items.length} articles`
-              : `${items.length} confirmed-relevant articles`}
-        </div>
+        {activeFilterCount > 0 && !loading && (
+          <div style={{ fontSize: 12, color: C.text3, marginTop: 4 }}>
+            {filtered.length} of {items.length} articles
+          </div>
+        )}
       </div>
 
       {/* Toolbar */}
@@ -561,18 +683,22 @@ export function Articles() {
             options={SORT_OPTIONS}
             onChange={setSort}
           />
-          <SingleSelect
-            label="Date"
-            value={dateRange}
-            options={DATE_OPTIONS.map(d => ({ value: d.value, label: d.label }))}
-            onChange={setDateRange}
-          />
           <FilterDropdown
             label="Source"
-            options={sourceOptions}
+            options={sourceCategoryOptions}
             selected={sources}
             onChange={setSources}
+            formatLabel={v => SOURCE_CATEGORY_LABELS[v] ?? v}
           />
+          {platformOptions.length > 0 && (
+            <FilterDropdown
+              label="Platform"
+              options={platformOptions}
+              selected={platforms}
+              onChange={setPlatforms}
+              formatLabel={v => PLATFORM_LABELS[v] ?? v}
+            />
+          )}
           {isAdmin && relevanceOptions.length > 0 && (
             <FilterDropdown
               label="Relevance"
@@ -588,7 +714,7 @@ export function Articles() {
               options={sentimentOptions}
               selected={sentiments}
               onChange={setSentiments}
-              formatLabel={v => v.charAt(0).toUpperCase() + v.slice(1)}
+              formatLabel={v => candidateSentimentLabel(v as CandidateSentiment, candidateName, opponentName)}
             />
           )}
           {sourceTypeOptions.length > 0 && (
@@ -617,20 +743,21 @@ export function Articles() {
             {search.trim() && (
               <FilterChip label={`"${search.trim()}"`} onRemove={() => setSearch('')} />
             )}
-            {dateRange !== 'all' && (
-              <FilterChip
-                label={DATE_OPTIONS.find(d => d.value === dateRange)?.label ?? dateRange}
-                onRemove={() => setDateRange('all')}
-              />
-            )}
             {Array.from(sources).map(s => (
-              <FilterChip key={`src-${s}`} label={s} onRemove={() => removeFromSet(sources, setSources, s)} />
+              <FilterChip key={`src-${s}`} label={SOURCE_CATEGORY_LABELS[s] ?? s} onRemove={() => removeFromSet(sources, setSources, s)} />
+            ))}
+            {Array.from(platforms).map(s => (
+              <FilterChip key={`plat-${s}`} label={PLATFORM_LABELS[s] ?? s} onRemove={() => removeFromSet(platforms, setPlatforms, s)} />
             ))}
             {Array.from(relevance).map(s => (
               <FilterChip key={`rel-${s}`} label={s.charAt(0).toUpperCase() + s.slice(1)} onRemove={() => removeFromSet(relevance, setRelevance, s)} />
             ))}
             {Array.from(sentiments).map(s => (
-              <FilterChip key={`sen-${s}`} label={s.charAt(0).toUpperCase() + s.slice(1)} onRemove={() => removeFromSet(sentiments, setSentiments, s)} />
+              <FilterChip
+                key={`sen-${s}`}
+                label={candidateSentimentLabel(s as CandidateSentiment, candidateName, opponentName)}
+                onRemove={() => removeFromSet(sentiments, setSentiments, s)}
+              />
             ))}
             {Array.from(sourceTypes).map(s => (
               <FilterChip key={`type-${s}`} label={s.toUpperCase()} onRemove={() => removeFromSet(sourceTypes, setSourceTypes, s)} />

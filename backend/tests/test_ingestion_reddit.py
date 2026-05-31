@@ -12,7 +12,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.models import CampaignConfig, Opponent, SourceItem
-from app.services.ingestion_reddit import _search_terms, ingest_reddit
+from app.services.ingestion_reddit import (
+    _search_terms,
+    _district_derived_subs,
+    ingest_reddit,
+)
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -96,6 +100,49 @@ def test_search_terms_includes_candidate_and_opponent(db):
     terms = _search_terms(db)
     assert "Paige Cognetti" in terms
     assert "Rob Bresnahan" in terms
+
+
+def test_search_terms_adds_distinctive_surnames(db):
+    # Broadening: people say "Cognetti"/"Bresnahan" far more than the full
+    # name, and phrase search misses those. First names are NOT added.
+    terms = _search_terms(db)
+    assert "Cognetti" in terms
+    assert "Bresnahan" in terms
+    assert "Paige" not in terms
+    assert "Rob" not in terms
+
+
+def test_search_terms_extra_env_appends_and_dedupes(db, monkeypatch):
+    monkeypatch.setenv("REDDIT_EXTRA_TERMS", "PA-08, Cognetti , #nepa")
+    terms = _search_terms(db)
+    assert "PA-08" in terms
+    assert "#nepa" in terms
+    # "Cognetti" is already derived as a surname — must not appear twice.
+    assert terms.count("Cognetti") == 1
+
+
+def test_district_subs_split_multi_city_location():
+    # Bug fix: "Scranton/Wilkes-Barre, PA-08" must yield the two REAL subs
+    # (r/Scranton, r/WilkesBarre), not the bogus concatenation that the old
+    # single-token strip produced ("ScrantonWilkesBarre" — a sub that 404s).
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        session.add(CampaignConfig(
+            candidate_name="Paige Cognetti",
+            district="PA-08",
+            location="Scranton/Wilkes-Barre, PA-08",
+        ))
+        session.commit()
+        subs = _district_derived_subs(session)
+        assert "Scranton" in subs
+        assert "WilkesBarre" in subs
+        assert "ScrantonWilkesBarre" not in subs
+        assert "pennsylvania" in subs  # state code → full state sub
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
 
 
 # ── ingest_reddit integration (HTTP mocked) ───────────────────────────────────

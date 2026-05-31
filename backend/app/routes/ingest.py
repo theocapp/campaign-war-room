@@ -4,8 +4,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.services.access_codes import require_admin
 
 router = APIRouter()
+
+# Crawl + Reddit pulls feed the LLM scoring pipeline downstream, so a
+# non-admin clicking these spends budget on the rescore that follows.
+_admin_only = [Depends(require_admin)]
 
 # In-memory last-run timestamps — reset on server restart (intentional: causes
 # a fresh run on first app open after a restart, which is always desirable).
@@ -22,7 +27,7 @@ def ingest_status():
     }
 
 
-@router.post("/ingest/crawl")
+@router.post("/ingest/crawl", dependencies=_admin_only)
 def trigger_crawl(db: Session = Depends(get_db)):
     """Immediately crawl all active webpage monitors."""
     global _last_crawl_at
@@ -37,7 +42,7 @@ def trigger_crawl(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/ingest/reddit")
+@router.post("/ingest/reddit", dependencies=_admin_only)
 def trigger_reddit(db: Session = Depends(get_db)):
     """Immediately run the Reddit ingester."""
     global _last_reddit_at
