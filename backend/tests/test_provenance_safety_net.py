@@ -238,3 +238,104 @@ def test_unrescued_homonym_stays_out_of_queue(db):
 
     queued = review_queue._review_queue_query(db).all()
     assert item.id not in {i.id for i in queued}
+
+
+# --------------------------------------------------------------------------
+# _is_non_article_landing_page — a directory/scorecard/bio page or a bare social
+# ACCOUNT ROOT names a participant without being an article, so it must stay OUT
+# of both promotion paths. A real post/video/news article (content-path URL) is
+# narrative signal and must pass through. Pure URL structure — no DB, no length.
+# --------------------------------------------------------------------------
+
+_LANDING_URLS = [
+    "https://ballotpedia.org/Rob_Bresnahan_Jr.",
+    "https://www.congressweb.com/ABC/legislators/info/mbr_id/408",
+    "https://heritageaction.com/scorecard/members/B001327/119",
+    "https://www.leadershipnowproject.org/candidate-bio-paige-cognetti",
+    "http://bresnahan.house.gov/contact",
+    "https://www.congress.gov/member/robert-bresnahan/B001327",
+    "https://www.facebook.com/RepBresnahan/",       # account root, trailing slash
+    "https://www.facebook.com/RepBresnahan",        # account root, no slash
+    "https://www.facebook.com/PaigeForPA",
+    "https://www.instagram.com/repbresnahan?hl=en",  # root + query, no /p/
+    "https://www.instagram.com/mayorpaigecognetti",
+    "https://x.com/PaigeGCognetti",
+    "https://www.linkedin.com/in/robert-bresnahan-jr-89481225",  # profile root
+    "https://www.youtube.com/@RepBresnahan",         # channel root
+]
+
+_ARTICLE_URLS = [
+    "https://www.facebook.com/RepBresnahan/posts/im-proud-to-join-repscholten",
+    "https://www.facebook.com/wilkradio/posts/congressman-rob-bresnahan-spoke",
+    "https://www.instagram.com/p/DYnBQnaGu4C",
+    "https://www.instagram.com/reel/DWCQTN8iD1I",
+    "https://www.youtube.com/watch?v=98cgzf3eKa4",
+    "https://www.youtube.com/shorts/ms6GjLd6Czs",    # Shorts ARE video content
+    "https://www.linkedin.com/posts/robert-bresnahan-jr_pa08-activity-7302489435",
+    "https://www.poconorecord.com/picture-gallery/news/politics/2026/04/15/rob-bresnahan-cognetti",
+    "https://www.wvia.org/news/2026-05-19/pa-08-primary-preview",
+    "https://www.nytimes.com/2026/05/01/us/politics/pa-08-poll.html",
+]
+
+
+@pytest.mark.parametrize("url", _LANDING_URLS)
+def test_landing_page_detected(url):
+    assert ingestion._is_non_article_landing_page(SourceItem(source_url=url)) is True
+
+
+@pytest.mark.parametrize("url", _ARTICLE_URLS)
+def test_real_article_not_flagged_as_landing(url):
+    assert ingestion._is_non_article_landing_page(SourceItem(source_url=url)) is False
+
+
+def test_landing_page_none_url_is_false():
+    assert ingestion._is_non_article_landing_page(SourceItem(source_url=None)) is False
+
+
+# --------------------------------------------------------------------------
+# The guard fires INSIDE both promotion paths — a thin landing page whose
+# headline/monitor names the race is refused, while a thin REAL post with the
+# same race-naming headline still gets promoted (the guard must not eat signal).
+# --------------------------------------------------------------------------
+
+def test_headline_promotion_skips_landing_page(db):
+    # Ballotpedia title carries the candidate's full name, so the homonym-safe
+    # headline gate WOULD fire — but it's a directory page, not an article.
+    item = _archived_item(
+        title="Rob Bresnahan Jr. - Ballotpedia",
+        source_name="ballotpedia.org",
+        source_url="https://ballotpedia.org/Rob_Bresnahan_Jr.",
+        raw_text="Rob Bresnahan Jr. is a member of the U.S. House.",  # thin
+    )
+    assert ingestion._headline_names_race_disambiguated(db, item) is True  # would fire
+    assert ingestion._apply_headline_feed_promotion(db, item) is False     # guard blocks
+    assert item.archived_as_irrelevant is True       # untouched
+    assert item.content_category == "irrelevant"     # untouched
+
+
+def test_headline_promotion_still_fires_on_real_post(db):
+    # Control: a thin REAL post (content-path URL) with the same race-naming
+    # headline IS promoted — the guard must not over-block social signal.
+    item = _archived_item(
+        title="I'm proud to join... - Congressman Rob Bresnahan Jr.",
+        source_name="www.facebook.com",
+        source_url="https://www.facebook.com/RepBresnahan/posts/im-proud-to-join",
+        raw_text="I'm proud to join RepScholten to introduce the Housing Act.",  # thin
+    )
+    assert ingestion._is_non_article_landing_page(item) is False
+    assert ingestion._apply_headline_feed_promotion(db, item) is True
+    assert item.archived_as_irrelevant is False
+
+
+def test_provenance_rescue_skips_landing_page(db):
+    # A Ballotpedia page pulled by a candidate-named monitor is provenance-strong
+    # AND thin — the guard must still leave the directory page archived.
+    item = _archived_item(
+        title="Rob Bresnahan Jr. - Ballotpedia",
+        source_name="Google News: Rob Bresnahan",
+        source_url="https://ballotpedia.org/Rob_Bresnahan_Jr.",
+        raw_text="",
+    )
+    assert ingestion._provenance_rescue_label(db, item) == "Rob Bresnahan"  # would qualify
+    assert ingestion._apply_provenance_rescue(db, item) is False            # guard blocks
+    assert item.archived_as_irrelevant is True

@@ -418,6 +418,69 @@ def _is_reference_url(url: Optional[str]) -> bool:
     return False
 
 
+# Pure directory / scorecard / bio hosts: EVERY page is an evergreen listing
+# that merely *names* a participant — never an article. (Overlaps _REFERENCE_
+# DOMAINS, but excludes the social hosts, which need path-aware handling below.)
+_DIRECTORY_HOSTS = (
+    "ballotpedia.org", "votesmart.org", "opensecrets.org", "govtrack.us",
+    "congress.gov", "house.gov", "senate.gov", "fec.gov", "ourcampaigns.com",
+    "congressweb.com", "leadershipnowproject.org", "heritageaction.com",
+)
+# Social platforms host BOTH account-root landing pages (no narrative — exclude)
+# and real posts/videos (narrative signal — KEEP). The split is the URL PATH: a
+# content segment (/posts/, /p/, /watch, /shorts/, …) means a real post.
+_SOCIAL_HOSTS = (
+    "facebook.com", "instagram.com", "twitter.com", "x.com", "threads.net",
+    "tiktok.com", "youtube.com", "linkedin.com",
+)
+_SOCIAL_CONTENT_SEGMENTS = (
+    "/posts/", "/post/", "/p/", "/reel/", "/reels/", "/status/", "/watch",
+    "/shorts/", "/live/", "/embed/", "/clip/", "/video/", "/videos/", "/photo/",
+    "/photos/", "/share/", "/story/", "/permalink/", "/groups/", "/events/",
+)
+
+
+def _is_non_article_landing_page(item: SourceItem) -> bool:
+    """True if the item's URL is a non-article LANDING page — one that merely
+    *names* a race participant rather than carrying narrative content:
+
+      - a directory / scorecard / bio page on a pure-reference host (Ballotpedia,
+        CongressWeb, a Heritage `/scorecard`, a .gov member/contact page, a
+        candidate-bio site), OR
+      - a bare social ACCOUNT ROOT (facebook.com/RepX, instagram.com/repx) — but
+        NOT a real post/video, which carries a content path (/posts/, /p/,
+        /watch, /shorts/, …) and IS narrative signal.
+
+    Used to keep such pages OUT of the headline-feed promotion and provenance
+    rescue: those paths lift thin-body items that name the race, and a
+    profile/directory page names the race without being about it. Config-agnostic
+    (pure URL structure) so it generalises to any race.
+
+    Deliberately does NOT gate on body length: a 10-word troll post is signal, a
+    10-word contact-page title is not — the difference is the URL, not the length
+    (see the sentiment-vs-utility-pages decision, 2026-05-31).
+    """
+    url = item.source_url
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        u = urlparse(url)
+        host = (u.netloc or "").lower()
+        host = host[4:] if host.startswith("www.") else host
+        path = (u.path or "").lower()
+        if any(host == d or host.endswith("." + d) for d in _DIRECTORY_HOSTS):
+            return True
+        if "/scorecard" in path:
+            return True
+        if any(host == s or host.endswith("." + s) for s in _SOCIAL_HOSTS):
+            if not any(seg in path for seg in _SOCIAL_CONTENT_SEGMENTS):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _rss_published_at(published_parsed) -> Optional[datetime]:
     """Convert a feedparser published_parsed struct_time (UTC) to a naive UTC datetime.
 
@@ -680,6 +743,10 @@ def _apply_provenance_rescue(db: Session, item: SourceItem) -> bool:
     """
     if not item.archived_as_irrelevant:
         return False
+    # A directory/scorecard/bio page or a bare social account root names the race
+    # without being an article — don't un-archive it into review.
+    if _is_non_article_landing_page(item):
+        return False
     label = _provenance_rescue_label(db, item)
     if not label:
         return False
@@ -786,6 +853,11 @@ def _apply_headline_feed_promotion(db: Session, item: SourceItem) -> bool:
     title_bonus — it just caps it below the cutoff). If the body is later recovered
     and the article rescored, the real text-derived score replaces this floor.
     """
+    # A directory/scorecard/bio page or a bare social account root names the race
+    # without being an article — never lift one into the feed, even if its
+    # headline names a participant (a Ballotpedia/contact-page title always does).
+    if _is_non_article_landing_page(item):
+        return False
     if not _headline_names_race_disambiguated(db, item):
         return False
 

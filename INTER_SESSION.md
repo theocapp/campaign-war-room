@@ -5,6 +5,36 @@ See CLAUDE.md for the full protocol.
 
 ---
 
+## 2026-05-31 Session: Go-forward landing-page guard — close the "names the race but isn't an article" promotion hole
+
+Continuation of the provenance/recall work below. User: "Do we also need to edit the system so that this doesn't happen with the ingestion of another race or even the future ingestions of this race?" → yes. Then two refinements: "run bigger sampled tests first to make sure it doesn't exclude real articles" and "Also tidy the 2 extras".
+
+### The hole
+Both promotion helpers — `_apply_headline_feed_promotion` (→ feed) and `_apply_provenance_rescue` (→ review queue) — asked *"does this name the race?"* but never *"is this an article?"*. So a Ballotpedia/CongressWeb/Heritage-scorecard/House.gov-contact page or a bare social **account root** (`facebook.com/RepBresnahan`, `instagram.com/mayorpaigecognetti`) gets lifted out of archive purely because its title/monitor names a participant — which a directory/contact/profile title *always* does. This is config-independent: it will recur for any future race or re-ingest, not just PA-08.
+
+### Built (shipped, uncommitted)
+- **ingestion.py `_is_non_article_landing_page(item)`** — a purely **structural URL** predicate (no body-length gate, no PA hard-coding): (a) directory/scorecard/bio HOSTS (`ballotpedia, votesmart, opensecrets, govtrack, congress/house/senate.gov, fec.gov, ourcampaigns, congressweb, leadershipnowproject, heritageaction`) + any `/scorecard` path; (b) a social host (`facebook/instagram/twitter/x/threads/tiktok/youtube/linkedin`) with **no content-path segment** = bare account ROOT → landing. A `/posts/ /p/ /reel/ /watch /shorts/ /live/ …` URL is a real post/video → NOT landing. Honors [[sentiment-vs-utility-pages]]: a thin troll *post* stays signal; only the structurally-content-free root/directory is excluded.
+- **Gated INSIDE both helpers** (early-return False before the race-naming check). Because both helpers already bail on body ≥ `_PROVENANCE_RESCUE_MAX_BODY_CHARS` (300), the guard only ever sees thin items → **tiny blast radius**.
+- **test_provenance_safety_net.py**: +28 tests — parametrized `_LANDING_URLS` (14: ballotpedia, congressweb, heritage `/scorecard`, leadershipnow bio, house.gov/contact, congress.gov member, fb/ig/x/linkedin/youtube account roots) vs `_ARTICLE_URLS` (10: fb & wilkradio `/posts/`, ig `/p/` + `/reel/`, youtube `/watch` + `/shorts/`, linkedin `/posts/`, poconorecord, wvia, nytimes) + 3 integration tests proving the guard blocks a landing page inside *both* promotion paths while still promoting a thin REAL post with the same race-naming headline. **46 provenance/guard tests green.** (2 full-suite collection errors — `test_embed_cache_isolation.py`, `test_global_search.py` — are PRE-EXISTING `ModuleNotFoundError: google.generativeai` via `app.services.embeddings`, unrelated to this additive change.)
+
+### "Run bigger tests first" caught a real false positive — exactly its purpose
+First draft of the content-path segment list had only `/watch` for video. A read-only 3-lens audit over the **live** DB (`/tmp/audit_landing_predicate.py`) found **93 `youtube.com/shorts/` + 1 `/live`** wrongly flagged as account-roots — Shorts/live ARE real campaign video. Added `/shorts/ /live/ /embed/ /clip/`; re-ran → **0 post-path URLs flagged**. Had I wired the guard before the big-sample run, it would have silently eaten ~94 real videos.
+
+### Read-only false-positive proof (3 lenses, all SELECT, no LLM)
+- **LENS 1 — the guard's ACTUAL blast radius** (thin items where promotion would fire AND the guard blocks): exactly **10 rows DB-wide** (of ~24,974 total / ~12,530 thin), every one a genuine directory/scorecard/contact/account-root page. These are the only rows the guard changes.
+- **LENS 2 — fat-body flags**: 276 reference pages match the URL rules but ALL carry ≥300-char bodies → **all inert** (the thin-gated guard never reaches them). Honest nuance: house.gov/congress.gov host BOTH directory pages AND the opponent's press releases — but press releases always arrive fat (~4000 chars), so the guard only ever catches thin contact/listing pages, never a release.
+- **LENS 3 — social root-vs-post**: 392 social items → 13 flagged (all roots) / 379 cleared / **0 post-path URLs wrongly flagged**.
+
+### Cleanup (reversible live writes, user-approved)
+- Re-archived **8** audit-found landing pages already surfacing (prior step) + the **2 extras** this step: id=16 `bresnahan.house.gov/contact` (was arch but `dismissed=False` → tidied) and id=18281 `instagram.com/mayorpaigecognetti` (live IG account ROOT, was `arch=False, sc=70` → archived). Both via the **canonical `review_queue.mark_irrelevant`** helper (not hand-set columns), each with a per-row self-check asserting the REAL `_is_non_article_landing_page` flags it, and its own before-snapshot (`/tmp/cleanup_two_extras.before.json`, distinct from the 8-item `/tmp/cleanup_landing_pages.before.json`). Verified both now out of `_review_queue_query` AND the feed gate.
+
+### Open questions / concerns for review
+- All edits uncommitted (on top of `6818d06`). Commit decision left to user.
+- The guard is deliberately **thin-gated** (lives inside the two thin-only helpers). If a future change ever promotes *fat* items by name, the 276 fat reference pages would become reachable and the guard should be hoisted to the promotion entry point — but per depth-over-breadth, don't add that speculatively.
+- Predicate uses `host[4:] if host.startswith("www.")` (correct prefix strip). The older `_is_reference_url` still uses `lstrip("www.")` (strips a char-set, latent bug) — left untouched as out-of-scope and benign for its current callers; worth a cleanup if anyone touches it.
+
+---
+
 ## 2026-05-31 Session: Feed recall — homepage "recent articles" was silently dropping real PA-08 news
 
 User: the homepage right-rail "recent articles" showed the newest item as 28h old. They produced two genuinely-relevant articles that were missing (NYT "PA-08 2026: Latest Polls", WVIA "Lackluster primary…"). Diagnosed TWO problems: (a) the rail sorts by `published_at ?? created_at`, so freshly-crawled-but-old-published content sinks and a quiet stretch *looks* stale (display, not a bug); (b) a real recall failure — genuinely-relevant recent news is being archived. Approved 3 recall fixes; ordering #2 → #1 → #3. Also two explicit UI/keyword asks (both shipped).
@@ -5689,3 +5719,26 @@ The memo's numbers (0→12, 20→1) are REAL `frame_pulse_counts` deltas and the
 ### Open questions / concerns for review
 - **The provenance rescue is the upstream leak.** It un-archives items *to review* but doesn't normalize `content_category`, which is what created the score≥79/category=irrelevant contradiction this backfill cleaned up. Worth deciding whether `_apply_provenance_rescue` should also normalize category at rescue time, so the contradiction never re-accumulates (the standing headline rule only catches the homonym-safe subset).
 - **Code is uncommitted** — the `ingestion.py` helper edit ships alongside the prior batch (`main.py`, `models.py`, `scheduler.py`, the new index migration `…56afe3d07226`, this file). Awaiting Theo's sign-off before commit.
+
+## 2026-05-31 Session: Briefing v2 — stance hardening (addendum to the two Phase-1/Phase-3 briefing entries above)
+After a ChatGPT second-opinion on the restructured grounded prompt, tightened the CITATION RULES in `briefing_summary._build_grounded_prompt` (prompt text only — no code logic, no schema):
+- Core rule rewritten from "same topic/event" → "EVIDENCE FOR the exact claim," now a two-check gate: (a) TOPIC and (b) STANCE. The STANCE check reuses the quote's existing `[label]` (attack/commitment/endorsement/policy_position/defense) already rendered in the block — an `[attack]` quote may not back a success/support sentence, and vice versa. Closes the "same topic, opposite stance" gap the lexical guardrail can't see.
+- Folded in one compact anti-laundering clause: a quote backs WHAT WAS SAID/DONE, not that the claim is true / voters believe it / coverage rose.
+- Tightened the `(none)` rule to forbid borrowing from the `[OTHER]` bucket too (was only "another frame").
+### Decision a future session must NOT reverse
+**The lexical guardrail (`_citation_supported`) deliberately does NOT do stance.** Word-overlap cannot distinguish "supports farmers" from "failed farmers" (both contain *farmers*); making it judge stance would strip VALID citations (false positives), which is worse than the rare miss. Stance lives in the prompt + the `[label]`, not the code backstop. If tempted to add a deterministic stance-stripper, note that classifying the *sentence's* polarity lexically is exactly as unreliable as the semantic problem it's trying to avoid. Verified the rewrite against the live DB (read-only full-prompt build): labels referenced in the rule all actually appear in the block; 43 briefing tests still green.
+
+## 2026-05-31 Session: Briefing v2 — fix near-zero citations (quote window mismatch)
+### Symptom
+Theo's live memo showed **0 citations**. Not a logic bug — a window mismatch + a numeric-target prompt line.
+### Diagnosis (read-only, against live DB)
+- The memo measures momentum over **this-week-vs-last-week (14d)** but pulled citable quotes from only the **last 7d** (`dashboard.py` `top_claims_for_briefing(db, days=7, limit=15)`).
+- 7d window → **8** citable quotes, all on barely-moving frames; 14d → **100+** (incl. the big movers). The big movers are quote-RICH on their articles (Anti-Corruption 145, Stock Trades 309, Farmers 29) but those articles skew 8–14 days old, so a 7d window forced `(none)` on the lead → memo correctly led uncited → almost nothing left to cite.
+- Contributing: claim extraction last ran **2026-05-29** (batch job, not continuous), so the freshest 2 days of articles have no quotes regardless of window — makes a 7d window especially thin.
+### Fixes (both prompt/route, no schema, no code logic)
+- `dashboard.py:396` → `top_claims_for_briefing(db, days=14, limit=20)`. 14d MATCHES the momentum comparison window (principled, not arbitrary). Verified read-only: the Anti-Corruption lead now carries `[C12]`/`[C20]`, ~6 frames have quotes, Shapiro endorsement surfaces in `[OTHER]`. Quotes 8→20.
+- Reworded the citation-count rule in `_build_grounded_prompt`: dropped the numeric "aim for 2-4 citations" TARGET (a quota invites the "complete the pattern" pressure that caused the original freeze miscite) → behavioral rule: cite when a what-someone-did sentence is genuinely backed by a `[CN]` under that frame; never pad, never chase a count. (Theo's instinct — good one.)
+### Notes for next session
+- The Farmers +12 frame still shows `(none)` at 14d — CORRECT (no real farmer quote exists; stays honest, freeze fix intact). Do not chase it.
+- `[OTHER]` is larger at 14d/limit-20 and carries some tangential national-politics quotes (other races' candidates). Low risk (model leads with frames, cites [OTHER] only for what-they-said), but watch for the memo grabbing an off-race quote. If it becomes noise, tighten the race-allowlist in `briefing_retrieval`, not the window.
+- **Durable fix for freshness:** keep claim extraction running on recent articles. Widening the window is the workaround; if extraction stays frozen, even 14d thins out in ~a week. Separate decision (LLM cost) — flagged to Theo, not acted on.
