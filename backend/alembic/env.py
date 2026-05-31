@@ -7,9 +7,18 @@ Database URL resolution mirrors backend/app/db.py:
 
 So `alembic upgrade head` with no extra config always points at the
 same database the running app uses. To run a migration against a
-different target (e.g. a scratch Postgres) without changing .env:
+different target (e.g. a scratch Postgres) without changing .env, use
+EITHER form:
 
+    alembic -x url=postgresql+psycopg://... upgrade head     # most explicit
     DATABASE_URL=postgresql+psycopg://... alembic upgrade head
+
+NOTE: the root .env is loaded with override=True (so it wins over
+backend/.env), which would otherwise clobber an exported DATABASE_URL.
+We capture the exported value FIRST so the second form above keeps
+working — without that, `DATABASE_URL=...scratch alembic` silently runs
+against whatever .env points at (i.e. the LIVE db). The `-x url=` form is
+immune regardless.
 """
 import os
 import sys
@@ -21,6 +30,11 @@ from sqlalchemy import engine_from_config, pool
 
 _BACKEND = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _BACKEND.parent
+
+# Capture an explicitly-exported DATABASE_URL before load_dotenv(override=True)
+# overwrites it, so `DATABASE_URL=...scratch alembic ...` targets the scratch
+# DB instead of silently falling through to the live .env value.
+_explicit_db_url = os.environ.get("DATABASE_URL")
 
 # Load .env files. Root wins over backend/.env if both define a key —
 # matches main.py's load_dotenv order.
@@ -40,7 +54,7 @@ import app.models  # noqa: E402,F401  — register models with Base
 config = context.config
 
 _cli_url = context.get_x_argument(as_dictionary=True).get("url")
-_env_url = os.environ.get("DATABASE_URL")
+_env_url = _explicit_db_url or os.environ.get("DATABASE_URL")
 _resolved_url = _cli_url or _env_url or f"sqlite:///{DB_PATH}"
 config.set_main_option("sqlalchemy.url", _resolved_url)
 

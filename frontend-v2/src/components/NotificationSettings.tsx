@@ -65,6 +65,7 @@ export function NotificationSettings() {
           />
           <TriggerToggle
             label="Proposed narratives pending"
+            description="When the AI has proposed new narratives waiting to be promoted or dismissed"
             on={settings.triggers.proposed_narratives_pending}
             onChange={v => update(s => ({ ...s, triggers: { ...s.triggers, proposed_narratives_pending: v } }))}
           />

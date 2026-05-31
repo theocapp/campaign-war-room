@@ -183,7 +183,7 @@ class SourceItem(Base):
     district_mentioned = Column(Boolean, default=False)
     priority_issue_mentioned = Column(Boolean, default=False)
     archived_as_irrelevant = Column(Boolean, default=False)
-    story_cluster_id = Column(String, nullable=True)
+    story_cluster_id = Column(String, nullable=True, index=True)
     duplicate_of_source_id = Column(Integer, nullable=True)
     gdelt_themes = Column(Text, nullable=True)  # JSON array of GKG theme strings
     extraction_quality_score = Column(Integer, default=100)
@@ -665,7 +665,7 @@ class NarrativeFrameMention(Base):
     )
     id = Column(Integer, primary_key=True)
     frame_id = Column(Integer, ForeignKey("narrative_frames.id"), nullable=False)
-    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False)
+    source_item_id = Column(Integer, ForeignKey("source_items.id"), nullable=False, index=True)
     confidence = Column(Integer, default=70)
     matched_by = Column(String, default="llm")  # llm | human
     extracted_text = Column(Text, nullable=True)  # specific claim/quote from article for this frame

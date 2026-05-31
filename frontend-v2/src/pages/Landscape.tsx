@@ -1403,6 +1403,7 @@ function EstablishedSidebar({
   onHoverRegion, onHoverNarrative,
   onClickRegion, onClickNarrative, onClickDot, onEditRegion,
   sectionTitle, primaryAction,
+  candidateName, opponentName,
 }: {
   dotData: DotLandscape | null
   regionsForChart: TopicRegionForChart[]
@@ -1422,6 +1423,8 @@ function EstablishedSidebar({
   // the focused narrative's expanded panel.
   sectionTitle?: { title: string; subtitle: string }
   primaryAction?: { label: string; onClick: (frameId: number) => void }
+  candidateName: string
+  opponentName: string
 }) {
   // Hooks MUST come before any early return — React requires consistent
   // hook order across renders. The useMemo was previously after the
@@ -2037,6 +2040,8 @@ export function Landscape() {
             }}
             onClickDot={(did) => setSelectedDotId(prev => prev === did ? null : did)}
             onEditRegion={startEditingRegion}
+            candidateName={candidateName}
+            opponentName={opponentName}
           />
         </div>
       </div>

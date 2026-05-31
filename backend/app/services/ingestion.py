@@ -716,11 +716,12 @@ def _create_and_analyze(db: Session, item: SourceItem) -> SourceItem:
                 for k in (
                     "one_sentence", "framing", "sentiment", "relevance_score",
                     "relevant", "opponent_attacks", "reason",
+                    "verdict", "extracted_claims", "source_credibility",
                 )
             }
             item.structured_extraction = json.dumps(cacheable)
         except Exception:
-            pass
+            logger.debug("structured_extraction cache write failed for item %s", getattr(item, "id", "?"), exc_info=True)
 
         reason = (analysis.get("reason") or "").strip()
         if reason:

@@ -135,7 +135,9 @@ def numbers_mismatch(t1: str | None, t2: str | None) -> bool:
 def _published_close(a: datetime | None, b: datetime | None, days: int = 7) -> bool:
     if not a or not b:
         return True
-    return abs((a - b).days) <= days
+    # .days floors toward zero, so a 7d-12h gap read as 7 — asymmetric at the
+    # boundary. Compare raw seconds so the window is exactly `days` wide.
+    return abs((a - b).total_seconds()) <= days * 86400
 
 
 def is_near_duplicate(candidate: SourceItem, existing: SourceItem) -> bool:

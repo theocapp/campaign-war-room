@@ -5,6 +5,40 @@ See CLAUDE.md for the full protocol.
 
 ---
 
+## 2026-05-31 Session: Full-project review — safe fixes + verify-first triage — ⚠ LIVE DB MIGRATION INCIDENT
+
+User asked for a full review (efficiency / logic / mistakes / cost), then "go through each, verify it's unintentional, verify it won't break anything, then fix it." Shipped the safe fixes; for behavior/cost items, verification mostly showed *intentional* design — held off and surfaced knobs instead of changing them.
+
+### Built (safe, shipped)
+- **DB indexes** (migration `84a1922627dd`, down_revision `2df994cdd1f9`): `ix_source_items_story_cluster_id` + `ix_narrative_frame_mentions_source_item_id`. `index=True` added to both columns in `models.py`. EXPLAIN was a 366ms seq scan on story_cluster_id; now Index Scan.
+- **race_sentiment_sync.py** `_compute_7d_delta`: was ASC `.first()` (returned *oldest* snapshot, not the ~7d-ago one). Now picks the snapshot nearest the 7-days-ago target. Display-only `delta_7d`.
+- **story_clustering.py** `_published_close`: `.days` floors (13.9d→13, asymmetric). Now compares `total_seconds() <= days*86400`.
+- **ingestion.py**: widened `cacheable` structured-extraction fields (verdict/extracted_claims/source_credibility) so the cache write isn't silently lossy; replaced `except: pass` with `logger.debug(exc_info=True)`.
+- **embeddings.py / routes/races.py**: replaced two more silent `except: pass` with logging (races.py `initialize_campaign` now `logger.exception`).
+- **types.ts** `ActivityPoint`: made `total` + bucket fields optional → cleared 15 tsc errors. **NotificationSettings.tsx**: added missing `description` on "Proposed narratives pending" toggle. **Landscape.tsx**: fixed a latent ReferenceError (`EstablishedSidebar` used `candidateName`/`opponentName` out of scope — now threaded as props).
+- **SearchBar.tsx**: added `cancelled`-flag cleanup to kill the stale-result race (mirrors Setup.tsx).
+- **.env.example**: full rewrite from the real code-read var list (~61 vars, grouped, real defaults); fixed the stale "SQLite / migration-in-progress" DB note to reflect Postgres production.
+
+### ⚠ LIVE DB MIGRATION INCIDENT (read this if you touch alembic)
+While creating the index revision file (body still `pass`), **`uvicorn --reload` auto-ran `alembic upgrade head` against LIVE noctua**, stamping it to `84a1922627dd` with **no indexes**. Then my attempt to validate on scratch (`DATABASE_URL=...noctua_scratch alembic ...`) was **silently clobbered by `env.py`'s `load_dotenv(override=True)`** → ran against live again. **Two footguns: (1) editing a revision file triggers a reload that migrates live; (2) an exported `DATABASE_URL` did not win over `.env`.**
+- **Reconciled**: validated the real migration on scratch via `alembic -x url=...noctua_scratch` (up→down→up clean); then created the two indexes on live with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` (additive, non-blocking, reversible). Verified both `indisvalid=t`, version `84a1922627dd`. No data loss.
+- **Root-cause fix**: `env.py` now captures `_explicit_db_url = os.environ.get("DATABASE_URL")` *before* `load_dotenv(override=True)` so `DATABASE_URL=...scratch alembic` targets scratch. Docstring rewritten to document both `-x url=` and `DATABASE_URL=` forms + the override caveat. `-x url=` was always immune; prefer it.
+
+### Verify-first triage (NOT changed — found intentional/reasonable)
+- **Dashboard 60s briefing re-fetch** (Dashboard.tsx:516): hash-cached (`get_or_generate_grounded`) → no LLM call unless inputs change. Liveness feature, not waste. Left as-is.
+- **40-vs-50 relevance threshold** + **momentum velocity normalization**: verified correct/intentional last session.
+- **gpt-4o for briefing** (briefing_summary.py:21-29): documented quality choice, cost-bounded by input-hash cache, overridable via `OPENAI_BRIEFING_MODEL`. Not a bug.
+- **ingest_lock held during LLM-exhaustion backoff** (rss_ingestion.py:119 + llm_provider.py:1054-1068, cap `LLM_EXHAUSTED_MAX_WAIT_SECONDS`=1800): holding the lock during the wait is reasonable backpressure (don't pile concurrent runs onto exhausted providers). Only knob is the 30-min cap.
+- **"auto-rematch double-spend"**: investigated — the two rematch entry points are on *separate* triggers (manual frame CRUD route → debounced `rematch_all`; auto-promote → `rematch_recent` directly). They do **not** stack. Not the bug it looked like.
+- **`_is_llm_scored`** (dashboard.py:166): fragile string heuristic for "is this summary LLM-generated," but display/counting-only and working. Refinement, not a bug.
+
+### Open questions / concerns for review
+- Frontend has 5 independent `setInterval` pollers (NotificationsBell 60s, NotificationsList 60s, Layout 8s + 15s, Dashboard 60s). Consolidation is optional efficiency, not correctness — left alone.
+- Frame-edit (manual CRUD) triggers a **365-day** `rematch_all`. Correct for a definition change, heavy for a cosmetic rename; debounced + lock-guarded + embedding-gated so defensible. Flagged for user, not changed.
+- All edits above are **uncommitted**. Leaving the commit decision to the user.
+
+---
+
 ## 2026-05-31 Session: Outlet monthly_visitors backfill (Tranco-calibrated) — LIVE DB WRITE
 
 ### Built

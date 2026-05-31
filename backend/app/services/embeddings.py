@@ -50,7 +50,7 @@ try:
         if os.path.exists(_p):
             load_dotenv(_p, override=False)
 except Exception:
-    pass
+    logger.debug("embeddings: .env autoload skipped", exc_info=True)
 
 # Suppress Google's deprecation warning at import time — we know.
 import warnings

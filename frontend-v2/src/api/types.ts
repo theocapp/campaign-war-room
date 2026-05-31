@@ -117,13 +117,15 @@ export interface DetailQuote {
 export interface ActivityPoint {
   date: string
   count: number     // total, kept for back-compat with simple sparklines
-  total: number
-  national: number
-  regional: number
-  local: number
-  blog: number
-  social: number
-  unknown: number
+  // Tier breakdown is optional: the activity_30d payload omits these on
+  // legacy/zero-fill points, and all consumers already guard with `?? 0`.
+  total?: number
+  national?: number
+  regional?: number
+  local?: number
+  blog?: number
+  social?: number
+  unknown?: number
 }
 
 // One cluster of candidate-frame staging rows that meets promotion

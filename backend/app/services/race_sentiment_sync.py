@@ -226,7 +226,7 @@ def _compute_7d_delta(
     target = now - timedelta(days=7)
     window_lo = target - timedelta(days=2)
     window_hi = target + timedelta(days=2)
-    snap = (
+    snaps = (
         db.query(RaceSentimentSnapshot)
         .filter(
             RaceSentimentSnapshot.source == source,
@@ -234,11 +234,13 @@ def _compute_7d_delta(
             RaceSentimentSnapshot.captured_at >= window_lo,
             RaceSentimentSnapshot.captured_at <= window_hi,
         )
-        .order_by(RaceSentimentSnapshot.captured_at.asc())
-        .first()
+        .all()
     )
-    if snap is None or snap.candidate_pct is None:
+    if not snaps:
         return None
+    # Closest to the 7-day target, not the earliest in the window. ASC + .first()
+    # returned the oldest edge (~9d), contradicting the "closest to" docstring.
+    snap = min(snaps, key=lambda s: abs((s.captured_at - target).total_seconds()))
     return round(current_pct - snap.candidate_pct, 2)
 
 

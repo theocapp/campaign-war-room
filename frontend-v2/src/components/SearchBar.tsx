@@ -87,6 +87,7 @@ export function SearchBar() {
       setLiveOutlets([])
       return
     }
+    let cancelled = false
     setSearching(true)
     const timer = setTimeout(() => {
       Promise.allSettled([
@@ -95,13 +96,16 @@ export function SearchBar() {
         api.searchQuotes(term, 5),
         api.searchOutlets(term, 5),
       ]).then(([articles, entities, quotes, outlets]) => {
+        // A superseded keystroke's batch can resolve out of order; the
+        // cleanup flag keeps it from overwriting the latest results.
+        if (cancelled) return
         setLiveArticles(articles.status === 'fulfilled' ? articles.value : [])
         setLiveEntities(entities.status === 'fulfilled' ? entities.value : [])
         setLiveQuotes(quotes.status === 'fulfilled' ? quotes.value : [])
         setLiveOutlets(outlets.status === 'fulfilled' ? outlets.value : [])
-      }).finally(() => setSearching(false))
+      }).finally(() => { if (!cancelled) setSearching(false) })
     }, 300)
-    return () => clearTimeout(timer)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [q])
 
   // Close dropdown on outside click

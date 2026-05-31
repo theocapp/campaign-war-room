@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,8 @@ from app.services.race_directory import (
     list_directory_races,
     select_directory_race,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -64,7 +68,7 @@ def select_race(
         raw = initialize_campaign(db)
         init_result = CampaignInitializeResult(**raw)
     except Exception:
-        pass
+        logger.exception("initialize_campaign failed after selecting race %s", race_id)
 
     return RaceSelectResult(
         race=race,
